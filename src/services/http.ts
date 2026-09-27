@@ -123,7 +123,8 @@ export async function requestJson(path: string, options: HttpRequestOptions = {}
       method,
       headers: {
         accept: 'application/json',
-        ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+        // 契约 4.0：Content-Type: application/json（charset=utf-8）
+        ...(body === undefined ? {} : { 'content-type': 'application/json;charset=utf-8' }),
         ...headers,
       },
       body: body === undefined ? undefined : JSON.stringify(body),

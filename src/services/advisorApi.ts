@@ -36,7 +36,23 @@ import {
 /** 契约 4.0：VITE_API_BASE_URL 不含 /api，由适配层补全 */
 export const ADVISOR_RECOMMENDATIONS_PATH = '/api/advisor/recommendations'
 
+/** 契约 4.6：建议最多 3 条。服务端已校验，前端再兜一次，避免异常响应污染列表 */
+export const MAX_SUGGESTIONS = 3
+
+/** 契约 4.0：可重试的失败最多自动重试 1 次，退避 1 秒 */
+const RETRY_DELAY_MS = 1_000
+
 /* ---------------------------------------------------------------- 工具 */
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms)
+  })
+}
+
+function isAborted(signal: AbortSignal | undefined): boolean {
+  return signal !== undefined && signal.aborted
+}
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -260,13 +276,35 @@ export interface FetchRecommendationsOptions {
   signal?: AbortSignal
   /** 注入 fetch，便于测试 */
   fetchImpl?: typeof fetch
+  /** 是否允许自动重试 1 次，默认 true（契约 4.0） */
+  retry?: boolean
 }
 
 /**
  * 请求后端生成建议。
  * 不抛异常：失败一律以 `{ ok: false, error }` 返回，错误里保留契约字段。
+ *
+ * 契约 4.0：可重试的失败（`retryable: true`）在**适配层**自动重试 1 次，退避 1 秒。
+ * 已经被取消的请求（切换项目、发起新请求）不重试。
  */
 export async function fetchRecommendations(
+  request: AdvisorRecommendationsRequest,
+  options: FetchRecommendationsOptions = {},
+): Promise<AdvisorApiResult> {
+  const retry = options.retry ?? true
+  let result = await requestOnce(request, options)
+
+  if (!result.ok && retry && result.error.retryable && !isAborted(options.signal)) {
+    await delay(RETRY_DELAY_MS)
+    if (!isAborted(options.signal)) {
+      result = await requestOnce(request, options)
+    }
+  }
+
+  return result
+}
+
+async function requestOnce(
   request: AdvisorRecommendationsRequest,
   options: FetchRecommendationsOptions = {},
 ): Promise<AdvisorApiResult> {
@@ -315,7 +353,7 @@ export async function fetchRecommendations(
 export function toRecommendations(success: AdvisorRecommendationsSuccess): Recommendation[] {
   const generatedAt = new Date().toISOString()
 
-  return success.suggestions.map((suggestion, index) => ({
+  return success.suggestions.slice(0, MAX_SUGGESTIONS).map((suggestion, index) => ({
     title: suggestion.title,
     whyNow: suggestion.whyNow,
     doneCriteria: suggestion.doneCriteria,
