@@ -1,6 +1,6 @@
 # 智慧课程平台 · 前后端接口契约（首轮 MVP）
 
-> 文档修订：v1.2（接口 `contractVersion` 仍为 `"1.0"`）
+> 文档修订：v1.3（接口 `contractVersion` 仍为 `"1.0"`）
 > 编制日期：2026-09-25
 > owner：负责人（后端）
 > 地位：**本文件是首轮 MVP 前后端唯一契约。** 三位成员不得自行新增字段或创建第二套 DTO。
@@ -181,7 +181,7 @@ type ActionResult<T> =
 | `createProject(input)` | `{ topicId: string \| null; customName?: string; members: number; manualName?: string \| null; dataName?: string \| null }` | `{ projectId; projectRevision }` | 否 |
 | `selectProject(projectId)` | `string` | `{ projectId; projectRevision }` | 否 |
 | `claimTask(input)` | `{ taskId: string } \| { draft: NewTaskDraft }`（二者互斥） | `{ taskId; status: 'doing'; projectRevision }` | 否 |
-| `submitEvidence(input)` | `{ submissionId; taskId: string \| null; didWhat; foundWhat?; stillUnsure?; attachmentName?; complete: boolean }` | `{ evidenceId; submissionId; deduplicated: boolean; doubtId: string \| null; taskStatus: 'doing' \| 'done' \| null; projectRevision }` | 否 |
+| `submitEvidence(input)` | `{ submissionId; taskId: string \| null; didWhat; foundWhat?; stillUnsure?; attachmentName?; complete: boolean }` | `{ evidenceId; submissionId; deduplicated: boolean; doubtId: string \| null; taskStatus: 'doing' \| 'done' \| null; projectRevision }` | **间接访问**：证据成功保存后自动触发 `refreshRecommendations`；建议请求失败不影响证据结果 |
 | `resolveDoubt(doubtId)` | `string` | `{ doubtId; projectRevision }` | 否 |
 | `refreshRecommendations(options?)` | `{ forceRefresh?: boolean }` | `{ source; suggestions: Recommendation[]; cached: boolean; fallbackReason: string \| null; requestId: string \| null }` | **是** |
 
@@ -199,7 +199,8 @@ type ActionResult<T> =
 
 1. 传 `draft` 时由**前端**生成 `taskId`，任务直接以 `doing` 落库（不经过 `todo`），并 `projectRevision + 1`；
 2. 传 `taskId` 时任务必须存在且不能是 `done`，否则返回 `NOT_FOUND` 或 `TASK_NOT_CLAIMABLE`；
-3. 两种入参不得同时出现，同时出现按 `INVALID_INPUT` 处理。
+3. 两种入参不得同时出现，同时出现按 `INVALID_INPUT` 处理；
+4. 同一项目中，字段完全相同的 `draft` 重复提交必须幂等：返回同一个 `taskId`，不得新增第二条任务或再次递增 `projectRevision`。实现可使用规范化后的 draft 内容生成稳定键；不同 draft 可以生成不同任务。
 
 三条动作语义（必须互相独立，见首轮任务文档 4.1）：
 
@@ -217,7 +218,7 @@ type ActionResult<T> =
 | `PROJECT_MISMATCH` | id 属于另一个项目 | 不提示用户，清理并重新加载 |
 | `INVALID_INPUT` | 必填字段为空、超出长度上限 | 高亮出错的字段 |
 | `TASK_NOT_CLAIMABLE` | 对 `done` 任务再次认领 | 提示"该任务已完成" |
-| `ALREADY_RESOLVED` | 重复解决同一疑问 | 静默成功语义（不报错、不改状态） |
+| `ALREADY_RESOLVED` | 预留；当前 `resolveDoubt` 重复调用直接返回 `ok: true`，不改状态、不递增版本 | 不作为失败处理 |
 | `STORAGE_FULL` | localStorage 写入失败 | 提示"本地存储已满"，**保留表单内容** |
 | `NETWORK_ERROR` | 只由 `refreshRecommendations` 返回：未收到契约定义的 HTTP 响应 | 切到 `local-rule`，见 5.1 |
 
@@ -234,7 +235,7 @@ type ActionResult<T> =
 | Method / 头 | `POST`，`Content-Type: application/json`（`charset=utf-8`） |
 | 鉴权 | MVP 无账号，**不带** Cookie、不带自定义 token；当前部署使用生产来源白名单，IP 限流暂未启用 |
 | 请求体上限 | 256 KB，超出返回 400 `INVALID_INPUT` |
-| 连接超时 | 适配层 20 秒；服务端模型调用超时 20 秒（两者对齐，见 7.5） |
+| 连接超时 | 当前前端适配层为 20 秒；服务端 provider 为 20 秒，服务层安全网为 25 秒。目标前端单次请求为 30 秒，见 7.5 的待修正项 |
 | 重试 | 适配层最多自动重试 1 次，仅限 `retryable: true` 的失败，退避 1 秒 |
 
 ### 4.1 请求字段
@@ -515,21 +516,23 @@ HTTP 状态码见第 6 节。响应体结构固定，**不含** `suggestions`。
 
 **服务端**：MVP 无项目持久化，服务端**不知道**当前真实 `projectRevision`，因此只做回显，**不返回** `STALE_REVISION`。等进入服务端持久化阶段（阶段 5）再启用该码。
 
-**前端**：收到响应后依次校验，任一不通过就整份丢弃，不写入 store、不改变 loading：
+**前端**：收到响应后依次校验，任一不通过就整份丢弃，不写入建议数据：
 
 | 顺序 | 条件 | 处理 |
 | --- | --- | --- |
 | 1 | `response.requestId !== 本次请求的 requestId` | 丢弃（视为串包，记日志） |
 | 2 | `response.projectId !== 当前项目 projectId` | 丢弃（用户已切项目） |
-| 3 | `response.projectRevision !== 本次请求发出时的 projectRevision` | 丢弃（项目已在新响应之前发生了变化） |
+| 3 | 响应版本不等于本次请求版本，或当前项目版本已不同于请求发出时 | 丢弃（响应串包或项目状态已变化） |
 | 4 | 期间又发起过新的 `refreshRecommendations` | 丢弃（只保留最后一次，建议用 `AbortController` 取消前一次） |
 | 5 | 用户已离开工作台或进入创建页 | 丢弃 |
 
 补充约定：
 
-1. 丢弃时**不得**把 `aiStatus` 置回 `idle`；状态由最新一次请求负责；
-2. `projectRevision` 只在本地写入成功后 +1，因此第 3 条校验天然排除了"请求发出后用户又提交了证据"的结果；
-3. 通过校验后写入 store 的 `recommendations` 必须整体替换，不是追加（避免同一轮出现两批建议）。
+1. 过期响应不能覆盖当前项目的 `suggestions`、`aiError`、任务、证据、疑问或 `projectRevision`；
+2. 如果期间已有更新的 `refreshRecommendations`，由更新的请求负责 `loading` 和最终状态，旧请求只能静默结束；
+3. 如果当前项目没有更新的有效请求接管（例如认领任务后版本变化，或服务端回显与本次请求不符），旧请求必须结束，当前项目回到可重试的 `idle`，不得留下没有在途请求却永久 `loading` 的状态；
+4. `projectRevision` 只在本地写入成功后 +1，因此第 3 条校验天然排除了"请求发出后用户又提交了证据"的旧响应；提交证据本身会在保存后自动发起新建议请求；
+5. 通过校验后写入 store 的 `recommendations` 必须整体替换，不是追加（避免同一轮出现两批建议）。
 
 ---
 
@@ -547,7 +550,7 @@ HTTP 状态码见第 6 节。响应体结构固定，**不含** `suggestions`。
 
 理由：
 
-1. 服务端兜底能保证引用 ID 合法（依据必须来自本次请求），这是前端做不到的；
+1. 服务端在输出阶段校验引用 ID；前端掌握本次请求快照，收到响应后也能校验引用 ID，并防御残缺或错误响应；
 2. 前端兜底能覆盖"后端整个不可用"的情况，而验收要求"API 失败时证据不丢且显示 fallback"；
 3. 两层**内容不共享文件**：后端的兜底规则写在 `server/` 内，只依赖请求体；前端的 `src/data/mvpFallbacks.ts`（吴佳璐）只被前端使用。服务端不导入 `src/` 下任何文件。
 
@@ -556,9 +559,9 @@ HTTP 状态码见第 6 节。响应体结构固定，**不含** `suggestions`。
 **这是两个独立动作，不是一个原子操作。**
 
 ```text
-submitEvidence()  → 先落 localStorage，返回 ok
+submitEvidence()  → 先落 localStorage，证据写入结果不因建议失败而变成失败
         ↓ 成功后
-refreshRecommendations()  → 网络请求，允许失败
+refreshRecommendations()  → 网络请求，允许失败（submitEvidence 内部自动触发）
 ```
 
 | 不变量 | 说明 |
@@ -578,7 +581,7 @@ refreshRecommendations()  → 网络请求，允许失败
 
 | 状态 | 何时进入 | 页面表现 |
 | --- | --- | --- |
-| `idle` | 初始、切换项目后 | 显示"点击获取下一步建议" |
+| `idle` | 初始、切换项目后，或旧请求失效且无新请求接管 | 显示"点击获取下一步建议"；允许重新请求 |
 | `loading` | 请求发出 | 骨架或转圈；**禁止**在此期间重复点击触发并发请求 |
 | `model` | `source: 'model'` | 显示 1～3 条建议与依据（可展开看到依据的证据/疑问原文） |
 | `fallback` | `source: 'fallback'` | 同上，另加一条"本次使用规则结果（原因：…）" |
@@ -589,8 +592,8 @@ refreshRecommendations()  → 网络请求，允许失败
 
 1. `existingTaskId` 非空 → 建议卡上的主按钮是「认领这一步」（调用 `claimTask`）；
 2. `existingTaskId` 为 `null` → 属于**新任务候选**：MVP 不自动创建任务，按钮文案是「就按这个做」，点击后调用 `claimTask({ draft })`，由前端生成任务并直接置为 `doing`，`projectRevision + 1`；
-3. 已经 `done` 的任务不得出现在建议里（服务端保证，前端不需要再过滤）；
-4. 同一建议重复点击只产生一次任务（用 `id` 去重）。
+3. 已经 `done` 的任务不得出现在建议里；服务端负责过滤，前端按本次请求快照再核验一次；
+4. 页面用建议 `id` 防止同一张卡重复点击；store 还必须按第 3.2 条对完全相同的 draft 幂等，不能只依赖页面状态。
 
 ---
 
@@ -613,13 +616,13 @@ refreshRecommendations()  → 网络请求，允许失败
 - `false` 用于确定性失败（输入问题、配置缺失）；
 - `retryable: true` 不代表前端必须无限重试，适配层上限是 1 次。
 
-### 6.2 保留错误码（本轮**不会**返回，前端可先留分支）
+### 6.2 特殊与预留错误码
 
-| code | 计划 HTTP | 用途 |
+| code | HTTP | 用途 |
 | --- | --- | --- |
-| `STALE_REVISION` | 409 | 服务端开始保存项目状态后，`projectRevision` 落后于服务端时返回 |
-| `INTERNAL` | 500 | 服务端未预期异常，`message` 不含堆栈与密钥 |
-| `UNAUTHORIZED` | 401 | 引入账号体系后 |
+| `INTERNAL` | 500 | **当前可能返回**：服务端未预期异常，`message` 不含堆栈与密钥；前端按契约失败处理并尝试本地规则 |
+| `STALE_REVISION` | 409（预留） | 服务端开始保存项目状态后，`projectRevision` 落后于服务端时返回；MVP 不返回 |
+| `UNAUTHORIZED` | 401（预留） | 引入账号体系后；MVP 不返回 |
 
 ### 6.3 `GET /health`
 
@@ -689,9 +692,11 @@ GET /health
 
 | 层 | 值 | 说明 |
 | --- | --- | --- |
-| 前端适配层 | 20 秒 | 超时按 `NETWORK_ERROR` 处理 → `local-rule` |
-| 服务端模型调用 | 20 秒 | 超时 → 服务端规则兜底（`fallbackReason: MODEL_TIMEOUT`） |
-| 反向代理 / Cloudflare | 需 ≥ 30 秒 | 若代理早于服务端超时断开，前端将收到 5xx 而非契约响应 |
+| 前端适配层（当前实现） | 20 秒 | 超时按 `NETWORK_ERROR` 处理 → `local-rule` |
+| 服务端 provider | 20 秒 | provider 超时 → 服务端规则兜底（`fallbackReason: MODEL_TIMEOUT`） |
+| 服务层安全网（当前实现） | 25 秒 | 仅兜住 provider 未遵守超时的异常情况 |
+| 目标前端单次请求 | 30 秒，待实现 | 比服务层安全网多 5 秒，给服务端规则兜底和响应传输留时间；当前 20 秒可能先触发 `local-rule`，收不到服务端 `fallback` |
+| 反向代理 / Cloudflare | 至少 35 秒，待核验 | 代理早于服务端结束会导致前端收到网络/5xx，而不是契约响应；可重试时前端最多发两次请求，每次各自计时 |
 
 ---
 
@@ -759,7 +764,7 @@ GET /health
 | 14 | 未规定 `evidence` / `doubts` 的发送范围 | `tasks` 发全部（含已完成）；`evidence` 发最近 30 条；`doubts` 只发 `open` | 不发已完成任务，服务端无法执行"已完成任务不得再推荐"；已解决疑问不参与判断 |
 | 15 | `claimTask(taskId)` 只能认领已有任务 | 入参扩为 `{ taskId } \| { draft: NewTaskDraft }` | 建议里存在"新任务候选"（`existingTaskId: null`），而约定的 6 个 action 中没有创建任务的入口。不新增第 7 个 action（会破坏"雍蕾只调这些 action"的约定），也不允许组件自己造任务 |
 
-**前端迁移状态（2026-09-28）**：上述旧模型差异已在 `main` 的 `src/types/platform.ts`、`src/stores/workbench.ts`、`src/stores/persistence.ts` 和 `src/domain/**` 中处理。结构化任务与证据使用稳定 ID 和 ISO 时间；认领不改变完成比例；`submitEvidence` 使用 `submissionId` 幂等键；公开 action 返回 `ActionResult<T>`。为兼容旧页面，部分 action 仍接受旧入参并在内部转换；新调用方应使用本契约规定的 ID 与结构化入参。前端业务测试仍待补充，合并代码不等于全部验收完成。
+**前端迁移状态（2026-09-28）**：上述旧模型差异已在 `main` 的 `src/types/platform.ts`、`src/stores/workbench.ts`、`src/stores/persistence.ts` 和 `src/domain/**` 中处理。结构化任务与证据使用稳定 ID 和 ISO 时间；认领不改变完成比例；`submitEvidence` 使用 `submissionId` 幂等键；公开 action 返回 `ActionResult<T>`。为兼容旧页面，部分 action 仍接受旧入参并在内部转换；新调用方应使用本契约规定的 ID 与结构化入参。前端环境与业务测试现已合入 `main`，当前验收仍发现 draft 幂等和过期响应状态收尾问题，修复后需重新运行完整验收。
 
 ---
 
@@ -784,3 +789,4 @@ GET /health
 | v1.0 | 2026-09-25 | 首版：确定建议接口、store action、最小字段、错误码、失败分层、扩展位 | 负责人（后端） |
 | v1.1 | 2026-09-25 | 同步已实现的健康检查、生产域名、CORS、缓存现状、ID 形态和线上验收状态；接口版本仍为 1.0 | 负责人（后端） |
 | v1.2 | 2026-09-28 | 更新前端结构化状态迁移的实现说明；请求与响应字段及接口版本不变 | 负责人（后端） |
+| v1.3 | 2026-09-28 | 明确过期响应状态收尾、draft 幂等责任、证据提交后的网络调用及超时层级；接口版本不变 | 负责人（后端） |

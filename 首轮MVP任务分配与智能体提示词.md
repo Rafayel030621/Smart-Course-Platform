@@ -6,7 +6,7 @@
 > 后端全部由负责人完成。其他三位成员不修改 `server/**`。  
 > 本文是发给新智能体的交接文档。每位成员可以自行编写自己的智能体提示词，但必须先阅读本文件并遵守文件边界和接口契约。
 
-> 进度说明（2026-09-28）：本文的分工与验收标准继续有效；第 2 节的首次建分支流程是启动阶段的历史步骤。后端建议接口、CORS、前端结构化状态与持久化已合入 `main`；前端 Vitest 环境已在 `4271d0c` 合入。`tests/domain/**`、`tests/stores/**`、`tests/services/**` 的业务测试仍待李焰彬补充，不能把环境自检当作业务验收。
+> 进度说明（2026-09-28）：本文的分工与验收标准继续有效；第 2 节的首次建分支流程是启动阶段的历史步骤。后端建议接口、CORS、前端结构化状态与持久化已合入 `main`；前端 Vitest 环境已在 `4271d0c` 合入，李焰彬的业务测试也已合入。本地前端测试 187 条通过；浏览器集成验收仍发现过期建议使页面卡在 `loading`、相同 draft 重复认领创建两个任务，以及新任务候选按钮尚未接线。修复要求以 [接口契约](docs/contracts.md) v1.3 为准，测试通过不等于这些路径已验收。
 
 ## 1. 本轮最终要实现什么
 
@@ -144,7 +144,7 @@ git merge origin/main
 ```ts
 createProject(input)
 selectProject(projectId)
-claimTask(taskId)
+claimTask({ taskId }) / claimTask({ draft })
 submitEvidence(input)
 resolveDoubt(doubtId)
 refreshRecommendations()
