@@ -1,6 +1,6 @@
 # 后端服务：配置、启动、健康检查与建议接口（首轮 MVP）
 
-> 编制日期：2026-09-25（最近更新：接入真实模型 provider）
+> 编制日期：2026-09-25（2026-09-28 同步 CORS 与测试现状）
 > 对应契约：`docs/contracts.md`（第 4 节建议接口、第 6 节错误码、第 7 节域名与端口）
 > 当前已实现：`GET /health`、`POST /api/advisor/recommendations`。
 > **运行时默认使用真实模型 provider（OpenAI 兼容）**；mock provider 只在 `ADVISOR_PROVIDER=mock`（本地联调）或测试注入时使用。
@@ -15,7 +15,7 @@
 | npm | ≥ 10 | 10.9.2 |
 | 网络 | 首次 `npm install` 需要能访问 npm registry；调用真实模型需要能访问模型网关 | — |
 
-后端是**独立**的 npm 包：`server/` 有自己的 `package.json`、`node_modules` 和 `tsconfig.json`，与仓库根目录的前端依赖互不影响。根目录的 `package.json`、`vite.config.ts`、`src/**` 未被改动。
+后端是**独立**的 npm 包：`server/` 有自己的 `package.json`、`node_modules` 和 `tsconfig.json`，与仓库根目录的前端依赖互不影响。根目录现已配置前端 Vitest；它不参与后端的 `npm test`。
 
 **不使用任何模型 SDK**：调用真实模型用的是 Node 22 原生 `fetch` + `AbortController`。
 
@@ -170,7 +170,7 @@ npm test
 
 `npm test` 先编译再运行测试，使用 Node 内置的 `node:test` + `node:assert`，**没有引入 jest / vitest**。HTTP 测试用随机空闲端口（`port: 0`），不占用 8080。
 
-当前结果：**83 条用例，全部通过**。
+2026-09-28 本地结果：**86 条用例，全部通过**。
 
 **测试不会调用真实模型**：
 
@@ -184,6 +184,7 @@ npm test
 | `test/advisor-recommendations.test.ts` | 建议接口的 HTTP 行为：请求校验、错误响应、引用清理、兜底、405/404 |
 | `test/advisor-service.test.ts` | 校验层与服务层：不补默认值、截断与丢弃规则、超时/失败映射、兜底失败 |
 | `test/advisor-model-provider.test.ts` | 真实 provider：请求形态、响应解析、各类失败映射、超时中断、不泄露密钥 |
+| `test/cors.test.ts` | 生产来源的 OPTIONS/POST CORS 头，以及其他来源的拒绝行为 |
 
 ## 6. 健康检查
 

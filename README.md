@@ -29,16 +29,21 @@ npm install
 npm run dev        # 打开 http://localhost:5173/
 npm run build      # 产物到 dist/
 npm run typecheck
+npm test           # 前端 Vitest 测试（当前含环境自检；业务测试正在补充）
 ```
 
 Node 20.19+ 或 22.12+（Vite 8 的要求）。
+
+建议接口由独立的 `server/` 服务提供。启动方式和模型环境变量见 [后端配置说明](docs/mvp-backend-setup.md)；前端通过 `VITE_API_BASE_URL` 指向 API 域名（不含 `/api`）。后端使用自己的 `cd server && npm test`，与根目录的前端测试分开运行。
 
 ## 数据
 
 - 内置 **9 套课程题目模板**（`src/data/topics.ts`），每套含 5 个里程碑、启动期疑问、
   AI 顾问的 3 步建议、3 条论文检索方向。创建项目时按题目实例化，也可自定义题目。
-- 项目数据驻留内存，**刷新即重置**；尚无后端与持久化。提交证据会写入「最近证据」时间线，
-  「还有什么不确定」会进入左侧「未解决的疑问」，本周活跃度 +1。
+- 项目、任务、证据、疑问和当前项目保存在浏览器 `localStorage`，刷新后可恢复；目前没有服务端项目数据持久化，换浏览器或设备不会同步这些数据。
+- 提交证据会写入「最近证据」时间线；「还有什么不确定」会生成未解决疑问。证据保存成功后，前端请求建议接口；模型不可用时按服务端或本地规则兜底。
+
+接口字段与错误码以 [接口契约](docs/contracts.md) 为准；本轮文件分工见 [MVP 任务交接](首轮MVP任务分配与智能体提示词.md)。
 
 ## 目录
 
@@ -50,9 +55,16 @@ src/
 ├── components/ProjectMindMap.vue      项目地图（SVG：里程碑 / 项目 / 当前步骤）
 ├── components/PaperDirectionCard.vue  论文检索方向卡
 ├── stores/workbench.ts                多项目 / 材料 / 证据 / 问答 / 论文推荐
+├── stores/persistence.ts              项目状态的 localStorage 保存与迁移
+├── services/http.ts                    浏览器 HTTP 封装
+├── services/advisorApi.ts              建议接口适配
+├── domain/                             进度、活动与建议领域逻辑
 ├── data/topics.ts                     9 套题目模板
 ├── types/platform.ts                  领域类型
 └── styles/platform.css                界面样式（与设计稿同源）
+
+server/                                 独立的后端服务与测试
+tests/                                  前端 Vitest 测试
 ```
 
 ## 说明

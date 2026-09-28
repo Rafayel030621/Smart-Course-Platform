@@ -1,6 +1,6 @@
 # 智慧课程平台 · 前后端接口契约（首轮 MVP）
 
-> 文档修订：v1.1（接口 `contractVersion` 仍为 `"1.0"`）
+> 文档修订：v1.2（接口 `contractVersion` 仍为 `"1.0"`）
 > 编制日期：2026-09-25
 > owner：负责人（后端）
 > 地位：**本文件是首轮 MVP 前后端唯一契约。** 三位成员不得自行新增字段或创建第二套 DTO。
@@ -153,7 +153,7 @@ Recommendation 有两个形态，**字段名完全一致，只是前端多两个
 | 用途 | ① 丢弃过期响应；② 服务端缓存键；③ 将来服务端持久化后判断冲突 |
 | 不可变性 | 递增，不重用，回退不还原 |
 
-> **兼容实现说明（当前 main）**：现有旧项目模型暂时用影响建议的状态摘要生成稳定正整数，前端按相等性判断响应是否过期，并不把它当作连续计数。迁移到结构化任务模型后，改为按本表递增；调用方只能依赖“同一状态相等、状态变化不相等”，不能依赖具体数值大小。
+> **当前实现（2026-09-28）**：`Project.projectRevision` 已是项目字段中的递增整数；前端在成功写入项目状态时递增，重复 `submissionId` 命中时不递增。旧版项目由 `src/stores/persistence.ts` 迁移到当前结构。
 
 
 ---
@@ -759,15 +759,7 @@ GET /health
 | 14 | 未规定 `evidence` / `doubts` 的发送范围 | `tasks` 发全部（含已完成）；`evidence` 发最近 30 条；`doubts` 只发 `open` | 不发已完成任务，服务端无法执行"已完成任务不得再推荐"；已解决疑问不参与判断 |
 | 15 | `claimTask(taskId)` 只能认领已有任务 | 入参扩为 `{ taskId } \| { draft: NewTaskDraft }` | 建议里存在"新任务候选"（`existingTaskId: null`），而约定的 6 个 action 中没有创建任务的入口。不新增第 7 个 action（会破坏"雍蕾只调这些 action"的约定），也不允许组件自己造任务 |
 
-与**实现现状**（不是草案）的差异，供李焰彬迁移时参考：
-
-| 现状 | 契约要求 |
-| --- | --- |
-| `selectProject(index)`、`claimStep(stepIndex)`、`resolveDoubt(index)` 用数组下标 | 全部改为 ID 参数 |
-| `submitEvidence` 入参是 `{ stepLabel, didWhat, foundWhat, solved, unsure, attachment }` | 改为 `{ submissionId, taskId, didWhat, foundWhat?, stillUnsure?, attachmentName?, complete }` |
-| 认领步骤会 `cur.p += 25` | 认领**不得**改变进度；进度只由已完成任务推导 |
-| `EvidenceItem.time` 是展示字符串 | 改为 ISO 时间字段，展示在组件里格式化 |
-| 无任何 action 返回值（只弹 toast） | 全部返回 `ActionResult<T>` |
+**前端迁移状态（2026-09-28）**：上述旧模型差异已在 `main` 的 `src/types/platform.ts`、`src/stores/workbench.ts`、`src/stores/persistence.ts` 和 `src/domain/**` 中处理。结构化任务与证据使用稳定 ID 和 ISO 时间；认领不改变完成比例；`submitEvidence` 使用 `submissionId` 幂等键；公开 action 返回 `ActionResult<T>`。为兼容旧页面，部分 action 仍接受旧入参并在内部转换；新调用方应使用本契约规定的 ID 与结构化入参。前端业务测试仍待补充，合并代码不等于全部验收完成。
 
 ---
 
@@ -791,3 +783,4 @@ GET /health
 | --- | --- | --- | --- |
 | v1.0 | 2026-09-25 | 首版：确定建议接口、store action、最小字段、错误码、失败分层、扩展位 | 负责人（后端） |
 | v1.1 | 2026-09-25 | 同步已实现的健康检查、生产域名、CORS、缓存现状、ID 形态和线上验收状态；接口版本仍为 1.0 | 负责人（后端） |
+| v1.2 | 2026-09-28 | 更新前端结构化状态迁移的实现说明；请求与响应字段及接口版本不变 | 负责人（后端） |
