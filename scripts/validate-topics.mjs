@@ -19,11 +19,13 @@
  *     以及在没有开发环境的机器上跑。两边都改数据时都要过。
  *
  * 运行前提：Node ≥ 22.6（需要 TypeScript 类型擦除来直接读取 `.ts` 数据文件）。
- *   Node ≥ 22.18 开箱可用；22.6–22.17 需要加 `--experimental-strip-types`。
+ *   Node ≥ 22.18 开箱可用；22.6–22.17 会在检测到报错后**自动**带
+ *   `--experimental-strip-types` 旗标重启一次，无需手动加参数。
  *
  * 上限取自 `docs/contracts.md` §2.2 / §4.1 与 `docs/ai/prompt-spec.md` §3.1。
  */
 
+import { spawnSync } from 'node:child_process'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
@@ -126,8 +128,24 @@ async function loadTopics() {
   try {
     return await import(url.href)
   } catch (cause) {
+    const message = cause && cause.message ? cause.message : String(cause)
+
+    // Node 22.6–22.17 不认识 .ts 扩展名：自动带上旗标重启一次本脚本。
+    // 重启后的进程 execArgv 里已含旗标，若仍失败就不会再递归。
+    const alreadyFlagged = process.execArgv.some((arg) =>
+      arg.includes('experimental-strip-types'),
+    )
+    if (!alreadyFlagged && /Unknown file extension|\.ts/i.test(message)) {
+      const retry = spawnSync(
+        process.execPath,
+        ['--experimental-strip-types', ...process.argv.slice(1)],
+        { stdio: 'inherit' },
+      )
+      process.exit(retry.status ?? 1)
+    }
+
     console.error(`[ERROR] 无法读取 ${url.href}`)
-    console.error(`        原因：${cause && cause.message ? cause.message : String(cause)}`)
+    console.error(`        原因：${message}`)
     console.error('        本脚本用 Node 的类型擦除直接 import .ts 数据文件，需要 Node >= 22.6。')
     console.error('        Node 22.6–22.17 请这样运行：')
     console.error('          node --experimental-strip-types scripts/validate-topics.mjs')
