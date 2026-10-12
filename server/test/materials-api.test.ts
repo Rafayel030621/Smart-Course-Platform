@@ -33,14 +33,7 @@ const SUCCESS_KEYS = [
   'segments',
 ]
 
-const FAILURE_KEYS = [
-  'code',
-  'contractVersion',
-  'message',
-  'requestId',
-  'retryAfterSeconds',
-  'retryable',
-]
+const FAILURE_KEYS = ['code', 'contractVersion', 'message', 'requestId', 'retryAfterSeconds', 'retryable']
 
 function base64Of(text: string): string {
   return Buffer.from(text, 'utf8').toString('base64')
@@ -55,7 +48,9 @@ function uploadBody(overrides: Record<string, unknown> = {}): Record<string, unk
     materialId: 'mat_9b1e7c2f',
     version: 1,
     name: '实验手册.md',
-    contentBase64: base64Of('# 实验手册\n本实验使用 ERA5 海浪场数据。\n\n## 数据说明\n字段包括时间与经纬度。'),
+    contentBase64: base64Of(
+      '# 实验手册\n本实验使用 ERA5 海浪场数据。\n\n## 数据说明\n字段包括时间与经纬度。',
+    ),
     ...overrides,
   }
 }
@@ -119,7 +114,9 @@ test('GBK 编码的 txt 上传成功，encoding 标记为 gbk', async () => {
     Buffer.from('\n\n', 'utf8'),
     Buffer.from([0xca, 0xfd, 0xbe, 0xdd]),
   ])
-  const response = await post(uploadBody({ name: '数据说明.txt', contentBase64: gbkBytes.toString('base64') }))
+  const response = await post(
+    uploadBody({ name: '数据说明.txt', contentBase64: gbkBytes.toString('base64') }),
+  )
   const body = (await response.json()) as { material: { encoding: string; type: string } }
 
   assert.equal(response.status, 200)
@@ -128,7 +125,9 @@ test('GBK 编码的 txt 上传成功，encoding 标记为 gbk', async () => {
 })
 
 test('非 md/txt 文件返回 400 与中文提示，且不回显正文', async () => {
-  const response = await post(uploadBody({ name: '秘密数据.csv', contentBase64: base64Of('TOP_SECRET_TEXT') }))
+  const response = await post(
+    uploadBody({ name: '秘密数据.csv', contentBase64: base64Of('TOP_SECRET_TEXT') }),
+  )
   const body = (await response.json()) as Record<string, unknown>
 
   assert.equal(response.status, 400)

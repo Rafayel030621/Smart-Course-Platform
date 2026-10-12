@@ -49,7 +49,8 @@ const DRAFT_BLOCKS = [
 /** 兜底时的中文说明：说清模型没参与、材料已解析、用户可以先做什么 */
 const NOTICE_BY_REASON: Record<AdvisorFallbackReason, string> = {
   MODEL_TIMEOUT: '模型调用超时，未生成理解草稿；材料已解析成功，可以先手动登记要点，稍后重新生成。',
-  INVALID_MODEL_OUTPUT: '模型返回内容不合法，未生成理解草稿；材料已解析成功，可以先手动登记要点，稍后重新生成。',
+  INVALID_MODEL_OUTPUT:
+    '模型返回内容不合法，未生成理解草稿；材料已解析成功，可以先手动登记要点，稍后重新生成。',
   MODEL_UNAVAILABLE: '模型服务暂时不可用，未生成理解草稿；材料已解析成功，可以先手动登记要点，稍后重新生成。',
   MODEL_NOT_CONFIGURED: '服务端未配置模型密钥，暂时无法生成理解草稿；材料已解析成功，可以先手动登记要点。',
   RATE_LIMITED: '请求过于频繁，未生成理解草稿；材料已解析成功，请稍后重新生成。',
@@ -215,9 +216,7 @@ export interface MaterialsService {
   understand(input: MaterialsUnderstandingInput): Promise<MaterialsUnderstandingResult>
 }
 
-type ProviderOutcome =
-  | { ok: true; output: { draft: unknown } }
-  | { ok: false; reason: AdvisorFallbackReason }
+type ProviderOutcome = { ok: true; output: { draft: unknown } } | { ok: false; reason: AdvisorFallbackReason }
 
 class ProviderTimeoutError extends Error {
   constructor() {

@@ -14,7 +14,12 @@ describe('文本分段', () => {
     assert.equal(segments.length, 1)
     // 原文第 3 行是空行（段落分隔），第三段内容从第 4 行开始
     assert.deepEqual(
-      { segmentId: segments[0].segmentId, index: segments[0].index, startLine: segments[0].startLine, endLine: segments[0].endLine },
+      {
+        segmentId: segments[0].segmentId,
+        index: segments[0].index,
+        startLine: segments[0].startLine,
+        endLine: segments[0].endLine,
+      },
       { segmentId: 'seg_0', index: 0, startLine: 1, endLine: 4 },
     )
     assert.equal(segments[0].text, '第一行\n第二行\n第三行')
@@ -38,7 +43,10 @@ describe('文本分段', () => {
     const segments = parseText('x'.repeat(4500))
 
     assert.equal(segments.length, 3)
-    assert.deepEqual(segments.map((segment) => segment.text.length), [2000, 2000, 500])
+    assert.deepEqual(
+      segments.map((segment) => segment.text.length),
+      [2000, 2000, 500],
+    )
     for (const segment of segments) {
       assert.equal(segment.startLine, 1)
       assert.equal(segment.endLine, 1)
@@ -51,8 +59,14 @@ describe('文本分段', () => {
 
     // 每行 1,500 字，两行合并会超过 2,000 字，因此每段一行
     assert.equal(segments.length, 3)
-    assert.deepEqual(segments.map((segment) => segment.startLine), [1, 2, 3])
-    assert.deepEqual(segments.map((segment) => segment.endLine), [1, 2, 3])
+    assert.deepEqual(
+      segments.map((segment) => segment.startLine),
+      [1, 2, 3],
+    )
+    assert.deepEqual(
+      segments.map((segment) => segment.endLine),
+      [1, 2, 3],
+    )
   })
 
   test('CRLF 与 CR 统一按一个换行处理，行号保持一致', () => {
@@ -86,9 +100,6 @@ describe('文本分段', () => {
     for (const segment of segments) {
       assert.ok(segment.text.length > 0 && segment.text.length <= MAX_SEGMENT_CHARS)
     }
-    assert.deepEqual(
-      segments.map((segment) => segment.segmentId).slice(0, 3),
-      ['seg_0', 'seg_1', 'seg_2'],
-    )
+    assert.deepEqual(segments.map((segment) => segment.segmentId).slice(0, 3), ['seg_0', 'seg_1', 'seg_2'])
   })
 })

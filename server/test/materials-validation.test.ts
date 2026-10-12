@@ -75,7 +75,9 @@ describe('上传接口校验', () => {
   })
 
   test('合法 txt 通过', () => {
-    const result = parseMaterialUploadRequest(uploadBody({ name: '数据说明.TXT', contentBase64: base64Of('第一行\n\n第二行') }))
+    const result = parseMaterialUploadRequest(
+      uploadBody({ name: '数据说明.TXT', contentBase64: base64Of('第一行\n\n第二行') }),
+    )
     assert.equal(result.ok, true)
     if (result.ok) assert.equal(result.value.type, 'txt')
   })
@@ -300,7 +302,10 @@ describe('理解接口校验', () => {
     const material = body.material as Record<string, unknown>
     const result = parseMaterialsUnderstandingRequest({
       ...body,
-      material: { ...material, segments: [{ segmentId: 'seg_0', startLine: 5, endLine: 3, text: '一段内容' }] },
+      material: {
+        ...material,
+        segments: [{ segmentId: 'seg_0', startLine: 5, endLine: 3, text: '一段内容' }],
+      },
     })
     assert.equal(result.ok, false)
     if (!result.ok) assert.match(result.message, /endLine/)
@@ -317,7 +322,14 @@ describe('理解接口校验', () => {
   test('字符串字段超长时拒绝', () => {
     const body = understandingBody()
     const material = body.material as Record<string, unknown>
-    const segments = [{ segmentId: 'seg_0', startLine: 1, endLine: 1, text: 'x'.repeat(MATERIAL_LIMITS.segmentTextLength + 1) }]
+    const segments = [
+      {
+        segmentId: 'seg_0',
+        startLine: 1,
+        endLine: 1,
+        text: 'x'.repeat(MATERIAL_LIMITS.segmentTextLength + 1),
+      },
+    ]
     const result = parseMaterialsUnderstandingRequest({ ...body, material: { ...material, segments } })
     assert.equal(result.ok, false)
     if (!result.ok) assert.match(result.message, /2000/)

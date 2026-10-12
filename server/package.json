@@ -2,7 +2,7 @@
   "name": "course-platform-server",
   "version": "0.1.0",
   "private": true,
-  "description": "智慧课程平台后端服务（首轮 MVP）：本轮只提供 GET /health",
+  "description": "智慧课程平台后端服务：GET /health、POST /api/advisor/recommendations、POST /api/advisor/chat、POST /api/materials、POST /api/materials/understanding",
   "type": "module",
   "engines": {
     "node": ">=20.19"

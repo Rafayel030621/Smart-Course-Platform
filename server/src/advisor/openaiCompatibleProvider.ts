@@ -120,7 +120,16 @@ export function createOpenAiCompatibleProvider(options: OpenAiCompatibleProvider
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), endpoint.timeoutMs)
     try {
-      const response = await fetchImpl(endpoint.url, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${endpoint.apiKey}` }, body: JSON.stringify({ model: endpoint.model, messages: buildChatMessages(request), temperature: PROMPT_TEMPERATURE }), signal: controller.signal })
+      const response = await fetchImpl(endpoint.url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${endpoint.apiKey}` },
+        body: JSON.stringify({
+          model: endpoint.model,
+          messages: buildChatMessages(request),
+          temperature: PROMPT_TEMPERATURE,
+        }),
+        signal: controller.signal,
+      })
       if (!response.ok) throw new AdvisorProviderError(`模型服务返回 ${response.status}`, 'MODEL_UNAVAILABLE')
       const payload = await readJsonSafely(response)
       const content = readAssistantContent(payload)
@@ -129,9 +138,14 @@ export function createOpenAiCompatibleProvider(options: OpenAiCompatibleProvider
     } catch (error) {
       if (controller.signal.aborted) throw new AdvisorProviderError('模型调用超时', 'MODEL_TIMEOUT')
       if (error instanceof AdvisorProviderError) throw error
-      logger.warn('模型聊天请求失败', { provider: name, detail: error instanceof Error ? error.name : 'unknown' })
+      logger.warn('模型聊天请求失败', {
+        provider: name,
+        detail: error instanceof Error ? error.name : 'unknown',
+      })
       throw new AdvisorProviderError('模型请求失败', 'MODEL_UNAVAILABLE')
-    } finally { clearTimeout(timer) }
+    } finally {
+      clearTimeout(timer)
+    }
   }
 
   /**

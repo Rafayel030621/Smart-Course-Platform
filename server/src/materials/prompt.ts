@@ -45,13 +45,13 @@ function cleanForPrompt(text: string, maxLength: number): string {
 
 export function buildUnderstandingUserPrompt(input: UnderstandingProviderInput): string {
   const payload = {
-    '材料名': cleanForPrompt(input.materialName, 200),
-    '类型': input.materialType,
-    '版本': input.materialVersion,
-    '片段': input.segments.map((segment) => ({
-      '片段编号': segment.segmentId,
-      '行号': `${segment.startLine}-${segment.endLine}`,
-      '正文': cleanForPrompt(segment.text, SEGMENT_TEXT_LIMIT),
+    材料名: cleanForPrompt(input.materialName, 200),
+    类型: input.materialType,
+    版本: input.materialVersion,
+    片段: input.segments.map((segment) => ({
+      片段编号: segment.segmentId,
+      行号: `${segment.startLine}-${segment.endLine}`,
+      正文: cleanForPrompt(segment.text, SEGMENT_TEXT_LIMIT),
     })),
   }
 

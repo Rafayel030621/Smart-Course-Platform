@@ -9,7 +9,11 @@ import {
   type MaterialRuntimeErrorCode,
   type MaterialsFailureResponse,
 } from '../materials/types.js'
-import { MATERIAL_LIMITS, parseMaterialUploadRequest, parseMaterialsUnderstandingRequest } from '../materials/validation.js'
+import {
+  MATERIAL_LIMITS,
+  parseMaterialUploadRequest,
+  parseMaterialsUnderstandingRequest,
+} from '../materials/validation.js'
 import { sendJson } from './health.js'
 
 /**
@@ -93,7 +97,12 @@ function sendFailure(
 }
 
 /** 读请求体 + 解析 JSON；返回 null 表示已经写过错误响应 */
-async function readJsonBody(req: IncomingMessage, res: ServerResponse, maxBodyBytes: number, logger: AdvisorLogger): Promise<unknown | null> {
+async function readJsonBody(
+  req: IncomingMessage,
+  res: ServerResponse,
+  maxBodyBytes: number,
+  logger: AdvisorLogger,
+): Promise<unknown | null> {
   const contentType = String(req.headers['content-type'] ?? '')
   if (!/^application\/json\s*(;|$)/i.test(contentType)) {
     logger.warn('Content-Type 不合法', { contentType })

@@ -53,7 +53,12 @@ function understandingBody(overrides: Record<string, unknown> = {}): Record<stri
       type: 'md',
       version: 1,
       segments: [
-        { segmentId: 'seg_0', startLine: 1, endLine: 4, text: '本实验使用 ERA5 海浪场数据，任务是复现识别流程。' },
+        {
+          segmentId: 'seg_0',
+          startLine: 1,
+          endLine: 4,
+          text: '本实验使用 ERA5 海浪场数据，任务是复现识别流程。',
+        },
         { segmentId: 'seg_1', startLine: 6, endLine: 9, text: '字段包括有效波高、风速、时间与经纬度。' },
       ],
     },

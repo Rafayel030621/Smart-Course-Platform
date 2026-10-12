@@ -55,7 +55,9 @@ function readMockProviderMode(env: NodeJS.ProcessEnv = process.env): MockProvide
   const raw = env.MOCK_PROVIDER_MODE?.trim()
   if (raw === undefined || raw === '') return 'ok'
   if (!MOCK_PROVIDER_MODES.includes(raw)) {
-    console.warn(`[server] MOCK_PROVIDER_MODE 取值不被识别（${MOCK_PROVIDER_MODES.join(' / ')}），已按 ok 处理`)
+    console.warn(
+      `[server] MOCK_PROVIDER_MODE 取值不被识别（${MOCK_PROVIDER_MODES.join(' / ')}），已按 ok 处理`,
+    )
     return 'ok'
   }
   return raw as MockProviderMode
@@ -122,7 +124,10 @@ export function createApp(serverConfig: ServerConfig = config, deps: AppDependen
   const handleAdvisor = createAdvisorHandler({ service: advisorService, logger })
   const handleAdvisorChat = createAdvisorChatHandler({ service: advisorService, logger })
   const handleMaterials = createMaterialsHandler({ service: materialsService, logger })
-  const handleMaterialsUnderstanding = createMaterialsUnderstandingHandler({ service: materialsService, logger })
+  const handleMaterialsUnderstanding = createMaterialsUnderstandingHandler({
+    service: materialsService,
+    logger,
+  })
 
   return createServer((req, res) => {
     if (handleApiCors(req, res)) return

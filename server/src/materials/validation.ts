@@ -243,7 +243,8 @@ export function parseMaterialUploadRequest(body: unknown): MaterialParseResult {
   if (type === null) return reject(requestId, 'UNSUPPORTED_MATERIAL_TYPE')
 
   // 4. base64 与大小（大小按解码后的字节数，不看 base64 字符串长度）
-  const bytes = (contentBase64 as string) === '' ? Buffer.alloc(0) : decodeBase64Strict(contentBase64 as string)
+  const bytes =
+    (contentBase64 as string) === '' ? Buffer.alloc(0) : decodeBase64Strict(contentBase64 as string)
   if (bytes === null) return invalidInput(requestId, 'contentBase64 不是合法的 base64')
   if (bytes.length > MATERIAL_LIMITS.maxFileBytes) return reject(requestId, 'MATERIAL_TOO_LARGE')
 
@@ -324,7 +325,13 @@ function parseMaterialObject(
         issues.push(`${path} 必须是对象`)
         return
       }
-      const segmentId = readStringField(item, 'segmentId', MATERIAL_LIMITS.segmentIdLength, issues, `${path}.segmentId`)
+      const segmentId = readStringField(
+        item,
+        'segmentId',
+        MATERIAL_LIMITS.segmentIdLength,
+        issues,
+        `${path}.segmentId`,
+      )
       const text = readStringField(item, 'text', MATERIAL_LIMITS.segmentTextLength, issues, `${path}.text`)
       const startLine = readPositiveInteger(item, 'startLine', issues, `${path}.startLine`)
       const endLine = readPositiveInteger(item, 'endLine', issues, `${path}.endLine`)
@@ -332,7 +339,8 @@ function parseMaterialObject(
         issues.push(`${path}.endLine 不能小于 startLine`)
         return
       }
-      if (segmentId === undefined || text === undefined || startLine === undefined || endLine === undefined) return
+      if (segmentId === undefined || text === undefined || startLine === undefined || endLine === undefined)
+        return
 
       segments.push({ segmentId, startLine, endLine, text })
       totalChars += text.length

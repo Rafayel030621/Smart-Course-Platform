@@ -296,15 +296,15 @@ function parseEvidence(raw: unknown, index: number, issues: string[]): EvidenceS
     return undefined
   }
   const evidenceId = readRequiredString(raw, 'evidenceId', LIMITS.idLength, issues, `${path}.evidenceId`)
-  const submissionId = readRequiredString(raw, 'submissionId', LIMITS.idLength, issues, `${path}.submissionId`)
-  const taskId = readNullableString(raw, 'taskId', LIMITS.idLength, issues, `${path}.taskId`)
-  const didWhat = readRequiredString(
+  const submissionId = readRequiredString(
     raw,
-    'didWhat',
-    LIMITS.evidenceDidWhatLength,
+    'submissionId',
+    LIMITS.idLength,
     issues,
-    `${path}.didWhat`,
+    `${path}.submissionId`,
   )
+  const taskId = readNullableString(raw, 'taskId', LIMITS.idLength, issues, `${path}.taskId`)
+  const didWhat = readRequiredString(raw, 'didWhat', LIMITS.evidenceDidWhatLength, issues, `${path}.didWhat`)
   const foundWhat = readNullableString(raw, 'foundWhat', 1000, issues, `${path}.foundWhat`)
   const stillUnsure = readNullableString(raw, 'stillUnsure', 1000, issues, `${path}.stillUnsure`)
   const author = readNullableString(raw, 'author', LIMITS.idLength, issues, `${path}.author`)
@@ -402,10 +402,28 @@ function parseProjectProfile(raw: unknown, issues: string[]): ProjectProfile | n
   }
 
   const goal = readNullableString(raw, 'goal', LIMITS.profileTextLength, issues, 'projectProfile.goal')
-  const expectedOutcome = readNullableString(raw, 'expectedOutcome', LIMITS.profileTextLength, issues, 'projectProfile.expectedOutcome')
-  const researchPeriod = readNullableString(raw, 'researchPeriod', LIMITS.profilePeriodLength, issues, 'projectProfile.researchPeriod')
+  const expectedOutcome = readNullableString(
+    raw,
+    'expectedOutcome',
+    LIMITS.profileTextLength,
+    issues,
+    'projectProfile.expectedOutcome',
+  )
+  const researchPeriod = readNullableString(
+    raw,
+    'researchPeriod',
+    LIMITS.profilePeriodLength,
+    issues,
+    'projectProfile.researchPeriod',
+  )
   const scope = readNullableString(raw, 'scope', LIMITS.profileTextLength, issues, 'projectProfile.scope')
-  const outOfScope = readNullableString(raw, 'outOfScope', LIMITS.profileTextLength, issues, 'projectProfile.outOfScope')
+  const outOfScope = readNullableString(
+    raw,
+    'outOfScope',
+    LIMITS.profileTextLength,
+    issues,
+    'projectProfile.outOfScope',
+  )
 
   const membersRaw = raw.memberNames
   let memberNames: string[] | undefined
@@ -505,7 +523,13 @@ function parseConfirmedMaterials(raw: unknown, issues: string[]): ConfirmedMater
           issues.push(`${segmentPath} 必须是对象`)
           return
         }
-        const segmentId = readRequiredString(segment, 'segmentId', LIMITS.idLength, issues, `${segmentPath}.segmentId`)
+        const segmentId = readRequiredString(
+          segment,
+          'segmentId',
+          LIMITS.idLength,
+          issues,
+          `${segmentPath}.segmentId`,
+        )
         const text = readRequiredString(
           segment,
           'text',
@@ -519,7 +543,8 @@ function parseConfirmedMaterials(raw: unknown, issues: string[]): ConfirmedMater
           issues.push(`${segmentPath}.endLine 不能小于 startLine`)
           return
         }
-        if (segmentId === undefined || text === undefined || startLine === undefined || endLine === undefined) return
+        if (segmentId === undefined || text === undefined || startLine === undefined || endLine === undefined)
+          return
 
         segments.push({ segmentId, startLine, endLine, text })
         totalSegments += 1
@@ -607,12 +632,7 @@ export function parseAdvisorRequest(
 
   const projectId = readRequiredString(body, 'projectId', LIMITS.projectIdLength, issues)
   const projectName = readRequiredString(body, 'projectName', LIMITS.projectNameLength, issues)
-  const currentMilestone = readNullableString(
-    body,
-    'currentMilestone',
-    LIMITS.milestoneLength,
-    issues,
-  )
+  const currentMilestone = readNullableString(body, 'currentMilestone', LIMITS.milestoneLength, issues)
   const confirmedContext = readStringArray(
     body,
     'confirmedContext',
@@ -680,7 +700,10 @@ export function parseAdvisorRequest(
   }
 }
 
-export interface ChatParseSuccess { ok: true; value: AdvisorChatRequest }
+export interface ChatParseSuccess {
+  ok: true
+  value: AdvisorChatRequest
+}
 export type ChatParseResult = ChatParseSuccess | ParseFailure
 
 export function parseAdvisorChatRequest(body: unknown): ChatParseResult {
@@ -696,10 +719,22 @@ export function parseAdvisorChatRequest(body: unknown): ChatParseResult {
   const history: ChatMessage[] = []
   if (Array.isArray(historyRaw) && historyRaw.length <= LIMITS.chatHistory) {
     historyRaw.forEach((item, index) => {
-      if (!isPlainObject(item)) { issues.push(`chatHistory[${index}] 必须是对象`); return }
+      if (!isPlainObject(item)) {
+        issues.push(`chatHistory[${index}] 必须是对象`)
+        return
+      }
       const role = item.role
-      if (role !== 'user' && role !== 'assistant') { issues.push(`chatHistory[${index}].role 必须是 user 或 assistant`); return }
-      const text = readRequiredString(item, 'text', LIMITS.chatMessageLength, issues, `chatHistory[${index}].text`)
+      if (role !== 'user' && role !== 'assistant') {
+        issues.push(`chatHistory[${index}].role 必须是 user 或 assistant`)
+        return
+      }
+      const text = readRequiredString(
+        item,
+        'text',
+        LIMITS.chatMessageLength,
+        issues,
+        `chatHistory[${index}].text`,
+      )
       if (text !== undefined) history.push({ role, text })
     })
   }
@@ -866,7 +901,12 @@ export function normalizeSuggestions(raw: unknown, request: AdvisorRequest): Nor
       whyNow,
       doneCriteria,
       existingTaskId,
-      basisEvidenceIds: normalizeIdList(item.basisEvidenceIds, evidenceIds, `${label} basisEvidenceIds`, notes),
+      basisEvidenceIds: normalizeIdList(
+        item.basisEvidenceIds,
+        evidenceIds,
+        `${label} basisEvidenceIds`,
+        notes,
+      ),
       basisDoubtIds: normalizeIdList(item.basisDoubtIds, doubtIds, `${label} basisDoubtIds`, notes),
     })
   })

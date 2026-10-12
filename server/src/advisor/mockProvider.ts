@@ -71,12 +71,15 @@ export function createMockProvider(options: MockProviderOptions = {}): AdvisorPr
     },
     async generateChat(request) {
       if (mode === 'throw') throw new Error('mock provider 模拟上游故障')
-      if (mode === 'not-configured') throw new AdvisorProviderError('mock provider 未读取到模型密钥', 'MODEL_NOT_CONFIGURED')
+      if (mode === 'not-configured')
+        throw new AdvisorProviderError('mock provider 未读取到模型密钥', 'MODEL_NOT_CONFIGURED')
       if (mode === 'slow') {
         await new Promise<void>((resolve) => setTimeout(resolve, delayMs))
       }
       if (mode === 'invalid' || mode === 'empty') return { answer: '' }
-      return { answer: `基于当前项目状态，建议先围绕“${request.question}”检查已有证据，再把可验证的下一步记录下来。` }
+      return {
+        answer: `基于当前项目状态，建议先围绕“${request.question}”检查已有证据，再把可验证的下一步记录下来。`,
+      }
     },
     // v2（M2-A）材料理解：与 generate 一样按 mode 给出确定性的成功/失败路径
     async generateUnderstanding(request) {
@@ -91,7 +94,15 @@ export function createMockProvider(options: MockProviderOptions = {}): AdvisorPr
           })
           return { draft: buildMockUnderstandingDraft(request) }
         case 'empty':
-          return { draft: { goalCandidates: [], outcomeCandidates: [], dataNotes: [], methodNotes: [], openQuestions: [] } }
+          return {
+            draft: {
+              goalCandidates: [],
+              outcomeCandidates: [],
+              dataNotes: [],
+              methodNotes: [],
+              openQuestions: [],
+            },
+          }
         case 'invalid':
           // 文本为空 + 引用不存在的片段：输出校验会全部丢弃，最终走 fallback
           return { draft: { goalCandidates: [{ text: '   ', segmentIds: ['seg_missing'] }] } }
@@ -197,12 +208,15 @@ export function buildMockUnderstandingDraft(request: UnderstandingProviderInput)
     })
   }
 
-  const openQuestions: Array<{ text: string; segmentIds: string[] }> = first === undefined
-    ? []
-    : [{
-        text: `材料《${request.materialName}》没有覆盖的内容需要你们补充确认`,
-        segmentIds: [first.segmentId],
-      }]
+  const openQuestions: Array<{ text: string; segmentIds: string[] }> =
+    first === undefined
+      ? []
+      : [
+          {
+            text: `材料《${request.materialName}》没有覆盖的内容需要你们补充确认`,
+            segmentIds: [first.segmentId],
+          },
+        ]
 
   return { goalCandidates, outcomeCandidates: [], dataNotes, methodNotes: [], openQuestions }
 }

@@ -22,7 +22,9 @@ function setCorsHeaders(res: ServerResponse): void {
 }
 
 function isAllowedOrigin(origin: string | undefined): origin is (typeof ALLOWED_CORS_ORIGINS)[number] {
-  return origin !== undefined && ALLOWED_CORS_ORIGINS.includes(origin as (typeof ALLOWED_CORS_ORIGINS)[number])
+  return (
+    origin !== undefined && ALLOWED_CORS_ORIGINS.includes(origin as (typeof ALLOWED_CORS_ORIGINS)[number])
+  )
 }
 
 /** 需要跨域处理的 API 路径：建议、聊天与两个材料接口（契约 7.4） */

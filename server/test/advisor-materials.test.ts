@@ -31,9 +31,7 @@ function confirmedMaterial(): Record<string, unknown> {
     name: '实验手册.md',
     type: 'md',
     version: 1,
-    segments: [
-      { segmentId: 'seg_1', startLine: 10, endLine: 24, text: MATERIAL_SEGMENT_TEXT },
-    ],
+    segments: [{ segmentId: 'seg_1', startLine: 10, endLine: 24, text: MATERIAL_SEGMENT_TEXT }],
   }
 }
 
@@ -137,37 +135,67 @@ describe('v2 可选字段校验', () => {
 
   test('confirmedMaterials 超过上限时被拒绝', () => {
     const tooManyMaterials = Array.from({ length: 4 }, () => confirmedMaterial())
-    assert.equal(parseAdvisorRequest(recommendationBody({ promptVersion: 'mvp-prompt-v2', confirmedMaterials: tooManyMaterials })).ok, false)
+    assert.equal(
+      parseAdvisorRequest(
+        recommendationBody({ promptVersion: 'mvp-prompt-v2', confirmedMaterials: tooManyMaterials }),
+      ).ok,
+      false,
+    )
 
-    const tooManySegments = [{
-      ...confirmedMaterial(),
-      segments: Array.from({ length: 21 }, (_, index) => ({
-        segmentId: `seg_${index}`,
-        startLine: index + 1,
-        endLine: index + 1,
-        text: '一段内容',
-      })),
-    }]
-    assert.equal(parseAdvisorRequest(recommendationBody({ promptVersion: 'mvp-prompt-v2', confirmedMaterials: tooManySegments })).ok, false)
+    const tooManySegments = [
+      {
+        ...confirmedMaterial(),
+        segments: Array.from({ length: 21 }, (_, index) => ({
+          segmentId: `seg_${index}`,
+          startLine: index + 1,
+          endLine: index + 1,
+          text: '一段内容',
+        })),
+      },
+    ]
+    assert.equal(
+      parseAdvisorRequest(
+        recommendationBody({ promptVersion: 'mvp-prompt-v2', confirmedMaterials: tooManySegments }),
+      ).ok,
+      false,
+    )
 
-    const tooMuchText = [{
-      ...confirmedMaterial(),
-      segments: Array.from({ length: 5 }, (_, index) => ({
-        segmentId: `seg_${index}`,
-        startLine: index + 1,
-        endLine: index + 1,
-        text: '甲'.repeat(2000),
-      })),
-    }]
-    assert.equal(parseAdvisorRequest(recommendationBody({ promptVersion: 'mvp-prompt-v2', confirmedMaterials: tooMuchText })).ok, false)
+    const tooMuchText = [
+      {
+        ...confirmedMaterial(),
+        segments: Array.from({ length: 5 }, (_, index) => ({
+          segmentId: `seg_${index}`,
+          startLine: index + 1,
+          endLine: index + 1,
+          text: '甲'.repeat(2000),
+        })),
+      },
+    ]
+    assert.equal(
+      parseAdvisorRequest(
+        recommendationBody({ promptVersion: 'mvp-prompt-v2', confirmedMaterials: tooMuchText }),
+      ).ok,
+      false,
+    )
   })
 
   test('projectProfile 字段超长或成员过多时被拒绝', () => {
     const longGoal = { ...profile(), goal: '甲'.repeat(301) }
-    assert.equal(parseAdvisorRequest(recommendationBody({ promptVersion: 'mvp-prompt-v2', projectProfile: longGoal })).ok, false)
+    assert.equal(
+      parseAdvisorRequest(recommendationBody({ promptVersion: 'mvp-prompt-v2', projectProfile: longGoal }))
+        .ok,
+      false,
+    )
 
-    const manyMembers = { ...profile(), memberNames: Array.from({ length: 11 }, (_, index) => `成员${index}`) }
-    assert.equal(parseAdvisorRequest(recommendationBody({ promptVersion: 'mvp-prompt-v2', projectProfile: manyMembers })).ok, false)
+    const manyMembers = {
+      ...profile(),
+      memberNames: Array.from({ length: 11 }, (_, index) => `成员${index}`),
+    }
+    assert.equal(
+      parseAdvisorRequest(recommendationBody({ promptVersion: 'mvp-prompt-v2', projectProfile: manyMembers }))
+        .ok,
+      false,
+    )
   })
 
   test('聊天请求里的未确认草稿字段被忽略，不进入模型上下文', () => {
@@ -185,7 +213,12 @@ describe('v2 可选字段校验', () => {
 
   test('聊天接口同样执行版本门禁', () => {
     assert.equal(parseAdvisorChatRequest(chatBody({ confirmedMaterials: [confirmedMaterial()] })).ok, false)
-    assert.equal(parseAdvisorChatRequest(chatBody({ promptVersion: 'advisor-chat-v2', confirmedMaterials: [confirmedMaterial()] })).ok, true)
+    assert.equal(
+      parseAdvisorChatRequest(
+        chatBody({ promptVersion: 'advisor-chat-v2', confirmedMaterials: [confirmedMaterial()] }),
+      ).ok,
+      true,
+    )
   })
 
   test('未确认草稿类未知字段被忽略，也不进入模型上下文', () => {
@@ -242,7 +275,11 @@ describe('提示词序列化', () => {
 
   test('聊天 v2：上下文包含材料摘录；聊天 v1 不含', () => {
     const v2 = parseAdvisorChatRequest(
-      chatBody({ promptVersion: 'advisor-chat-v2', projectProfile: profile(), confirmedMaterials: [confirmedMaterial()] }),
+      chatBody({
+        promptVersion: 'advisor-chat-v2',
+        projectProfile: profile(),
+        confirmedMaterials: [confirmedMaterial()],
+      }),
     )
     assert.equal(v2.ok, true)
     if (v2.ok) {
@@ -292,11 +329,17 @@ const testConfig: ServerConfig = {
   contractVersion: '1.0',
 }
 
-async function withRecording<T>(run: (baseUrl: string, recorder: RecordingProvider) => Promise<T>): Promise<T> {
+async function withRecording<T>(
+  run: (baseUrl: string, recorder: RecordingProvider) => Promise<T>,
+): Promise<T> {
   const recorder = recordingProvider()
   const app = createApp(testConfig, {
     logger: silentLogger,
-    advisorService: createAdvisorService({ provider: recorder.provider, fallback: createRuleFallback(), logger: silentLogger }),
+    advisorService: createAdvisorService({
+      provider: recorder.provider,
+      fallback: createRuleFallback(),
+      logger: silentLogger,
+    }),
     materialsService: createMaterialsService({ provider: recorder.provider, logger: silentLogger }),
   })
   await new Promise<void>((resolve) => app.listen(0, testConfig.host, resolve))
@@ -321,11 +364,15 @@ async function postJson(baseUrl: string, path: string, body: unknown): Promise<R
 
 test('建议接口 v2 + 材料摘录：200 source=model，provider 收到的请求带已确认片段', async () => {
   await withRecording(async (baseUrl, recorder) => {
-    const response = await postJson(baseUrl, '/api/advisor/recommendations', recommendationBody({
-      promptVersion: 'mvp-prompt-v2',
-      projectProfile: profile(),
-      confirmedMaterials: [confirmedMaterial()],
-    }))
+    const response = await postJson(
+      baseUrl,
+      '/api/advisor/recommendations',
+      recommendationBody({
+        promptVersion: 'mvp-prompt-v2',
+        projectProfile: profile(),
+        confirmedMaterials: [confirmedMaterial()],
+      }),
+    )
     const body = (await response.json()) as Record<string, unknown>
 
     assert.equal(response.status, 200)
@@ -338,9 +385,13 @@ test('建议接口 v2 + 材料摘录：200 source=model，provider 收到的请�
 
 test('建议接口 v1 + 材料摘录：400 INVALID_INPUT', async () => {
   await withRecording(async (baseUrl) => {
-    const response = await postJson(baseUrl, '/api/advisor/recommendations', recommendationBody({
-      confirmedMaterials: [confirmedMaterial()],
-    }))
+    const response = await postJson(
+      baseUrl,
+      '/api/advisor/recommendations',
+      recommendationBody({
+        confirmedMaterials: [confirmedMaterial()],
+      }),
+    )
     const body = (await response.json()) as Record<string, unknown>
     assert.equal(response.status, 400)
     assert.equal(body.code, 'INVALID_INPUT')
@@ -350,10 +401,14 @@ test('建议接口 v1 + 材料摘录：400 INVALID_INPUT', async () => {
 
 test('聊天接口 v2 + 材料摘录：200 source=model，请求带已确认片段', async () => {
   await withRecording(async (baseUrl, recorder) => {
-    const response = await postJson(baseUrl, '/api/advisor/chat', chatBody({
-      promptVersion: 'advisor-chat-v2',
-      confirmedMaterials: [confirmedMaterial()],
-    }))
+    const response = await postJson(
+      baseUrl,
+      '/api/advisor/chat',
+      chatBody({
+        promptVersion: 'advisor-chat-v2',
+        confirmedMaterials: [confirmedMaterial()],
+      }),
+    )
     const body = (await response.json()) as Record<string, unknown>
 
     assert.equal(response.status, 200)
@@ -365,7 +420,11 @@ test('聊天接口 v2 + 材料摘录：200 source=model，请求带已确认片�
 
 test('聊天接口 v1 + 材料摘录：400 INVALID_INPUT', async () => {
   await withRecording(async (baseUrl) => {
-    const response = await postJson(baseUrl, '/api/advisor/chat', chatBody({ confirmedMaterials: [confirmedMaterial()] }))
+    const response = await postJson(
+      baseUrl,
+      '/api/advisor/chat',
+      chatBody({ confirmedMaterials: [confirmedMaterial()] }),
+    )
     const body = (await response.json()) as Record<string, unknown>
     assert.equal(response.status, 400)
     assert.equal(body.code, 'INVALID_INPUT')
