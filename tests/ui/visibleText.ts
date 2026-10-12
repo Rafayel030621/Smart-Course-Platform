@@ -23,6 +23,16 @@ export const INTERNAL_TOKENS = [
   'tasks',
   'doing',
   'done',
+  // M2-A：材料与理解草稿相关内部名（界面只能说人话）
+  'materialId',
+  'materialVersion',
+  'segmentId',
+  'understandingDraft',
+  'goalCandidates',
+  'outcomeCandidates',
+  'dataNotes',
+  'methodNotes',
+  'openQuestions',
 ] as const
 
 /** 用户可见文本 = 正文 + placeholder / title / aria-label */

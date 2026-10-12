@@ -3,8 +3,12 @@ import { computed, nextTick, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import AiStatus from '@/components/AiStatus.vue'
 import EvidenceForm from '@/components/EvidenceForm.vue'
+import MaterialUploader from '@/components/MaterialUploader.vue'
 import ProjectCreate from '@/components/ProjectCreate.vue'
+import ProjectProfileForm from '@/components/ProjectProfileForm.vue'
 import RecommendationList from '@/components/RecommendationList.vue'
+import UnderstandingDraftCard from '@/components/UnderstandingDraftCard.vue'
+import type { MaterialFileType } from '@/components/materialTypes'
 import { CHINESE_NUM, WEEK_LABELS, useWorkbenchStore } from '@/stores/workbench'
 import { deriveDoubtSnapshots, deriveEvidenceSnapshots } from '@/domain/activity'
 import { findClaimedTaskFor, taskStatusText } from '@/domain/progress'
@@ -17,12 +21,16 @@ import type { Milestone, SuggestedStep, TaskStatus } from '@/types/platform'
  * 工作台
  * ----------------------------------------------------------------------------
  * 没有项目时是创建页；有项目时是三栏工作台：
- *   左栏  我的项目 / 项目资料 / 里程碑进度 / 近 4 周活跃度 / 未解决的疑问
- *   中栏  AI 下一步建议 / AI 项目顾问（真实任务）/ 项目地图入口 / 向顾问提问
+ *   左栏  我的项目 / 项目基本信息 / 项目资料（材料）/ 里程碑进度 / 近 4 周活跃度 / 未解决的疑问
+ *   中栏  AI 下一步建议 / AI 项目顾问（真实任务）/ 材料理解草稿 / 项目地图入口 / 向顾问提问
  *   右栏  提交步骤证据 / 最近证据
  *
  * 完整项目地图已经挪到独立的「项目地图」页面（/map），
  * 工作台只留一个入口，避免同一张图在两个地方各画一遍。
+ *
+ * M2-A：项目基本信息、材料上传、材料理解草稿三张卡片已经就位；
+ * 数据层（store action / API 适配）尚未接入，页面只做真实存在的事（登记文件名），
+ * 不展示任何"已保存 / 已解析 / 已确认"的假状态。
  */
 const store = useWorkbenchStore()
 const router = useRouter()
@@ -178,13 +186,11 @@ const requestLabel = computed(() => {
 function requestSuggestions() {
   if (isRequesting.value || isBlankProject.value) return
 
-  void store
-    .refreshRecommendations({ forceRefresh: store.aiStatus !== 'idle' })
-    .catch((error: unknown) => {
-      // store 内部已处理大多数失败，这里只兜住"请求还没发出去就出错"的异常
-      console.warn('[建议] 请求未能完成', error instanceof Error ? error.name : 'unknown')
-      store.toast('建议请求没能完成，请稍后再试')
-    })
+  void store.refreshRecommendations({ forceRefresh: store.aiStatus !== 'idle' }).catch((error: unknown) => {
+    // store 内部已处理大多数失败，这里只兜住"请求还没发出去就出错"的异常
+    console.warn('[建议] 请求未能完成', error instanceof Error ? error.name : 'unknown')
+    store.toast('建议请求没能完成，请稍后再试')
+  })
 }
 
 /**
@@ -324,19 +330,45 @@ function askStep(step: SuggestedStep) {
   store.askAboutStep(taskId)
 }
 
+/* ------------------------------------------------- 项目基本信息（M2-A） */
+
+/**
+ * 数据层（store action / 接口适配）尚未接入：表单已按契约 13.1 就位，
+ * 但页面没有真实的保存动作，因此禁用保存并说明原因——不展示假成功。
+ */
+const PROFILE_PENDING_NOTE =
+  '项目基本信息的数据接口尚未接入：可以先填着看，保存暂不可用；接入后会随项目一起保存。'
+
 /* -------------------------------------------------------------- 材料 */
 
-const manualInput = ref<HTMLInputElement | null>(null)
-const dataInput = ref<HTMLInputElement | null>(null)
-const otherInput = ref<HTMLInputElement | null>(null)
+/**
+ * M2-A：材料登记 / 解析 / 理解草稿的 store action 尚未接入，
+ * 因此上传入口当前只做真实存在的一件事：调用现有的 store.uploadMaterial 登记文件名。
+ * 正文不会被读取，界面也不展示"已解析 / 已理解"这类没有发生过的状态。
+ */
+const MATERIAL_PENDING_NOTE = '现在只登记文件名：正文不会被读取，解析与理解草稿将在数据层接入后开放。'
+const materialNotice = ref('')
+const materialBusy = ref(false)
 
-function upload(type: '实验手册' | '数据集' | '材料', event: Event) {
-  const input = event.target as HTMLInputElement
-  const file = input.files?.[0]
-  if (!file) return
-  store.uploadMaterial(type, file.name)
-  input.value = ''
+/** 未登记过任何文件时显示通用说明；登记成功后换成具体结果（仍然是"只登记文件名"） */
+const materialsPendingNotice = computed(() =>
+  materialNotice.value !== '' ? materialNotice.value : MATERIAL_PENDING_NOTE,
+)
+
+function registerMaterialName(payload: { file: File; type: MaterialFileType }) {
+  if (materialBusy.value) return
+  materialBusy.value = true
+  try {
+    store.uploadMaterial('材料', payload.file.name)
+    materialNotice.value = `已登记文件名「${payload.file.name}」；正文尚未读取。`
+  } finally {
+    materialBusy.value = false
+  }
 }
+
+/* -------------------------------------------------- 材料理解草稿（M2-A） */
+
+const DRAFT_PENDING_HINT = '材料接口接入后，上传 MD 或 TXT 就能在这里看到理解草稿，并逐条确认。'
 
 function materialStyle(type: string) {
   if (type === '实验手册') return 'background:#EEEDFE;color:#3C3489;border:1px solid #CECBF6;'
@@ -435,7 +467,7 @@ const openDoubts = computed(() =>
   <div v-else>
     <!-- 穿插可视化①：流程条 -->
     <div class="card">
-      <div class="card-b" style="padding:10px 14px 4px;">
+      <div class="card-b" style="padding: 10px 14px 4px">
         <div class="flow">
           <template v-for="(node, index) in flowNodes" :key="index">
             <div class="flow-node" :class="node.s">
@@ -451,7 +483,7 @@ const openDoubts = computed(() =>
     <div class="stu-grid">
       <!-- ---------------------------------------------------------- 左栏 -->
       <div>
-        <div class="card" style="margin-bottom:14px;">
+        <div class="card" style="margin-bottom: 14px">
           <div class="card-h">我的项目</div>
           <div class="card-b">
             <select
@@ -459,19 +491,38 @@ const openDoubts = computed(() =>
               :value="project.projectId"
               @change="store.selectProject(($event.target as HTMLSelectElement).value)"
             >
-              <option v-for="item in store.projects" :key="item.projectId" :value="item.projectId">{{ item.name }}</option>
+              <option v-for="item in store.projects" :key="item.projectId" :value="item.projectId">
+                {{ item.name }}
+              </option>
             </select>
-            <div style="font-size:12px;color:#888780;line-height:1.7;margin-bottom:8px;">
+            <div style="font-size: 12px; color: #888780; line-height: 1.7; margin-bottom: 8px">
               {{ project.group }} · {{ project.members }}<br />{{ project.updated }}
             </div>
-            <button class="btn" style="width:100%;" @click="store.showCreate()">＋ 新建项目</button>
+            <button class="btn" style="width: 100%" @click="store.showCreate()">＋ 新建项目</button>
           </div>
         </div>
 
-        <div class="card" style="margin-bottom:14px;">
+        <div class="card" style="margin-bottom: 14px">
+          <div class="card-h">
+            项目基本信息
+            <span class="tag" style="background: #f1efe8; color: #5f5e5a; border: 1px solid #d3d1c7">
+              即将开放
+            </span>
+          </div>
+          <div class="card-b">
+            <ProjectProfileForm
+              :profile="null"
+              :disabled="true"
+              :disabled-note="PROFILE_PENDING_NOTE"
+              :project-key="project.projectId"
+            />
+          </div>
+        </div>
+
+        <div class="card" style="margin-bottom: 14px">
           <div class="card-h">
             项目资料
-            <span class="tag" style="background:#EEEDFE;color:#3C3489;border:1px solid #CECBF6;">
+            <span class="tag" style="background: #eeedfe; color: #3c3489; border: 1px solid #cecbf6">
               AI 追踪依据
             </span>
           </div>
@@ -481,28 +532,27 @@ const openDoubts = computed(() =>
                 <span class="mat-name" :title="m.name">{{ m.name }}</span>
                 <span class="tag mat-tag" :style="materialStyle(m.type)">{{ m.type }}</span>
               </div>
+              <p class="mat-note">以上只登记了文件名，正文没有被读取。</p>
             </div>
-            <div v-else class="empty" style="padding:4px 0 8px;">
-              还没有上传材料。上传实验手册或数据集后，AI 会解析内容并更精准地追踪步骤。
+            <div v-else class="empty" style="padding: 4px 0 8px">
+              还没有材料。上传 MD 或 TXT 后，AI 会解析内容并更准确地追踪步骤。
             </div>
 
-            <div class="up-row">
-              <button class="btn" @click="manualInput?.click()">＋手册</button>
-              <button class="btn" @click="dataInput?.click()">＋数据</button>
-              <button class="btn" @click="otherInput?.click()">＋其他</button>
-            </div>
-            <input ref="manualInput" type="file" style="display:none" @change="upload('实验手册', $event)" />
-            <input ref="dataInput" type="file" style="display:none" @change="upload('数据集', $event)" />
-            <input ref="otherInput" type="file" style="display:none" @change="upload('材料', $event)" />
+            <MaterialUploader
+              :busy="materialBusy"
+              :register-only="true"
+              :notice="materialsPendingNotice"
+              @upload="registerMaterialName"
+            />
           </div>
         </div>
 
-        <div class="card" style="margin-bottom:14px;">
+        <div class="card" style="margin-bottom: 14px">
           <div class="card-h">里程碑进度</div>
           <div class="card-b">
             <div v-for="(m, i) in project.ms" :key="i" class="milestone">
               <div :class="badge(m, i).cls">{{ badge(m, i).text }}</div>
-              <div style="flex:1">
+              <div style="flex: 1">
                 <div class="ms-name">{{ m.t }}</div>
                 <div class="ms-sub">{{ m.sub }}</div>
                 <div v-if="m.s === 'cur'" class="ms-bar"><i :style="`width:${m.p}%`"></i></div>
@@ -511,9 +561,9 @@ const openDoubts = computed(() =>
           </div>
         </div>
 
-        <div class="card" style="margin-bottom:14px;">
+        <div class="card" style="margin-bottom: 14px">
           <div class="card-h">近 4 周活跃度</div>
-          <div class="card-b" style="padding:8px;">
+          <div class="card-b" style="padding: 8px">
             <div class="week-bars">
               <div v-for="(bar, i) in weekBars" :key="i" class="wb" :class="{ hot: bar.hot }">
                 <b>{{ bar.value }}</b>
@@ -527,25 +577,22 @@ const openDoubts = computed(() =>
         <div class="card">
           <div class="card-h">
             未解决的疑问
-            <span
-              class="tag"
-              style="background:#FAEEDA;color:#854F0B;border:1px solid #FAC775;"
-            >{{ openDoubts.length }}</span>
+            <span class="tag" style="background: #faeeda; color: #854f0b; border: 1px solid #fac775">{{
+              openDoubts.length
+            }}</span>
           </div>
-          <div class="card-b" style="padding-top:6px;">
+          <div class="card-b" style="padding-top: 6px">
             <div v-for="doubt in openDoubts" :key="doubt.id" class="doubt">
               {{ doubt.text }}
               <button
                 class="btn"
-                style="margin-top:6px;padding:3px 10px;font-size:11.5px;"
+                style="margin-top: 6px; padding: 3px 10px; font-size: 11.5px"
                 @click="store.resolveDoubt(doubt.id)"
               >
                 标记已解决
               </button>
             </div>
-            <div v-if="!openDoubts.length" class="empty">
-              暂无疑问。推进中产生的不确定会记录在这里。
-            </div>
+            <div v-if="!openDoubts.length" class="empty">暂无疑问。推进中产生的不确定会记录在这里。</div>
           </div>
         </div>
       </div>
@@ -553,10 +600,10 @@ const openDoubts = computed(() =>
       <!-- ---------------------------------------------------------- 中栏 -->
       <div>
         <!-- 建议区：六种状态与文案见 docs/contracts.md 5.3，请求只经过 store -->
-        <div class="card" style="margin-bottom:14px;">
+        <div class="card" style="margin-bottom: 14px">
           <div class="card-h">
             AI 下一步建议
-            <span class="tag" style="background:#EEEDFE;color:#3C3489;border:1px solid #CECBF6;">
+            <span class="tag" style="background: #eeedfe; color: #3c3489; border: 1px solid #cecbf6">
               候选建议
             </span>
           </div>
@@ -578,7 +625,7 @@ const openDoubts = computed(() =>
             <div
               v-if="!suggestionViews.length && !isRequesting && aiStatus !== 'error'"
               class="empty"
-              style="padding:4px 0 0;"
+              style="padding: 4px 0 0"
             >
               {{
                 aiStatus === 'idle'
@@ -591,17 +638,17 @@ const openDoubts = computed(() =>
           </div>
         </div>
 
-        <div class="card" style="margin-bottom:14px;">
+        <div class="card" style="margin-bottom: 14px">
           <div class="card-h">
             AI 项目顾问
-            <span class="tag" style="background:#E6F1FB;color:#185FA5;border:1px solid #B5D4F4;">
+            <span class="tag" style="background: #e6f1fb; color: #185fa5; border: 1px solid #b5d4f4">
               项目真实任务
             </span>
           </div>
           <div class="card-b">
             <div class="card-note">
-              这里只显示已经进入项目的任务与状态（未开始 / 进行中 / 已完成）；
-              候选建议请在「AI 下一步建议」里认领。
+              这里只显示已经进入项目的任务与状态（未开始 / 进行中 / 已完成）； 候选建议请在「AI
+              下一步建议」里认领。
             </div>
             <div class="ai-banner">{{ project.banner }}</div>
 
@@ -625,11 +672,7 @@ const openDoubts = computed(() =>
                 <div v-if="step.why" class="sc-why"><b>为什么现在做：</b>{{ step.why }}</div>
                 <div v-if="step.done" class="sc-done">完成标准：{{ step.done }}</div>
                 <div class="sc-actions">
-                  <button
-                    class="btn primary"
-                    :disabled="step.status !== 'todo'"
-                    @click="claimStep(step)"
-                  >
+                  <button class="btn primary" :disabled="step.status !== 'todo'" @click="claimStep(step)">
                     {{ stepClaimLabel(step.status) }}
                   </button>
                   <button class="btn" @click="askStep(step)">就此提问</button>
@@ -640,19 +683,36 @@ const openDoubts = computed(() =>
           </div>
         </div>
 
-        <!-- 项目地图已经独立成页面：工作台只留入口，不重复画同一张图 -->
-        <div class="card" style="margin-bottom:14px;">
+        <div class="card" style="margin-bottom: 14px">
           <div class="card-h">
-            项目地图
-            <span
-              class="tag"
-              style="background:#E6F1FB;color:#185FA5;border:1px solid #B5D4F4;"
-            >独立页面</span>
+            材料理解草稿
+            <span class="tag" style="background: #eeedfe; color: #3c3489; border: 1px solid #cecbf6">
+              需逐条确认
+            </span>
           </div>
           <div class="card-b">
-            <div class="card-note">
-              里程碑与任务状态已经挪到「项目地图」页面，避免和工作台重复展示。
-            </div>
+            <UnderstandingDraftCard
+              :draft="null"
+              :loading="false"
+              :has-material="project.materials.length > 0"
+              :can-generate="false"
+              :disabled="true"
+              :empty-hint="DRAFT_PENDING_HINT"
+              :current-material-version="null"
+            />
+          </div>
+        </div>
+
+        <!-- 项目地图已经独立成页面：工作台只留入口，不重复画同一张图 -->
+        <div class="card" style="margin-bottom: 14px">
+          <div class="card-h">
+            项目地图
+            <span class="tag" style="background: #e6f1fb; color: #185fa5; border: 1px solid #b5d4f4"
+              >独立页面</span
+            >
+          </div>
+          <div class="card-b">
+            <div class="card-note">里程碑与任务状态已经挪到「项目地图」页面，避免和工作台重复展示。</div>
             <button class="btn primary" @click="router.push('/map')">查看项目地图</button>
           </div>
         </div>
@@ -660,7 +720,7 @@ const openDoubts = computed(() =>
         <div class="card">
           <div class="card-h">
             向顾问提问
-            <span class="tag" style="background:#f1efe8;color:#5f5e5a;border:1px solid #d3d1c7;">
+            <span class="tag" style="background: #f1efe8; color: #5f5e5a; border: 1px solid #d3d1c7">
               AI 项目顾问
             </span>
           </div>
@@ -670,19 +730,25 @@ const openDoubts = computed(() =>
               对话按项目保存在本地。
             </div>
             <div ref="chatLog" class="chat-log">
-              <div v-if="!project.chat.length" class="empty" style="padding:4px 0;">
+              <div v-if="!project.chat.length" class="empty" style="padding: 4px 0">
                 还没有对话。把你卡住的地方写下来，AI 会结合当前项目的任务、证据和疑问回答。
               </div>
               <div v-for="(msg, i) in project.chat" :key="i" class="msg" :class="{ me: msg.me }">
                 <div>
                   <div class="who" :style="msg.me ? 'text-align:right;' : ''">
-                    {{ msg.who }}<span v-if="msg.source === 'fallback' && msg.fallbackReason">{{ chatFallbackNote(msg.fallbackReason) }}</span>
+                    {{ msg.who
+                    }}<span v-if="msg.source === 'fallback' && msg.fallbackReason">{{
+                      chatFallbackNote(msg.fallbackReason)
+                    }}</span>
                   </div>
                   <div class="bubble">{{ msg.text }}</div>
                 </div>
               </div>
               <div v-if="store.chatLoading" class="msg" aria-live="polite">
-                <div><div class="who">AI 正在思考</div><div class="bubble">正在结合当前项目状态生成回答…</div></div>
+                <div>
+                  <div class="who">AI 正在思考</div>
+                  <div class="bubble">正在结合当前项目状态生成回答…</div>
+                </div>
               </div>
               <div v-if="store.chatError" class="chat-error" role="alert">{{ store.chatError }}</div>
             </div>
@@ -694,7 +760,9 @@ const openDoubts = computed(() =>
                 placeholder="描述你卡住的问题…"
                 @keydown.enter="send"
               />
-              <button class="btn primary" :disabled="store.chatLoading || !chat.trim()" @click="send">{{ store.chatLoading ? '思考中…' : '发送' }}</button>
+              <button class="btn primary" :disabled="store.chatLoading || !chat.trim()" @click="send">
+                {{ store.chatLoading ? '思考中…' : '发送' }}
+              </button>
             </div>
           </div>
         </div>
@@ -702,7 +770,7 @@ const openDoubts = computed(() =>
 
       <!-- ---------------------------------------------------------- 右栏 -->
       <div>
-        <div class="card" style="margin-bottom:14px;">
+        <div class="card" style="margin-bottom: 14px">
           <div class="card-h">提交步骤证据</div>
           <div class="card-b">
             <div v-if="savedEvidenceAt" class="evidence-save-status" role="status" aria-live="polite">
@@ -721,14 +789,14 @@ const openDoubts = computed(() =>
 
         <div class="card">
           <div class="card-h">最近证据</div>
-          <div class="card-b" style="padding-top:8px;">
+          <div class="card-b" style="padding-top: 8px">
             <div class="tl">
               <div v-for="(item, i) in project.evidence" :key="i" class="tl-item">
                 <div class="tl-time">{{ item.time }}</div>
                 <div class="tl-text">{{ item.text }}</div>
                 <div class="tl-who">{{ item.who }}</div>
               </div>
-              <div v-if="!project.evidence.length" class="empty" style="padding-left:0;">
+              <div v-if="!project.evidence.length" class="empty" style="padding-left: 0">
                 还没有证据记录。完成第一步后，记得回来提交——AI 会根据你的证据更新项目状态，再给出下一步建议。
               </div>
             </div>
@@ -769,13 +837,21 @@ const openDoubts = computed(() =>
 }
 
 .evidence-save-status {
-  border: 1px solid #9FE1CB;
+  border: 1px solid #9fe1cb;
   border-radius: 10px;
   padding: 8px 10px;
   margin-bottom: 12px;
-  background: #E1F5EE;
-  color: #0F6E56;
+  background: #e1f5ee;
+  color: #0f6e56;
   font-size: 12px;
   line-height: 1.5;
+}
+
+/* 旧材料记录：只登记过文件名，正文没有被读取 */
+.mat-note {
+  margin: 6px 0 8px;
+  font-size: 11.5px;
+  color: #888780;
+  line-height: 1.6;
 }
 </style>

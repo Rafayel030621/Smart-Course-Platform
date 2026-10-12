@@ -96,11 +96,7 @@ function stubAdvisor(
  * 直接放一条真实任务进当前项目。
  * 公开 action 只能创建 doing 任务（认领即进行中），所以等待认领的 todo 任务只在测试里这样造。
  */
-function seedTask(
-  store: WorkbenchStore,
-  status: Task['status'] = 'todo',
-  title = '等待认领的步骤',
-): Task {
+function seedTask(store: WorkbenchStore, status: Task['status'] = 'todo', title = '等待认领的步骤'): Task {
   const project = store.current
   if (project === undefined) throw new Error('缺少测试项目')
   const timestamp = new Date().toISOString()
@@ -157,14 +153,16 @@ function advisorResponse(
       fallbackReason: null,
       cached: false,
       promptVersion: 'mvp-prompt-v1',
-      suggestions: [{
-        title,
-        whyNow: '现在需要处理这项建议',
-        doneCriteria: '完成这项建议并留下证据',
-        existingTaskId,
-        basisEvidenceIds: [],
-        basisDoubtIds: [],
-      }],
+      suggestions: [
+        {
+          title,
+          whyNow: '现在需要处理这项建议',
+          doneCriteria: '完成这项建议并留下证据',
+          existingTaskId,
+          basisEvidenceIds: [],
+          basisDoubtIds: [],
+        },
+      ],
     }),
     { status: 200, headers: { 'content-type': 'application/json' } },
   )
@@ -228,13 +226,15 @@ describe('AI UI components', () => {
   it('renders evidence and doubt source text, not only their IDs', () => {
     const wrapper = mount(RecommendationList, {
       props: {
-        items: [{
-          suggestion: makeRecommendation(1),
-          index: 0,
-          claimState: 'claimable',
-          evidence: [{ id: 'evd_1', time: '10:20', text: 'evidence source text' }],
-          doubts: [{ id: 'dbt_1', text: 'doubt source text' }],
-        }],
+        items: [
+          {
+            suggestion: makeRecommendation(1),
+            index: 0,
+            claimState: 'claimable',
+            evidence: [{ id: 'evd_1', time: '10:20', text: 'evidence source text' }],
+            doubts: [{ id: 'dbt_1', text: 'doubt source text' }],
+          },
+        ],
       },
     })
 
@@ -343,11 +343,18 @@ describe('WorkbenchView', () => {
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         if (String(input).includes('/api/advisor/chat')) {
           const request = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
-          return new Response(JSON.stringify({
-            contractVersion: '1.0', requestId: request.requestId, projectId: request.projectId,
-            projectRevision: request.projectRevision, source: 'model', fallbackReason: null,
-            answer: '基于当前项目状态，先核对已有证据，再推进下一步。',
-          }), { status: 200, headers: { 'content-type': 'application/json' } })
+          return new Response(
+            JSON.stringify({
+              contractVersion: '1.0',
+              requestId: request.requestId,
+              projectId: request.projectId,
+              projectRevision: request.projectRevision,
+              source: 'model',
+              fallbackReason: null,
+              answer: '基于当前项目状态，先核对已有证据，再推进下一步。',
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          )
         }
         return new Response(
           JSON.stringify({
@@ -421,7 +428,9 @@ describe('WorkbenchView', () => {
     await wrapper.get('.recommendation-list .sc-actions button').trigger('click')
 
     expect(store.current?.tasks).toHaveLength(initialTaskCount + 1)
-    expect(store.current?.tasks.some((task) => task.title === '创建一个新任务' && task.status === 'doing')).toBe(true)
+    expect(
+      store.current?.tasks.some((task) => task.title === '创建一个新任务' && task.status === 'doing'),
+    ).toBe(true)
   })
 
   it('derives claim state from the real task of each project（切换项目不串状态）', async () => {
@@ -624,25 +633,25 @@ describe('WorkbenchView', () => {
   })
 
   it('keeps chat history per project and displays model answers', async () => {
-      const store = freshStore()
-      const firstProjectId = createProject(store, '项目一')
-      const secondProjectId = createProject(store, '项目二')
-      const wrapper = mount(WorkbenchView)
+    const store = freshStore()
+    const firstProjectId = createProject(store, '项目一')
+    const secondProjectId = createProject(store, '项目二')
+    const wrapper = mount(WorkbenchView)
 
-      store.sendChat('项目二的问题')
-      await vi.waitFor(() => expect(store.current?.chat).toHaveLength(2))
+    store.sendChat('项目二的问题')
+    await vi.waitFor(() => expect(store.current?.chat).toHaveLength(2))
 
-      const chat = store.current?.chat ?? []
-      expect(chat[0]?.text).toBe('项目二的问题')
-      expect(chat[1]?.who).toBe('AI 模型')
-      expect(chat[1]?.source).toBe('model')
+    const chat = store.current?.chat ?? []
+    expect(chat[0]?.text).toBe('项目二的问题')
+    expect(chat[1]?.who).toBe('AI 模型')
+    expect(chat[1]?.source).toBe('model')
 
-      await wrapper.find('select.proj-select').setValue(firstProjectId)
-      expect(store.current?.chat).toHaveLength(0)
+    await wrapper.find('select.proj-select').setValue(firstProjectId)
+    expect(store.current?.chat).toHaveLength(0)
 
-      await wrapper.find('select.proj-select').setValue(secondProjectId)
-      expect(store.current?.chat).toHaveLength(2)
-      expect(store.current?.chat[1]?.who).toBe('AI 模型')
+    await wrapper.find('select.proj-select').setValue(secondProjectId)
+    expect(store.current?.chat).toHaveLength(2)
+    expect(store.current?.chat[1]?.who).toBe('AI 模型')
   })
 
   it('does not request suggestions for a completely blank project', async () => {
@@ -747,5 +756,60 @@ describe('WorkbenchView', () => {
     // 失败时也不能把错误码端上来
     expect(text).not.toContain('INVALID_INPUT')
     expect(text).not.toContain('NETWORK_ERROR')
+  })
+
+  /* ----------------------------------------------------- M2-A：三张新卡片 */
+
+  it('M2-A：工作台出现项目基本信息、材料入口与材料理解草稿', () => {
+    const store = freshStore()
+    createProject(store, 'M2-A 界面项目')
+    const wrapper = mount(WorkbenchView)
+
+    const text = wrapper.text()
+    expect(text).toContain('项目基本信息')
+    expect(text).toContain('材料理解草稿')
+    expect(text).toContain('选择 MD / TXT 文件')
+    // 数据层未接入必须说清楚，不能假装能保存 / 能解析
+    expect(text).toContain('保存暂不可用')
+    expect(text).toContain('材料接口接入后')
+  })
+
+  it('M2-A：非法材料格式给中文提示，且不写入项目资料', async () => {
+    const store = freshStore()
+    createProject(store, '非法文件项目')
+    const wrapper = mount(WorkbenchView)
+
+    const input = wrapper.get('input.mu-input')
+    Object.defineProperty(input.element, 'files', {
+      value: [new File(['a,b'], '数据.csv')],
+      configurable: true,
+    })
+    await input.trigger('change')
+
+    expect(wrapper.get('.mu-error').text()).toContain('当前只支持 MD、TXT')
+    expect(store.current?.materials).toHaveLength(0)
+  })
+
+  it('M2-A：合法 md 只登记文件名，界面不宣称已经解析', async () => {
+    const store = freshStore()
+    createProject(store, '登记文件名项目')
+    const wrapper = mount(WorkbenchView)
+
+    const input = wrapper.get('input.mu-input')
+    Object.defineProperty(input.element, 'files', {
+      value: [new File(['# 实验手册'], '实验手册.md')],
+      configurable: true,
+    })
+    await input.trigger('change')
+    await wrapper.vm.$nextTick()
+
+    expect(store.current?.materials).toHaveLength(1)
+    expect(store.current?.materials[0]?.name).toBe('实验手册.md')
+
+    const text = wrapper.text()
+    expect(text).toContain('已登记文件名「实验手册.md」')
+    expect(text).toContain('以上只登记了文件名')
+    expect(text).not.toContain('解析成功')
+    expect(text).not.toContain('已解析')
   })
 })
