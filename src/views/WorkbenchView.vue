@@ -349,10 +349,21 @@ const PROFILE_PENDING_NOTE =
 const MATERIAL_PENDING_NOTE = '现在只登记文件名：正文不会被读取，解析与理解草稿将在数据层接入后开放。'
 const materialNotice = ref('')
 const materialBusy = ref(false)
+/** 真实阶段：只有动作真的成功才会前进（当前只可能到「文件名已登记」） */
+const materialStage = ref<'idle' | 'registered' | 'uploading' | 'parsed' | 'understanding' | 'error'>('idle')
 
 /** 未登记过任何文件时显示通用说明；登记成功后换成具体结果（仍然是"只登记文件名"） */
 const materialsPendingNotice = computed(() =>
   materialNotice.value !== '' ? materialNotice.value : MATERIAL_PENDING_NOTE,
+)
+
+// 切换项目时材料状态回到初始值，不把上一个项目的阶段带过来
+watch(
+  () => project.value?.projectId,
+  () => {
+    materialNotice.value = ''
+    materialStage.value = 'idle'
+  },
 )
 
 function registerMaterialName(payload: { file: File; type: MaterialFileType }) {
@@ -361,6 +372,7 @@ function registerMaterialName(payload: { file: File; type: MaterialFileType }) {
   try {
     store.uploadMaterial('材料', payload.file.name)
     materialNotice.value = `已登记文件名「${payload.file.name}」；正文尚未读取。`
+    materialStage.value = 'registered'
   } finally {
     materialBusy.value = false
   }
@@ -535,10 +547,11 @@ const openDoubts = computed(() =>
               <p class="mat-note">以上只登记了文件名，正文没有被读取。</p>
             </div>
             <div v-else class="empty" style="padding: 4px 0 8px">
-              还没有材料。上传 MD 或 TXT 后，AI 会解析内容并更准确地追踪步骤。
+              还没有材料。上传 MD 或 TXT 后会先登记文件名；正文解析与理解草稿将在数据层接入后开放。
             </div>
 
             <MaterialUploader
+              :stage="materialStage"
               :busy="materialBusy"
               :register-only="true"
               :notice="materialsPendingNotice"

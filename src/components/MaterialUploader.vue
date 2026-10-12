@@ -22,8 +22,12 @@ import {
  */
 
 const props = defineProps<{
-  /** idle 未开始 / uploading 上传解析中 / parsed 已解析 / understanding 生成草稿中 / error 失败 */
-  stage?: 'idle' | 'uploading' | 'parsed' | 'understanding' | 'error'
+  /**
+   * 当前真实阶段，由父组件按"真的有动作成功"驱动：
+   * idle 还没开始 / registered 只登记了文件名 / uploading 上传解析中 /
+   * parsed 已解析 / understanding 生成草稿中 / error 上一次失败
+   */
+  stage?: 'idle' | 'registered' | 'uploading' | 'parsed' | 'understanding' | 'error'
   /** 处理中：禁用入口，防止重复提交 */
   busy?: boolean
   /** 失败原因（中文，父组件已转成用户能懂的话） */
@@ -58,10 +62,25 @@ const stepStates = computed<Array<'done' | 'active' | 'todo'>>(() => {
   const first: 'done' | 'active' = selectedName.value === '' ? 'active' : 'done'
 
   if (stage === 'uploading') return [first, 'active', 'todo']
+  if (stage === 'registered') return ['done', 'done', 'todo']
   if (stage === 'parsed') return ['done', 'done', 'active']
   if (stage === 'understanding') return ['done', 'done', 'active']
   if (stage === 'error') return [first, 'active', 'todo']
   return [first, 'todo', 'todo']
+})
+
+/**
+ * 把"当前到底发生了什么"用一句中文说清楚。
+ * 没有真实动作成功之前，不允许出现"已上传 / 已解析 / 已理解"这类说法。
+ */
+const stateText = computed(() => {
+  const stage = props.stage ?? 'idle'
+  if (stage === 'registered') return '当前状态：文件名已登记，正文尚未上传、也还没有解析'
+  if (stage === 'uploading') return '当前状态：正在上传并解析正文'
+  if (stage === 'parsed') return '当前状态：正文已解析，可以生成理解草稿'
+  if (stage === 'understanding') return '当前状态：正在生成理解草稿'
+  if (stage === 'error') return '当前状态：上一次没有成功，可以重试'
+  return '当前状态：还没有选择文件'
 })
 
 function choose(): void {
@@ -128,6 +147,7 @@ function onSelect(event: Event): void {
       </li>
     </ol>
 
+    <p class="mu-state">{{ stateText }}</p>
     <p class="mu-hint">
       只支持 MD、TXT 文件（单个文件不超过 1 MB）。选择文件后会先在本机检查类型、大小与空文件。
     </p>
@@ -196,6 +216,13 @@ function onSelect(event: Event): void {
   border-color: #9fe1cb;
   color: #0f6e56;
   background: #e1f5ee;
+}
+
+.mu-state {
+  margin-top: 8px;
+  font-size: 11.5px;
+  color: #444441;
+  line-height: 1.6;
 }
 
 .mu-hint {

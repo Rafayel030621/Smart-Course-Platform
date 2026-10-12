@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import {
   DRAFT_BLOCK_ORDER,
   DRAFT_BLOCK_TITLES,
@@ -57,6 +57,12 @@ const emit = defineEmits<{
 const editingItemId = ref('')
 const editText = ref('')
 const editError = ref('')
+/** 正在进行编辑的材料身份（材料 ID + 版本）：材料一换，这次编辑作废 */
+const editMaterialKey = ref('')
+
+function materialKeyOf(draft: UnderstandingDraftView | null): string {
+  return draft === null ? '' : `${draft.materialId}#${draft.materialVersion}`
+}
 
 const total = computed(() => draftItemCount(props.draft))
 
@@ -86,6 +92,9 @@ const confirmedCount = computed(() =>
 const allConfirmed = computed(() => total.value > 0 && confirmedCount.value === total.value)
 
 const actionsDisabled = computed(() => props.disabled === true || props.loading === true)
+
+/** 单条操作（确认 / 撤销确认 / 修改 / 删除）：禁用、加载中或草稿过期时全部禁用 */
+const itemActionsDisabled = computed(() => actionsDisabled.value || stale.value)
 
 const canConfirmAll = computed(
   () =>
@@ -124,22 +133,40 @@ function sourceTextOf(item: DraftItemView): string {
     .join('；')
 }
 
+// 材料 ID 或材料版本变化（切换材料、材料更新）：正在编辑的内容一律作废
+watch(
+  () => materialKeyOf(props.draft),
+  () => cancelEdit(),
+)
+
 function startEdit(item: DraftItemView): void {
-  if (actionsDisabled.value) return
+  const draft = props.draft
+  if (draft === null || itemActionsDisabled.value) return
   editError.value = ''
   editingItemId.value = item.itemId
   editText.value = item.text
+  editMaterialKey.value = materialKeyOf(draft)
 }
 
 function cancelEdit(): void {
   editingItemId.value = ''
   editText.value = ''
+  editMaterialKey.value = ''
   editError.value = ''
 }
 
 function submitEdit(item: DraftItemView): void {
   const draft = props.draft
   if (draft === null) return
+  // 禁用 / 加载中 / 草稿过期：不提交
+  if (itemActionsDisabled.value) return
+  // 编辑会话已经结束，或者编辑的不是当前草稿：不提交
+  if (editingItemId.value !== item.itemId) return
+  if (editMaterialKey.value !== materialKeyOf(draft)) {
+    cancelEdit()
+    return
+  }
+
   const text = editText.value.trim()
   if (text === '') {
     editError.value = '内容不能为空，请写一句可核对的话。'
@@ -149,6 +176,7 @@ function submitEdit(item: DraftItemView): void {
     cancelEdit()
     return
   }
+
   emit('edit', {
     materialId: draft.materialId,
     materialVersion: draft.materialVersion,
@@ -247,27 +275,27 @@ function confirmAll(): void {
                 <div class="dc-actions">
                   <span class="dc-status">{{ statusTextOf(item) }}</span>
                   <button
-                    v-if="!stale && item.status !== 'confirmed'"
+                    v-if="item.status !== 'confirmed'"
                     class="btn primary"
                     type="button"
-                    :disabled="actionsDisabled"
+                    :disabled="itemActionsDisabled"
                     @click="confirmItem(item)"
                   >
                     确认
                   </button>
                   <button
-                    v-if="!stale && item.status === 'confirmed'"
+                    v-if="item.status === 'confirmed'"
                     class="btn"
                     type="button"
-                    :disabled="actionsDisabled"
+                    :disabled="itemActionsDisabled"
                     @click="undoItem(item)"
                   >
                     撤销确认
                   </button>
-                  <button class="btn" type="button" :disabled="actionsDisabled" @click="startEdit(item)">
+                  <button class="btn" type="button" :disabled="itemActionsDisabled" @click="startEdit(item)">
                     修改
                   </button>
-                  <button class="btn" type="button" :disabled="actionsDisabled" @click="removeItem(item)">
+                  <button class="btn" type="button" :disabled="itemActionsDisabled" @click="removeItem(item)">
                     删除
                   </button>
                 </div>

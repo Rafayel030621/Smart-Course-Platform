@@ -127,6 +127,27 @@ describe('MaterialUploader', () => {
     expect(wrapper.findAll('.mu-step.is-done').length).toBeGreaterThanOrEqual(2)
   })
 
+  it('登记完成后显示「文件名已登记，正文尚未上传」，不冒充已解析', () => {
+    const wrapper = mount(MaterialUploader, { props: { stage: 'registered', registerOnly: true } })
+
+    const text = wrapper.text()
+    expect(text).toContain('文件名已登记，正文尚未上传')
+    expect(text).not.toContain('正文已解析')
+    expect(text).not.toContain('已理解')
+    expect(wrapper.findAll('.mu-step.is-done')).toHaveLength(2)
+  })
+
+  it('阶段状态文案严格区分未选择 / 已解析 / 生成中', async () => {
+    const wrapper = mount(MaterialUploader, { props: { stage: 'idle' } })
+    expect(wrapper.text()).toContain('还没有选择文件')
+
+    await wrapper.setProps({ stage: 'parsed' })
+    expect(wrapper.text()).toContain('正文已解析，可以生成理解草稿')
+
+    await wrapper.setProps({ stage: 'understanding' })
+    expect(wrapper.text()).toContain('正在生成理解草稿')
+  })
+
   it('用户可见文本不出现内部字段名', () => {
     const wrapper = mount(MaterialUploader, {
       props: {

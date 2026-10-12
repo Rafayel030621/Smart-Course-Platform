@@ -246,7 +246,7 @@ describe('UnderstandingDraftCard', () => {
     expect(wrapper.text()).toContain('MD 或 TXT')
   })
 
-  it('材料版本不同时不继续显示旧确认状态，也不能再确认', async () => {
+  it('材料版本不同时不继续显示旧确认状态，且全部条目操作被禁用', async () => {
     const wrapper = mount(UnderstandingDraftCard, {
       props: { draft: draftView(), currentMaterialVersion: 2 },
     })
@@ -257,10 +257,80 @@ describe('UnderstandingDraftCard', () => {
     expect(text).not.toContain('已确认 1 / 共 3 条')
     expect(text).not.toContain('全部条目已确认')
 
-    const confirmButtons = wrapper.findAll('button').filter((button) => button.text() === '确认')
-    expect(confirmButtons).toHaveLength(0)
-    const undoButtons = wrapper.findAll('button').filter((button) => button.text() === '撤销确认')
-    expect(undoButtons).toHaveLength(0)
+    // 过期草稿：确认 / 撤销确认 / 修改 / 删除 / 整份确认都保留但禁用
+    for (const label of ['确认', '撤销确认', '修改', '删除', '整份确认']) {
+      const buttons = wrapper.findAll('button').filter((button) => button.text() === label)
+      expect(buttons.length, `${label} 按钮应当存在`).toBeGreaterThanOrEqual(1)
+      for (const button of buttons) {
+        expect(button.attributes('disabled'), `${label} 应当被禁用`).toBeDefined()
+      }
+    }
+
+    await buttonWithText(wrapper, '确认')?.trigger('click')
+    await buttonWithText(wrapper, '修改')?.trigger('click')
+    await buttonWithText(wrapper, '删除')?.trigger('click')
+    await buttonWithText(wrapper, '整份确认')?.trigger('click')
+    expect(wrapper.emitted('confirm')).toBeUndefined()
+    expect(wrapper.emitted('remove')).toBeUndefined()
+    expect(wrapper.emitted('confirmAll')).toBeUndefined()
+  })
+
+  it('切换材料后旧编辑文本不会被提交', async () => {
+    const wrapper = mount(UnderstandingDraftCard, { props: { draft: draftView() } })
+
+    await buttonWithText(wrapper, '修改')?.trigger('click')
+    await wrapper.get('textarea').setValue('这段文字属于旧材料')
+
+    // 材料换成另一份（ID 与版本都变了）
+    await wrapper.setProps({
+      draft: draftView({
+        materialId: 'mat_other',
+        materialName: '数据说明.txt',
+        materialVersion: 3,
+        blocks: draftView().blocks,
+      }),
+    })
+
+    expect(wrapper.find('textarea').exists()).toBe(false)
+
+    await buttonWithText(wrapper, '保存修改')?.trigger('click')
+    expect(wrapper.emitted('edit')).toBeUndefined()
+    expect(wrapper.text()).not.toContain('这段文字属于旧材料')
+  })
+
+  it('同一材料的新版本同样作废正在编辑的内容', async () => {
+    const wrapper = mount(UnderstandingDraftCard, { props: { draft: draftView() } })
+
+    await buttonWithText(wrapper, '修改')?.trigger('click')
+    await wrapper.get('textarea').setValue('旧版本里写的内容')
+    await wrapper.setProps({ draft: draftView({ materialVersion: 2 }) })
+
+    expect(wrapper.find('textarea').exists()).toBe(false)
+    expect(wrapper.emitted('edit')).toBeUndefined()
+  })
+
+  it('加载中不能提交修改', async () => {
+    const wrapper = mount(UnderstandingDraftCard, { props: { draft: draftView() } })
+
+    await buttonWithText(wrapper, '修改')?.trigger('click')
+    await wrapper.get('textarea').setValue('加载中不应该能提交')
+
+    await wrapper.setProps({ loading: true })
+    await buttonWithText(wrapper, '保存修改')?.trigger('click')
+
+    expect(wrapper.emitted('edit')).toBeUndefined()
+  })
+
+  it('禁用状态不能提交修改', async () => {
+    const wrapper = mount(UnderstandingDraftCard, { props: { draft: draftView() } })
+
+    await buttonWithText(wrapper, '修改')?.trigger('click')
+    await wrapper.get('textarea').setValue('禁用时不应该能提交')
+
+    await wrapper.setProps({ disabled: true })
+    await buttonWithText(wrapper, '保存修改')?.trigger('click')
+
+    expect(wrapper.emitted('edit')).toBeUndefined()
   })
 
   it('加载中不显示可操作按钮', () => {
