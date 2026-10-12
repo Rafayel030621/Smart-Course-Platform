@@ -319,6 +319,8 @@ function parseMaterialObject(
     issues.push(`material.segments 最多 ${MATERIAL_LIMITS.segments} 条`)
   } else {
     let totalChars = 0
+    // segmentId 必须在本次请求内唯一：不依赖后续 Map 的"后写覆盖"，重复直接拒绝（契约 15.2）
+    const seenSegmentIds = new Set<string>()
     segmentsRaw.forEach((item, index) => {
       const path = `material.segments[${index}]`
       if (!isPlainObject(item)) {
@@ -341,6 +343,12 @@ function parseMaterialObject(
       }
       if (segmentId === undefined || text === undefined || startLine === undefined || endLine === undefined)
         return
+
+      if (seenSegmentIds.has(segmentId)) {
+        issues.push(`${path}.segmentId 与前面的片段重复，同一份材料内 segmentId 必须唯一`)
+        return
+      }
+      seenSegmentIds.add(segmentId)
 
       segments.push({ segmentId, startLine, endLine, text })
       totalChars += text.length

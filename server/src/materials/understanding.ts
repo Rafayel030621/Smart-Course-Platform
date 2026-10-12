@@ -27,9 +27,11 @@ import {
  *   模型失败 / 输出非法  → 服务端保守兜底（空草稿 + 中文 notice），仍返回 200 + source: "fallback"
  *   兜底也失败          → 才把失败码交给路由层（正常实现下不会发生）
  *
- * 两条硬约束（契约 12.2 / 用户决定 5）：
+ * 三条硬约束（契约 12.2 / 用户决定 5）：
  *   1. 兜底不摘录、不编造材料事实，只返回空草稿与中文说明；
- *   2. 模型只允许给 text 与 segmentIds 引用，材料名、版本、行号一律由服务端回填。
+ *   2. 模型只允许给 text 与 segmentIds 引用，材料名、版本、行号一律由服务端回填；
+ *   3. 日志只记类别与数量（未知引用次数、丢弃条数、是否不安全输出），
+ *      绝不记录模型原始文本、原始 segmentId 或材料正文。
  */
 
 export const DEFAULT_MATERIALS_TIMEOUT_MS = 20_000
@@ -37,6 +39,10 @@ export const DEFAULT_MATERIALS_TIMEOUT_MS = 20_000
 const MAX_ITEMS_PER_BLOCK = 5
 const MAX_ITEM_TEXT_LENGTH = 300
 const MAX_SOURCES_PER_ITEM = 3
+
+/** 日志摘要上限：条数与单条长度都固定，日志里不出现任何动态内容 */
+export const MAX_SUMMARY_NOTES = 8
+export const MAX_NOTE_LENGTH = 60
 
 const DRAFT_BLOCKS = [
   { key: 'goalCandidates', short: 'goal' },
@@ -68,25 +74,36 @@ function normalizeText(value: unknown, maxLength: number): string | null {
   return trimmed.length > maxLength ? trimmed.slice(0, maxLength) : trimmed
 }
 
-/** 按 segmentId 回填来源；未知 ID 剔除，去重，最多 3 条 */
+interface SourcesResult {
+  sources: MaterialSourceRef[]
+  /** 引用了本次请求中不存在的片段编号的次数（不保留原始编号） */
+  unknownReferenceCount: number
+  /** segmentIds 结构不合法（不是数组 / 含非字符串项） */
+  hasShapeIssue: boolean
+}
+
+/**
+ * 按 segmentId 回填来源：材料名、版本、行号一律取自本次请求的片段表。
+ * 未知或在本次请求中不存在的引用只计数、不记录原文——模型输出不可信，
+ * 原始编号可能夹带材料正文、密钥样式文本或超长内容。
+ */
 function buildSources(
   rawSegmentIds: unknown,
   segments: Map<string, UnderstandingSegmentInput>,
   input: MaterialsUnderstandingInput,
-  label: string,
-  notes: string[],
-): MaterialSourceRef[] {
+): SourcesResult {
   if (!Array.isArray(rawSegmentIds)) {
-    notes.push(`${label} 不是数组`)
-    return []
+    return { sources: [], unknownReferenceCount: 0, hasShapeIssue: true }
   }
 
   const sources: MaterialSourceRef[] = []
   const seen = new Set<string>()
+  let unknownReferenceCount = 0
+  let hasShapeIssue = false
 
   for (const rawId of rawSegmentIds) {
     if (typeof rawId !== 'string') {
-      notes.push(`${label} 含非字符串项，已忽略`)
+      hasShapeIssue = true
       continue
     }
     const segmentId = rawId.trim()
@@ -94,7 +111,7 @@ function buildSources(
 
     const segment = segments.get(segmentId)
     if (segment === undefined) {
-      notes.push(`${label} 引用了本次请求中不存在的片段：${segmentId}`)
+      unknownReferenceCount += 1
       continue
     }
 
@@ -110,36 +127,79 @@ function buildSources(
     if (sources.length >= MAX_SOURCES_PER_ITEM) break
   }
 
-  return sources
+  return { sources, unknownReferenceCount, hasShapeIssue }
+}
+
+/**
+ * 输出清理的日志摘要：只保留类别与数量。
+ * 不允许放入模型原始文本、原始 segmentId 或材料正文。
+ */
+export interface NormalizeDraftSummary {
+  /** 引用了本次请求中不存在的片段编号的次数 */
+  unknownSegmentReferenceCount: number
+  /** 被丢弃的候选条目数（文本为空、无有效来源、超出每块上限等） */
+  droppedItemCount: number
+  /** 输出包含内部字段名或非中文文本 */
+  unsafeOutput: boolean
+  /** 清理后没有任何候选 */
+  emptyOutput: boolean
+  /** 结构性提示：固定短语，不含任何动态内容 */
+  notes: string[]
 }
 
 export interface NormalizeDraftSuccess {
   ok: true
   draft: UnderstandingDraft
-  notes: string[]
+  summary: NormalizeDraftSummary
 }
 
 export interface NormalizeDraftFailure {
   ok: false
-  notes: string[]
+  summary: NormalizeDraftSummary
 }
 
 export type NormalizeDraftResult = NormalizeDraftSuccess | NormalizeDraftFailure
 
+interface SummaryCollector {
+  unknownSegmentReferenceCount: number
+  droppedItemCount: number
+  notes: string[]
+}
+
+/** 记录固定短语，受条数与单条长度限制 */
+function pushNote(collector: SummaryCollector, note: string): void {
+  if (collector.notes.length >= MAX_SUMMARY_NOTES) return
+  collector.notes.push(note.slice(0, MAX_NOTE_LENGTH))
+}
+
+function toSummary(
+  collector: SummaryCollector,
+  extras: { unsafeOutput: boolean; emptyOutput: boolean },
+): NormalizeDraftSummary {
+  return {
+    unknownSegmentReferenceCount: collector.unknownSegmentReferenceCount,
+    droppedItemCount: collector.droppedItemCount,
+    unsafeOutput: extras.unsafeOutput,
+    emptyOutput: extras.emptyOutput,
+    notes: collector.notes.slice(0, MAX_SUMMARY_NOTES),
+  }
+}
+
 /**
  * 校验并清理模型（或兜底层）返回的理解草稿（契约 15.3）。
  * 能修就修（截断、剔除未知引用、限条数）；不能修的条目丢弃；全部为空或出现内部词判整份非法。
+ * 返回值只带类别与数量的摘要，日志与响应都不会出现模型原始文本或原始引用编号。
  */
 export function normalizeUnderstandingDraft(
   raw: unknown,
   input: MaterialsUnderstandingInput,
 ): NormalizeDraftResult {
-  const notes: string[] = []
+  const collector: SummaryCollector = { unknownSegmentReferenceCount: 0, droppedItemCount: 0, notes: [] }
 
   const source = isPlainObject(raw) ? raw.draft : undefined
   if (!isPlainObject(source)) {
-    notes.push('draft 不是对象')
-    return { ok: false, notes }
+    pushNote(collector, 'draft 不是对象')
+    return { ok: false, summary: toSummary(collector, { unsafeOutput: false, emptyOutput: true }) }
   }
 
   const segments = new Map(input.material.segments.map((segment) => [segment.segmentId, segment]))
@@ -149,56 +209,88 @@ export function normalizeUnderstandingDraft(
   for (const block of DRAFT_BLOCKS) {
     const list = source[block.key]
     if (!Array.isArray(list)) {
-      if (list !== undefined) notes.push(`${block.key} 不是数组，按空数组处理`)
+      if (list !== undefined) pushNote(collector, `${block.key} 不是数组，按空数组处理`)
       continue
     }
     if (list.length > MAX_ITEMS_PER_BLOCK) {
-      notes.push(`${block.key} 超过 ${MAX_ITEMS_PER_BLOCK} 条，超出部分已丢弃`)
+      pushNote(collector, `${block.key} 超过每块上限，超出部分已丢弃`)
+      collector.droppedItemCount += list.length - MAX_ITEMS_PER_BLOCK
     }
 
     const items: DraftItem[] = []
-    list.slice(0, MAX_ITEMS_PER_BLOCK).forEach((item, index) => {
-      const label = `${block.key}[${index}]`
+    list.slice(0, MAX_ITEMS_PER_BLOCK).forEach((item) => {
       if (!isPlainObject(item)) {
-        notes.push(`${label} 不是对象，已丢弃`)
+        collector.droppedItemCount += 1
+        pushNote(collector, `${block.key} 含非对象条目，已丢弃`)
         return
       }
 
       const text = normalizeText(item.text, MAX_ITEM_TEXT_LENGTH)
       if (text === null) {
-        notes.push(`${label} 的 text 为空，已丢弃`)
+        collector.droppedItemCount += 1
+        pushNote(collector, `${block.key} 含空文本条目，已丢弃`)
         return
       }
       if (!isHumanizedUserText(text)) {
         hasUnsafeText = true
-        notes.push(`${label} 的 text 不符合中文安全要求`)
+        collector.droppedItemCount += 1
+        pushNote(collector, `${block.key} 含不符合中文安全要求的条目`)
         return
       }
 
-      const sources = buildSources(item.segmentIds, segments, input, `${label}.segmentIds`, notes)
-      if (sources.length === 0) {
-        notes.push(`${label} 没有可用的来源，已丢弃`)
+      const sourcesResult = buildSources(item.segmentIds, segments, input)
+      collector.unknownSegmentReferenceCount += sourcesResult.unknownReferenceCount
+      if (sourcesResult.hasShapeIssue) pushNote(collector, `${block.key} 的引用结构不合法`)
+
+      if (sourcesResult.sources.length === 0) {
+        collector.droppedItemCount += 1
+        pushNote(collector, `${block.key} 含没有可用来源的条目，已丢弃`)
         return
       }
 
-      items.push({ itemId: `cnd_${block.short}_${items.length}`, text, sources })
+      items.push({ itemId: `cnd_${block.short}_${items.length}`, text, sources: sourcesResult.sources })
     })
 
     draft[block.key] = items
   }
 
   if (hasUnsafeText) {
-    notes.push('输出包含内部字段名或非中文文本')
-    return { ok: false, notes }
+    pushNote(collector, '输出包含内部字段名或非中文文本')
+    return { ok: false, summary: toSummary(collector, { unsafeOutput: true, emptyOutput: false }) }
   }
 
   const total = DRAFT_BLOCKS.reduce((sum, block) => sum + draft[block.key].length, 0)
   if (total === 0) {
-    notes.push('清理后没有任何候选')
-    return { ok: false, notes }
+    pushNote(collector, '清理后没有任何候选')
+    return { ok: false, summary: toSummary(collector, { unsafeOutput: false, emptyOutput: true }) }
   }
 
-  return { ok: true, draft, notes }
+  return { ok: true, draft, summary: toSummary(collector, { unsafeOutput: false, emptyOutput: false }) }
+}
+
+/** 摘要里是否存在需要记日志的问题 */
+export function hasSummaryIssues(summary: NormalizeDraftSummary): boolean {
+  return (
+    summary.unknownSegmentReferenceCount > 0 ||
+    summary.droppedItemCount > 0 ||
+    summary.unsafeOutput ||
+    summary.emptyOutput ||
+    summary.notes.length > 0
+  )
+}
+
+/**
+ * 只用于日志的明细：字段固定、条数与长度都有上限。
+ * requestId 由调用方补；这里绝不包含模型原始文本、原始 segmentId 或材料正文。
+ */
+export function toLogDetail(summary: NormalizeDraftSummary): Record<string, unknown> {
+  return {
+    unknownSegmentReferenceCount: summary.unknownSegmentReferenceCount,
+    droppedItemCount: summary.droppedItemCount,
+    unsafeOutput: summary.unsafeOutput,
+    emptyOutput: summary.emptyOutput,
+    notes: summary.notes.slice(0, MAX_SUMMARY_NOTES),
+  }
 }
 
 /* ---------------------------------------------------------------- 服务层 */
@@ -313,8 +405,12 @@ export function createMaterialsService(options: MaterialsServiceOptions): Materi
       }
 
       const normalized = normalizeUnderstandingDraft(outcome.output, input)
-      if (normalized.notes.length > 0) {
-        logger.warn('材料理解输出被清理', { requestId: input.requestId, notes: normalized.notes })
+      if (hasSummaryIssues(normalized.summary)) {
+        // 日志只带类别与数量：模型输出不可信，原始文本与原始编号都不落日志
+        logger.warn('材料理解输出被清理', {
+          requestId: input.requestId,
+          ...toLogDetail(normalized.summary),
+        })
       }
 
       if (!normalized.ok) {

@@ -5,8 +5,9 @@ import { createApp } from '../src/index.js'
 import { createAdvisorService } from '../src/advisor/service.js'
 import { createRuleFallback } from '../src/advisor/fallback.js'
 import { createMockProvider } from '../src/advisor/mockProvider.js'
-import { createMaterialsService } from '../src/materials/understanding.js'
-import { silentLogger, type AdvisorProvider } from '../src/advisor/types.js'
+import { MAX_NOTE_LENGTH, MAX_SUMMARY_NOTES, createMaterialsService } from '../src/materials/understanding.js'
+import { silentLogger, type AdvisorLogger, type AdvisorProvider } from '../src/advisor/types.js'
+import type { MaterialsUnderstandingInput } from '../src/materials/types.js'
 import type { ServerConfig } from '../src/config.js'
 
 /**
@@ -140,6 +141,14 @@ test('模型成功：source=model，来源回填材料名与行号', async () =>
     assert.equal(source.segmentId, 'seg_0')
     assert.equal(source.startLine, 1)
     assert.equal(source.endLine, 4)
+
+    // 第二个片段的引用同样按请求回填材料名、版本与行号（seg_1 是 6-9 行）
+    const secondSource = (draft.dataNotes[0].sources as Array<Record<string, unknown>>)[0]
+    assert.equal(secondSource.materialName, '实验手册.md')
+    assert.equal(secondSource.materialVersion, 1)
+    assert.equal(secondSource.segmentId, 'seg_1')
+    assert.equal(secondSource.startLine, 6)
+    assert.equal(secondSource.endLine, 9)
 
     for (const items of Object.values(draft)) {
       assert.ok(items.length <= 5)
@@ -331,6 +340,25 @@ test('片段超过 100 条时返回 400，不做静默截断', async () => {
   })
 })
 
+test('重复 segmentId 返回 400 INVALID_INPUT', async () => {
+  await withProvider(createMockProvider(), async (app) => {
+    const body = understandingBody()
+    const material = body.material as Record<string, unknown>
+    const segments = [
+      { segmentId: 'seg_0', startLine: 1, endLine: 4, text: '第一段内容' },
+      { segmentId: 'seg_0', startLine: 6, endLine: 9, text: '重复编号的第二段内容' },
+    ]
+
+    const response = await post(app.baseUrl, { ...body, material: { ...material, segments } })
+    const result = (await response.json()) as Record<string, unknown>
+
+    assert.equal(response.status, 400)
+    assert.equal(result.code, 'INVALID_INPUT')
+    assert.match(String(result.message), /重复/)
+    assert.equal(result.retryable, false)
+  })
+})
+
 test('promptVersion 不受支持时返回 400', async () => {
   await withProvider(createMockProvider(), async (app) => {
     const response = await post(app.baseUrl, understandingBody({ promptVersion: 'mvp-prompt-v2' }))
@@ -353,4 +381,126 @@ test('非 POST 方法与非法 JSON 的响应结构正确', async () => {
     assert.equal(badBody.code, 'INVALID_INPUT')
     assert.equal(badBody.requestId, null)
   })
+})
+
+/* --------------------------------------------- 日志卫生（回归，契约 12.2） */
+
+/** 捕获 warn 调用的 logger：用于断言敏感文本不落日志 */
+function recordingLogger(): {
+  logger: AdvisorLogger
+  entries: Array<{ message: string; detail: Record<string, unknown> }>
+} {
+  const entries: Array<{ message: string; detail: Record<string, unknown> }> = []
+  return {
+    entries,
+    logger: {
+      warn(message, detail) {
+        entries.push({ message, detail: detail ?? {} })
+      },
+    },
+  }
+}
+
+function serviceLevelInput(): MaterialsUnderstandingInput {
+  return {
+    requestId: 'log_check_1',
+    projectId: 'prj_1',
+    projectRevision: 2,
+    projectName: null,
+    promptVersion: 'material-understanding-v1',
+    material: {
+      materialId: 'mat_log',
+      name: '实验手册.md',
+      type: 'md',
+      version: 1,
+      segments: [{ segmentId: 'seg_0', startLine: 1, endLine: 2, text: '一段材料内容' }],
+    },
+  }
+}
+
+/** 模型返回一个夹带敏感长文本的未知 segmentId，外加一个合法引用 */
+function leakyProvider(): AdvisorProvider {
+  const sensitive = `SK-${'A'.repeat(500)}-不应进入日志的材料正文`
+  return {
+    name: 'unknown-ref',
+    async generate() {
+      return { suggestions: [] }
+    },
+    async generateUnderstanding() {
+      return {
+        draft: {
+          goalCandidates: [{ text: '材料中提到了这一步要完成的目标', segmentIds: [sensitive, 'seg_0'] }],
+          outcomeCandidates: [],
+          dataNotes: [],
+          methodNotes: [],
+          openQuestions: [],
+        },
+      }
+    },
+  }
+}
+
+test('未知引用不把原始 segmentId 写入日志（回归）', async () => {
+  const { logger, entries } = recordingLogger()
+  const service = createMaterialsService({ provider: leakyProvider(), logger, timeoutMs: 1000 })
+  const result = await service.understand(serviceLevelInput())
+
+  assert.equal(result.ok, true)
+  if (result.ok) {
+    assert.equal(result.source, 'model')
+    assert.equal(result.draft.goalCandidates.length, 1)
+    assert.equal(result.draft.goalCandidates[0].sources[0].segmentId, 'seg_0')
+  }
+
+  const joined = entries.map((entry) => `${entry.message} ${JSON.stringify(entry.detail)}`).join('\n')
+  assert.match(joined, /unknownSegmentReferenceCount/)
+  assert.match(joined, /droppedItemCount/)
+  assert.doesNotMatch(joined, /SK-A{3,}/)
+  assert.doesNotMatch(joined, /不应进入日志的材料正文/)
+  assert.doesNotMatch(joined, /seg_0/) // 合法引用也不以原始编号形式落日志
+
+  const notes = entries.flatMap((entry) =>
+    Array.isArray(entry.detail.notes) ? (entry.detail.notes as string[]) : [],
+  )
+  assert.ok(notes.length <= MAX_SUMMARY_NOTES)
+  assert.ok(notes.every((note) => note.length <= MAX_NOTE_LENGTH))
+})
+
+test('全部条目因未知引用被丢弃时走兜底，日志仍不含原始编号', async () => {
+  const sensitive = `MAT-${'B'.repeat(400)}-敏感正文`
+  const provider: AdvisorProvider = {
+    name: 'all-unknown-ref',
+    async generate() {
+      return { suggestions: [] }
+    },
+    async generateUnderstanding() {
+      return {
+        draft: {
+          goalCandidates: [{ text: '材料中写到的目标', segmentIds: [sensitive] }],
+          outcomeCandidates: [],
+          dataNotes: [],
+          methodNotes: [],
+          openQuestions: [],
+        },
+      }
+    },
+  }
+
+  const { logger, entries } = recordingLogger()
+  const service = createMaterialsService({ provider, logger, timeoutMs: 1000 })
+  const result = await service.understand(serviceLevelInput())
+
+  assert.equal(result.ok, true)
+  if (result.ok) {
+    assert.equal(result.source, 'fallback')
+    assert.equal(result.fallbackReason, 'INVALID_MODEL_OUTPUT')
+  }
+
+  const joined = JSON.stringify(entries)
+  assert.doesNotMatch(joined, /MAT-B{3,}/)
+  assert.doesNotMatch(joined, /敏感正文/)
+
+  const withUnknown = entries.find((entry) => entry.detail.unknownSegmentReferenceCount !== undefined)
+  assert.equal(withUnknown?.detail.unknownSegmentReferenceCount, 1)
+  assert.ok(Number(withUnknown?.detail.droppedItemCount) >= 1)
 })

@@ -258,6 +258,36 @@ describe('理解接口校验', () => {
     }
   })
 
+  test('重复 segmentId 被拒绝，不依赖 Map 的后写覆盖', () => {
+    const body = understandingBody()
+    const material = body.material as Record<string, unknown>
+    const segments = [
+      { segmentId: 'seg_0', startLine: 1, endLine: 2, text: '第一段内容' },
+      { segmentId: 'seg_0', startLine: 3, endLine: 4, text: '第二段内容' },
+    ]
+    const result = parseMaterialsUnderstandingRequest({ ...body, material: { ...material, segments } })
+
+    assert.equal(result.ok, false)
+    if (!result.ok) {
+      assert.equal(result.code, 'INVALID_INPUT')
+      assert.match(result.message, /segmentId/)
+      assert.match(result.message, /重复/)
+    }
+  })
+
+  test('segmentId 各不相同时仍可正确解析（回填依据）', () => {
+    const result = parseMaterialsUnderstandingRequest(understandingBody())
+    assert.equal(result.ok, true)
+    if (result.ok) {
+      assert.deepEqual(
+        result.value.material.segments.map((segment) => segment.segmentId),
+        ['seg_0', 'seg_1'],
+      )
+      assert.equal(result.value.material.segments[1].startLine, 6)
+      assert.equal(result.value.material.segments[1].endLine, 7)
+    }
+  })
+
   test('片段超过 100 条时拒绝，不做静默截断', () => {
     const segments = Array.from({ length: 101 }, (_, index) => ({
       segmentId: `seg_${index}`,
