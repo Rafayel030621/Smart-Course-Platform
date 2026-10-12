@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { ADVISOR_RECOMMENDATIONS_PATH } from './advisor.js'
 import { ADVISOR_CHAT_PATH } from './advisorChat.js'
+import { MATERIALS_PATH, MATERIALS_UNDERSTANDING_PATH } from './materials.js'
 import { sendJson } from './health.js'
 
 /** Browser origins allowed to call the advisor API. */
@@ -21,12 +22,22 @@ function setCorsHeaders(res: ServerResponse): void {
 }
 
 function isAllowedOrigin(origin: string | undefined): origin is (typeof ALLOWED_CORS_ORIGINS)[number] {
-  return origin !== undefined && ALLOWED_CORS_ORIGINS.includes(origin as (typeof ALLOWED_CORS_ORIGINS)[number])
+  return (
+    origin !== undefined && ALLOWED_CORS_ORIGINS.includes(origin as (typeof ALLOWED_CORS_ORIGINS)[number])
+  )
 }
 
-/** Handle CORS for the advisor endpoint before its normal route handler. */
-export function handleAdvisorCors(req: IncomingMessage, res: ServerResponse): boolean {
-  if (requestPath(req) !== ADVISOR_RECOMMENDATIONS_PATH && requestPath(req) !== ADVISOR_CHAT_PATH) return false
+/** 需要跨域处理的 API 路径：建议、聊天与两个材料接口（契约 7.4） */
+const CORS_PATHS: readonly string[] = [
+  ADVISOR_RECOMMENDATIONS_PATH,
+  ADVISOR_CHAT_PATH,
+  MATERIALS_PATH,
+  MATERIALS_UNDERSTANDING_PATH,
+]
+
+/** Handle CORS for the API endpoints before their normal route handlers. */
+export function handleApiCors(req: IncomingMessage, res: ServerResponse): boolean {
+  if (!CORS_PATHS.includes(requestPath(req))) return false
 
   const origin = req.headers.origin
   if (origin !== undefined && !isAllowedOrigin(origin)) {

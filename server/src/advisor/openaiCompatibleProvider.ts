@@ -1,4 +1,5 @@
 import { PROMPT_TEMPERATURE, buildChatMessages, buildMessages } from './prompt.js'
+import { buildUnderstandingMessages } from '../materials/prompt.js'
 import {
   AdvisorProviderError,
   silentLogger,
@@ -9,6 +10,7 @@ import {
   type FetchLike,
   type ModelEndpoint,
   type ProviderOutput,
+  type UnderstandingProviderInput,
 } from './types.js'
 
 /**
@@ -118,7 +120,16 @@ export function createOpenAiCompatibleProvider(options: OpenAiCompatibleProvider
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), endpoint.timeoutMs)
     try {
-      const response = await fetchImpl(endpoint.url, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${endpoint.apiKey}` }, body: JSON.stringify({ model: endpoint.model, messages: buildChatMessages(request), temperature: PROMPT_TEMPERATURE }), signal: controller.signal })
+      const response = await fetchImpl(endpoint.url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${endpoint.apiKey}` },
+        body: JSON.stringify({
+          model: endpoint.model,
+          messages: buildChatMessages(request),
+          temperature: PROMPT_TEMPERATURE,
+        }),
+        signal: controller.signal,
+      })
       if (!response.ok) throw new AdvisorProviderError(`模型服务返回 ${response.status}`, 'MODEL_UNAVAILABLE')
       const payload = await readJsonSafely(response)
       const content = readAssistantContent(payload)
@@ -127,12 +138,85 @@ export function createOpenAiCompatibleProvider(options: OpenAiCompatibleProvider
     } catch (error) {
       if (controller.signal.aborted) throw new AdvisorProviderError('模型调用超时', 'MODEL_TIMEOUT')
       if (error instanceof AdvisorProviderError) throw error
-      logger.warn('模型聊天请求失败', { provider: name, detail: error instanceof Error ? error.name : 'unknown' })
+      logger.warn('模型聊天请求失败', {
+        provider: name,
+        detail: error instanceof Error ? error.name : 'unknown',
+      })
       throw new AdvisorProviderError('模型请求失败', 'MODEL_UNAVAILABLE')
-    } finally { clearTimeout(timer) }
+    } finally {
+      clearTimeout(timer)
+    }
   }
 
-  return { name, generate, generateChat }
+  /**
+   * v2（M2-A）材料理解（契约 15.2）：与 generate 同一套请求形态，只是提示词不同。
+   * 只把模型内容解析成 JSON 返回，字段与引用校验全部交给 materials 的输出校验层。
+   */
+  async function generateUnderstanding(request: UnderstandingProviderInput): Promise<{ draft: unknown }> {
+    if (endpoint === null) {
+      throw new AdvisorProviderError(
+        `模型配置缺失，请设置：${missingEnvNames.length > 0 ? missingEnvNames.join(' / ') : DEFAULT_MISSING_HINT}`,
+        'MODEL_NOT_CONFIGURED',
+      )
+    }
+
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), endpoint.timeoutMs)
+
+    try {
+      const response = await fetchImpl(endpoint.url, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${endpoint.apiKey}`,
+        },
+        body: JSON.stringify({
+          model: endpoint.model,
+          messages: buildUnderstandingMessages(request),
+          temperature: PROMPT_TEMPERATURE,
+        }),
+        signal: controller.signal,
+      })
+
+      if (!response.ok) {
+        logger.warn('模型服务返回非 2xx', { provider: name, status: response.status })
+        throw new AdvisorProviderError(`模型服务返回 ${response.status}`, 'MODEL_UNAVAILABLE')
+      }
+
+      const payload = await readJsonSafely(response)
+      const content = readAssistantContent(payload)
+      if (content === null) {
+        logger.warn('模型响应结构不完整（缺少 choices[0].message.content）', { provider: name })
+        throw new AdvisorProviderError('模型响应结构不完整', 'INVALID_MODEL_OUTPUT')
+      }
+
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(stripCodeFence(content))
+      } catch {
+        logger.warn('模型返回的 content 不是合法 JSON', { provider: name })
+        throw new AdvisorProviderError('模型返回的 content 不是合法 JSON', 'INVALID_MODEL_OUTPUT')
+      }
+
+      return { draft: parsed }
+    } catch (error) {
+      if (controller.signal.aborted) {
+        logger.warn('模型调用超时', { provider: name, timeoutMs: endpoint.timeoutMs })
+        throw new AdvisorProviderError(`模型调用超过 ${endpoint.timeoutMs} 毫秒未返回`, 'MODEL_TIMEOUT')
+      }
+      if (error instanceof AdvisorProviderError) throw error
+
+      logger.warn('模型材料理解请求失败', {
+        provider: name,
+        detail: error instanceof Error ? error.name : 'unknown',
+      })
+      throw new AdvisorProviderError('模型请求失败', 'MODEL_UNAVAILABLE')
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  return { name, generate, generateChat, generateUnderstanding }
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
