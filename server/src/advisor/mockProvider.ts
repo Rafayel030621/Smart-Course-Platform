@@ -4,6 +4,7 @@ import {
   type AdvisorRequest,
   type ProviderOutput,
   type Suggestion,
+  type UnderstandingProviderInput,
 } from './types.js'
 
 /**
@@ -77,6 +78,27 @@ export function createMockProvider(options: MockProviderOptions = {}): AdvisorPr
       if (mode === 'invalid' || mode === 'empty') return { answer: '' }
       return { answer: `基于当前项目状态，建议先围绕“${request.question}”检查已有证据，再把可验证的下一步记录下来。` }
     },
+    // v2（M2-A）材料理解：与 generate 一样按 mode 给出确定性的成功/失败路径
+    async generateUnderstanding(request) {
+      switch (mode) {
+        case 'throw':
+          throw new Error('mock provider 模拟上游故障')
+        case 'not-configured':
+          throw new AdvisorProviderError('mock provider 未读取到模型密钥', 'MODEL_NOT_CONFIGURED')
+        case 'slow':
+          await new Promise<void>((resolve) => {
+            setTimeout(resolve, delayMs)
+          })
+          return { draft: buildMockUnderstandingDraft(request) }
+        case 'empty':
+          return { draft: { goalCandidates: [], outcomeCandidates: [], dataNotes: [], methodNotes: [], openQuestions: [] } }
+        case 'invalid':
+          // 文本为空 + 引用不存在的片段：输出校验会全部丢弃，最终走 fallback
+          return { draft: { goalCandidates: [{ text: '   ', segmentIds: ['seg_missing'] }] } }
+        default:
+          return { draft: buildMockUnderstandingDraft(request) }
+      }
+    },
   }
 }
 
@@ -149,4 +171,38 @@ export function buildMockSuggestions(request: AdvisorRequest): Suggestion[] {
   }
 
   return suggestions.slice(0, 3)
+}
+
+/**
+ * v2（M2-A）材料理解的 mock 输出：只引用本次请求里出现的片段，文本为自然中文且不含内部字段名，
+ * 因此能稳定通过输出校验（用于本地联调与测试，不用于部署）。
+ */
+export function buildMockUnderstandingDraft(request: UnderstandingProviderInput): unknown {
+  const first = request.segments[0]
+  const second = request.segments[1]
+
+  const goalCandidates: Array<{ text: string; segmentIds: string[] }> = []
+  if (first !== undefined) {
+    goalCandidates.push({
+      text: `材料《${request.materialName}》第 ${first.startLine} 行起说明了这一步要完成的事情`,
+      segmentIds: [first.segmentId],
+    })
+  }
+
+  const dataNotes: Array<{ text: string; segmentIds: string[] }> = []
+  if (second !== undefined) {
+    dataNotes.push({
+      text: `材料《${request.materialName}》第 ${second.startLine} 行起给出了数据相关说明`,
+      segmentIds: [second.segmentId],
+    })
+  }
+
+  const openQuestions: Array<{ text: string; segmentIds: string[] }> = first === undefined
+    ? []
+    : [{
+        text: `材料《${request.materialName}》没有覆盖的内容需要你们补充确认`,
+        segmentIds: [first.segmentId],
+      }]
+
+  return { goalCandidates, outcomeCandidates: [], dataNotes, methodNotes: [], openQuestions }
 }

@@ -1,12 +1,16 @@
 import {
+  ADVISOR_CHAT_PROMPT_VERSIONS,
+  ADVISOR_PROMPT_VERSIONS,
   CONTRACT_VERSION,
-  SUPPORTED_PROMPT_VERSIONS,
   type AdvisorChatRequest,
   type AdvisorRequest,
   type ChatMessage,
+  type ConfirmedMaterial,
+  type ConfirmedMaterialSegment,
   type DoubtSnapshot,
   type DoubtStatus,
   type EvidenceSnapshot,
+  type ProjectProfile,
   type Suggestion,
   type TaskSnapshot,
   type TaskStatus,
@@ -47,6 +51,15 @@ export const LIMITS = {
   chatMessageLength: 2000,
   questionLength: 2000,
   answerLength: 4000,
+  /* ---------------- v2（M2-A）：项目基本信息与已确认材料摘录 ---------------- */
+  profileTextLength: 300,
+  profilePeriodLength: 100,
+  profileMembers: 10,
+  profileMemberNameLength: 30,
+  confirmedMaterials: 3,
+  confirmedMaterialSegments: 20,
+  confirmedMaterialTextChars: 8_000,
+  confirmedMaterialSegmentLength: 2000,
 } as const
 
 const TASK_STATUSES: readonly TaskStatus[] = ['todo', 'doing', 'done']
@@ -86,6 +99,17 @@ const INTERNAL_OUTPUT_TERMS = [
   'doing',
   'todo',
   'done',
+  // v2（M2-A）：材料相关内部词（契约 15.3）
+  'materialId',
+  'materialVersion',
+  'segmentId',
+  'segments',
+  'draft',
+  'goalCandidates',
+  'outcomeCandidates',
+  'dataNotes',
+  'methodNotes',
+  'openQuestions',
 ] as const
 
 const INTERNAL_OUTPUT_TERM_PATTERN = new RegExp(
@@ -345,6 +369,183 @@ function parseDoubt(raw: unknown, index: number, issues: string[]): DoubtSnapsho
   return { doubtId, text, status: status as DoubtStatus, sourceEvidenceId, createdAt }
 }
 
+/* ------------------------------------- 请求：v2 项目基本信息与材料摘录 */
+
+/** 读取"≥ 1 的整数"行号 */
+function readLineNumber(
+  source: Record<string, unknown>,
+  key: string,
+  issues: string[],
+  path: string,
+): number | undefined {
+  const value = source[key]
+  if (value === undefined) {
+    issues.push(`${path} 缺失`)
+    return undefined
+  }
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
+    issues.push(`${path} 必须是 ≥ 1 的整数`)
+    return undefined
+  }
+  return value
+}
+
+/**
+ * 解析项目基本信息（契约 13.1）。字段必填可空；缺失（undefined）或 null 表示本次请求不携带。
+ * 不补默认值：对象内部缺字段会记入 issues。
+ */
+function parseProjectProfile(raw: unknown, issues: string[]): ProjectProfile | null | undefined {
+  if (raw === undefined || raw === null) return null
+  if (!isPlainObject(raw)) {
+    issues.push('projectProfile 必须是对象或 null')
+    return undefined
+  }
+
+  const goal = readNullableString(raw, 'goal', LIMITS.profileTextLength, issues, 'projectProfile.goal')
+  const expectedOutcome = readNullableString(raw, 'expectedOutcome', LIMITS.profileTextLength, issues, 'projectProfile.expectedOutcome')
+  const researchPeriod = readNullableString(raw, 'researchPeriod', LIMITS.profilePeriodLength, issues, 'projectProfile.researchPeriod')
+  const scope = readNullableString(raw, 'scope', LIMITS.profileTextLength, issues, 'projectProfile.scope')
+  const outOfScope = readNullableString(raw, 'outOfScope', LIMITS.profileTextLength, issues, 'projectProfile.outOfScope')
+
+  const membersRaw = raw.memberNames
+  let memberNames: string[] | undefined
+  if (membersRaw === undefined) {
+    issues.push('projectProfile.memberNames 缺失')
+  } else if (!Array.isArray(membersRaw)) {
+    issues.push('projectProfile.memberNames 必须是数组')
+  } else {
+    const members: string[] = []
+    membersRaw.forEach((item, index) => {
+      if (typeof item !== 'string') {
+        issues.push(`projectProfile.memberNames[${index}] 必须是字符串`)
+        return
+      }
+      const trimmed = item.trim()
+      if (trimmed === '') return
+      if (trimmed.length > LIMITS.profileMemberNameLength) {
+        issues.push(`projectProfile.memberNames[${index}] 超过长度上限 ${LIMITS.profileMemberNameLength}`)
+        return
+      }
+      members.push(trimmed)
+    })
+    if (members.length > LIMITS.profileMembers) {
+      issues.push(`projectProfile.memberNames 最多 ${LIMITS.profileMembers} 人`)
+    } else {
+      memberNames = members
+    }
+  }
+
+  if (
+    goal === undefined ||
+    expectedOutcome === undefined ||
+    researchPeriod === undefined ||
+    scope === undefined ||
+    outOfScope === undefined ||
+    memberNames === undefined
+  ) {
+    return undefined
+  }
+
+  return { goal, expectedOutcome, memberNames, researchPeriod, scope, outOfScope }
+}
+
+/**
+ * 解析已确认材料摘录（契约 17.1）。缺失（undefined）或 null 按空数组处理。
+ * 服务端无法判断"是否真的已确认"（无服务端状态），只校验结构、上限与引用格式。
+ */
+function parseConfirmedMaterials(raw: unknown, issues: string[]): ConfirmedMaterial[] | undefined {
+  if (raw === undefined || raw === null) return []
+  if (!Array.isArray(raw)) {
+    issues.push('confirmedMaterials 必须是数组')
+    return undefined
+  }
+  if (raw.length > LIMITS.confirmedMaterials) {
+    issues.push(`confirmedMaterials 最多 ${LIMITS.confirmedMaterials} 份材料`)
+    return undefined
+  }
+
+  const materials: ConfirmedMaterial[] = []
+  let totalSegments = 0
+  let totalChars = 0
+
+  raw.forEach((item, index) => {
+    const path = `confirmedMaterials[${index}]`
+    if (!isPlainObject(item)) {
+      issues.push(`${path} 必须是对象`)
+      return
+    }
+
+    const materialId = readRequiredString(item, 'materialId', LIMITS.idLength, issues, `${path}.materialId`)
+    const name = readRequiredString(item, 'name', 200, issues, `${path}.name`)
+    const type = readRequiredString(item, 'type', 8, issues, `${path}.type`)
+    if (type !== undefined && type !== 'md' && type !== 'txt') {
+      issues.push(`${path}.type 必须是 md / txt 之一`)
+    }
+
+    let version: number | undefined
+    const versionRaw = item.version
+    if (versionRaw === undefined) {
+      issues.push(`${path}.version 缺失`)
+    } else if (typeof versionRaw !== 'number' || !Number.isInteger(versionRaw) || versionRaw < 1) {
+      issues.push(`${path}.version 必须是 ≥ 1 的整数`)
+    } else {
+      version = versionRaw
+    }
+
+    const segmentsRaw = item.segments
+    const segments: ConfirmedMaterialSegment[] = []
+    if (segmentsRaw === undefined) {
+      issues.push(`${path}.segments 缺失`)
+    } else if (!Array.isArray(segmentsRaw)) {
+      issues.push(`${path}.segments 必须是数组`)
+    } else {
+      segmentsRaw.forEach((segment, segmentIndex) => {
+        const segmentPath = `${path}.segments[${segmentIndex}]`
+        if (!isPlainObject(segment)) {
+          issues.push(`${segmentPath} 必须是对象`)
+          return
+        }
+        const segmentId = readRequiredString(segment, 'segmentId', LIMITS.idLength, issues, `${segmentPath}.segmentId`)
+        const text = readRequiredString(
+          segment,
+          'text',
+          LIMITS.confirmedMaterialSegmentLength,
+          issues,
+          `${segmentPath}.text`,
+        )
+        const startLine = readLineNumber(segment, 'startLine', issues, `${segmentPath}.startLine`)
+        const endLine = readLineNumber(segment, 'endLine', issues, `${segmentPath}.endLine`)
+        if (startLine !== undefined && endLine !== undefined && endLine < startLine) {
+          issues.push(`${segmentPath}.endLine 不能小于 startLine`)
+          return
+        }
+        if (segmentId === undefined || text === undefined || startLine === undefined || endLine === undefined) return
+
+        segments.push({ segmentId, startLine, endLine, text })
+        totalSegments += 1
+        totalChars += text.length
+      })
+    }
+
+    if (materialId === undefined || name === undefined || type === undefined || version === undefined) return
+    materials.push({ materialId, name, type: type as 'md' | 'txt', version, segments })
+  })
+
+  if (totalSegments > LIMITS.confirmedMaterialSegments) {
+    issues.push(`confirmedMaterials 的片段合计最多 ${LIMITS.confirmedMaterialSegments} 条`)
+    return undefined
+  }
+  if (totalChars > LIMITS.confirmedMaterialTextChars) {
+    issues.push(`confirmedMaterials 的文本合计最多 ${LIMITS.confirmedMaterialTextChars} 字`)
+    return undefined
+  }
+
+  return materials
+}
+
+/** v1 取值：携带 v2 字段时不允许继续使用（契约 17.4） */
+const V1_PROMPT_VERSIONS: readonly string[] = ['mvp-prompt-v1', 'advisor-chat-v1']
+
 /* ------------------------------------------------------------- 请求：入口 */
 
 export interface ParseSuccess {
@@ -375,8 +576,14 @@ export function extractRequestId(body: unknown): string | null {
   return trimmed
 }
 
-/** 校验请求体。未知字段一律忽略（契约 8.4） */
-export function parseAdvisorRequest(body: unknown, expectedPromptVersion = 'mvp-prompt-v1'): ParseResult {
+/**
+ * 校验请求体。未知字段一律忽略（契约 8.4）。
+ * `allowedPromptVersions` 由调用方按接口传入（建议接口 / 聊天接口各有一组，见 17.4）。
+ */
+export function parseAdvisorRequest(
+  body: unknown,
+  allowedPromptVersions: readonly string[] = ADVISOR_PROMPT_VERSIONS,
+): ParseResult {
   if (!isPlainObject(body)) {
     return { ok: false, requestId: null, issues: ['请求体必须是一个 JSON 对象'] }
   }
@@ -390,8 +597,8 @@ export function parseAdvisorRequest(body: unknown, expectedPromptVersion = 'mvp-
   }
 
   const promptVersion = readRequiredString(body, 'promptVersion', LIMITS.idLength, issues)
-  if (promptVersion !== undefined && (!SUPPORTED_PROMPT_VERSIONS.includes(promptVersion) || promptVersion !== expectedPromptVersion)) {
-    issues.push(`promptVersion 必须是 "${expectedPromptVersion}"`)
+  if (promptVersion !== undefined && !allowedPromptVersions.includes(promptVersion)) {
+    issues.push(`promptVersion 必须是 ${allowedPromptVersions.map((value) => `"${value}"`).join(' / ')} 之一`)
   }
 
   if (requestId === null) {
@@ -440,6 +647,17 @@ export function parseAdvisorRequest(body: unknown, expectedPromptVersion = 'mvp-
   const evidence = parseArray(body, 'evidence', LIMITS.evidence, issues, parseEvidence)
   const doubts = parseArray(body, 'doubts', LIMITS.doubts, issues, parseDoubt)
 
+  const projectProfile = parseProjectProfile(body.projectProfile, issues)
+  const confirmedMaterials = parseConfirmedMaterials(body.confirmedMaterials, issues)
+
+  // v2 门禁（契约 17.4）：携带项目基本信息或非空材料摘录时必须使用 v2 提示词版本
+  const carriesV2Fields =
+    isPlainObject(body.projectProfile) ||
+    (Array.isArray(body.confirmedMaterials) && body.confirmedMaterials.length > 0)
+  if (carriesV2Fields && promptVersion !== undefined && V1_PROMPT_VERSIONS.includes(promptVersion)) {
+    issues.push('携带 projectProfile 或 confirmedMaterials 时必须使用 v2 提示词版本')
+  }
+
   if (issues.length > 0) return { ok: false, requestId, issues }
 
   return {
@@ -456,6 +674,8 @@ export function parseAdvisorRequest(body: unknown, expectedPromptVersion = 'mvp-
       doubts: doubts as DoubtSnapshot[],
       promptVersion: promptVersion as string,
       forceRefresh: forceRefresh as boolean,
+      projectProfile: projectProfile ?? null,
+      confirmedMaterials: confirmedMaterials ?? [],
     },
   }
 }
@@ -467,8 +687,6 @@ export function parseAdvisorChatRequest(body: unknown): ChatParseResult {
   if (!isPlainObject(body)) return { ok: false, requestId: null, issues: ['请求体必须是一个 JSON 对象'] }
   const requestId = extractRequestId(body)
   const issues: string[] = []
-  if (body.contractVersion !== CONTRACT_VERSION) issues.push(`contractVersion 必须是 "${CONTRACT_VERSION}"`)
-  if (body.promptVersion !== 'advisor-chat-v1') issues.push('promptVersion 必须是 "advisor-chat-v1"')
   const historyRaw = body.chatHistory
   const question = readRequiredString(body, 'question', LIMITS.questionLength, issues)
   if (historyRaw === undefined) issues.push('chatHistory 缺失')
@@ -485,8 +703,8 @@ export function parseAdvisorChatRequest(body: unknown): ChatParseResult {
       if (text !== undefined) history.push({ role, text })
     })
   }
-  const synthetic = { ...body, promptVersion: 'advisor-chat-v1', confirmedContext: [], forceRefresh: false }
-  const base = parseAdvisorRequest(synthetic, 'advisor-chat-v1')
+  const synthetic = { ...body, confirmedContext: [], forceRefresh: false }
+  const base = parseAdvisorRequest(synthetic, ADVISOR_CHAT_PROMPT_VERSIONS)
   if (!base.ok) issues.push(...base.issues)
   if (issues.length > 0 || !base.ok || question === undefined || requestId === null) {
     return { ok: false, requestId, issues: issues.length > 0 ? issues : ['请求内容不合法'] }
@@ -504,7 +722,9 @@ export function parseAdvisorChatRequest(body: unknown): ChatParseResult {
       doubts: base.value.doubts,
       chatHistory: history,
       question,
-      promptVersion: 'advisor-chat-v1',
+      promptVersion: base.value.promptVersion,
+      projectProfile: base.value.projectProfile ?? null,
+      confirmedMaterials: base.value.confirmedMaterials ?? [],
     },
   }
 }
