@@ -9,7 +9,11 @@ import { createRuleFallback } from '../src/advisor/fallback.js'
 import { silentLogger, type AdvisorProvider } from '../src/advisor/types.js'
 import type { ServerConfig } from '../src/config.js'
 
-const ALLOWED_ORIGIN = 'https://course.xinxian-music.xyz'
+const ALLOWED_ORIGINS = [
+  'https://course.xinxian-music.xyz',
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+] as const
 const DENIED_ORIGIN = 'https://example.com'
 const PATH = '/api/advisor/recommendations'
 const config: ServerConfig = {
@@ -68,38 +72,42 @@ after(async () => {
   })
 })
 
-test('允许的 OPTIONS 预检返回 204 和白名单 CORS 头', async () => {
-  const response = await fetch(`${baseUrl}${PATH}`, {
-    method: 'OPTIONS',
-    headers: {
-      Origin: ALLOWED_ORIGIN,
-      'Access-Control-Request-Method': 'POST',
-      'Access-Control-Request-Headers': 'Content-Type',
-    },
+for (const allowedOrigin of ALLOWED_ORIGINS) {
+  test(`允许的 OPTIONS 预检返回 204：${allowedOrigin}`, async () => {
+    const response = await fetch(`${baseUrl}${PATH}`, {
+      method: 'OPTIONS',
+      headers: {
+        Origin: allowedOrigin,
+        'Access-Control-Request-Method': 'POST',
+        'Access-Control-Request-Headers': 'Content-Type',
+      },
+    })
+
+    assert.equal(response.status, 204)
+    assert.equal(response.headers.get('access-control-allow-origin'), allowedOrigin)
+    assert.equal(response.headers.get('access-control-allow-methods'), 'POST, OPTIONS')
+    assert.equal(response.headers.get('access-control-allow-headers'), 'Content-Type')
+    assert.equal(response.headers.get('vary'), 'Origin')
   })
+}
 
-  assert.equal(response.status, 204)
-  assert.equal(response.headers.get('access-control-allow-origin'), ALLOWED_ORIGIN)
-  assert.equal(response.headers.get('access-control-allow-methods'), 'POST, OPTIONS')
-  assert.equal(response.headers.get('access-control-allow-headers'), 'Content-Type')
-  assert.equal(response.headers.get('vary'), 'Origin')
-})
+for (const allowedOrigin of ALLOWED_ORIGINS) {
+  test(`允许来源的 POST 返回模型建议：${allowedOrigin}`, async () => {
+    const response = await fetch(`${baseUrl}${PATH}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: allowedOrigin },
+      body: JSON.stringify(body),
+    })
+    const result = (await response.json()) as { source: string; suggestions: unknown[] }
 
-test('允许来源的 POST 返回模型建议并带 CORS 头', async () => {
-  const response = await fetch(`${baseUrl}${PATH}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Origin: ALLOWED_ORIGIN },
-    body: JSON.stringify(body),
+    assert.equal(response.status, 200)
+    assert.equal(result.source, 'model')
+    assert.ok(result.suggestions.length >= 1 && result.suggestions.length <= 3)
+    assert.equal(response.headers.get('access-control-allow-origin'), allowedOrigin)
+    assert.equal(response.headers.get('access-control-allow-methods'), 'POST, OPTIONS')
+    assert.equal(response.headers.get('access-control-allow-headers'), 'Content-Type')
   })
-  const result = (await response.json()) as { source: string; suggestions: unknown[] }
-
-  assert.equal(response.status, 200)
-  assert.equal(result.source, 'model')
-  assert.ok(result.suggestions.length >= 1 && result.suggestions.length <= 3)
-  assert.equal(response.headers.get('access-control-allow-origin'), ALLOWED_ORIGIN)
-  assert.equal(response.headers.get('access-control-allow-methods'), 'POST, OPTIONS')
-  assert.equal(response.headers.get('access-control-allow-headers'), 'Content-Type')
-})
+}
 
 test('拒绝其他来源的预检和 POST，且不返回通配 CORS 头', async () => {
   const preflight = await fetch(`${baseUrl}${PATH}`, {

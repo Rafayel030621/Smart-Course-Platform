@@ -8,8 +8,18 @@
 /** 契约版本：与 docs/contracts.md 第 8.1 节一致 */
 export const CONTRACT_VERSION = '1.0'
 
-/** 服务端支持的提示词版本（契约 4.1）：不在列表内的请求直接拒绝，不做静默降级 */
-export const SUPPORTED_PROMPT_VERSIONS: readonly string[] = ['mvp-prompt-v1']
+/**
+ * 服务端支持的提示词版本（契约 4.1 / 17.4）：不在列表内的请求直接拒绝，不做静默降级。
+ * - 建议接口：mvp-prompt-v1（兼容保留）与 mvp-prompt-v2（携带项目基本信息或材料摘录时使用）；
+ * - 聊天接口：advisor-chat-v1（兼容保留）与 advisor-chat-v2（同上）；
+ * - 材料理解接口的版本号在 materials/types.ts（material-understanding-v1）。
+ */
+export const ADVISOR_PROMPT_VERSIONS: readonly string[] = ['mvp-prompt-v1', 'mvp-prompt-v2']
+export const ADVISOR_CHAT_PROMPT_VERSIONS: readonly string[] = ['advisor-chat-v1', 'advisor-chat-v2']
+export const SUPPORTED_PROMPT_VERSIONS: readonly string[] = [
+  ...ADVISOR_PROMPT_VERSIONS,
+  ...ADVISOR_CHAT_PROMPT_VERSIONS,
+]
 
 export type TaskStatus = 'todo' | 'doing' | 'done'
 export type DoubtStatus = 'open' | 'resolved'
@@ -45,6 +55,35 @@ export interface DoubtSnapshot {
   createdAt: string
 }
 
+/**
+ * v2（M2-A）可选字段：项目基本信息（契约第 13 节）。
+ * 只有前端显式携带时才进入请求；缺失一律按 null / 空数组处理，旧客户端不受影响。
+ */
+export interface ProjectProfile {
+  goal: string | null
+  expectedOutcome: string | null
+  memberNames: string[]
+  researchPeriod: string | null
+  scope: string | null
+  outOfScope: string | null
+}
+
+/** v2（M2-A）可选字段：已确认的材料片段（契约 17.1）。未确认草稿不允许出现在这里 */
+export interface ConfirmedMaterialSegment {
+  segmentId: string
+  startLine: number
+  endLine: number
+  text: string
+}
+
+export interface ConfirmedMaterial {
+  materialId: string
+  name: string
+  type: 'md' | 'txt'
+  version: number
+  segments: ConfirmedMaterialSegment[]
+}
+
 /** 通过校验之后的请求，各层只消费这个结构 */
 export interface AdvisorRequest {
   requestId: string
@@ -58,6 +97,32 @@ export interface AdvisorRequest {
   doubts: DoubtSnapshot[]
   promptVersion: string
   forceRefresh: boolean
+  /** v2：已确认的项目基本信息；缺失或为 null 表示本次请求不携带 */
+  projectProfile?: ProjectProfile | null
+  /** v2：学生已确认的材料摘录；缺失按空数组处理 */
+  confirmedMaterials?: ConfirmedMaterial[]
+}
+
+export interface ChatMessage {
+  role: 'user' | 'assistant'
+  text: string
+}
+
+export interface AdvisorChatRequest {
+  requestId: string
+  projectId: string
+  projectRevision: number
+  projectName: string
+  currentMilestone: string | null
+  tasks: TaskSnapshot[]
+  evidence: EvidenceSnapshot[]
+  doubts: DoubtSnapshot[]
+  chatHistory: ChatMessage[]
+  question: string
+  promptVersion: string
+  /** v2：同 AdvisorRequest */
+  projectProfile?: ProjectProfile | null
+  confirmedMaterials?: ConfirmedMaterial[]
 }
 
 /* ------------------------------------------------------------------ 输出侧 */
@@ -146,12 +211,34 @@ export interface ProviderOutput {
 }
 
 /**
+ * 材料理解 provider 输入（M2-A）：领域无关，只描述一次"把材料片段变成理解草稿"的调用需要什么。
+ * 材料领域对象见 materials/types.ts；这里保持最小字段，避免 advisor 模块反向依赖 materials。
+ */
+export interface UnderstandingProviderSegment {
+  segmentId: string
+  startLine: number
+  endLine: number
+  text: string
+}
+
+export interface UnderstandingProviderInput {
+  materialName: string
+  materialType: 'md' | 'txt'
+  materialVersion: number
+  projectName: string | null
+  segments: UnderstandingProviderSegment[]
+}
+
+/**
  * 建议生成器。mock provider 与将来的真实模型 provider 实现同一个接口。
  * 允许抛错与耗时过长，由服务层负责超时与兜底。
  */
 export interface AdvisorProvider {
   readonly name: string
   generate(request: AdvisorRequest): Promise<ProviderOutput>
+  generateChat?(request: AdvisorChatRequest): Promise<{ answer: unknown }>
+  /** v2（M2-A）：材料理解；未实现的 provider 视为 MODEL_UNAVAILABLE */
+  generateUnderstanding?(request: UnderstandingProviderInput): Promise<{ draft: unknown }>
 }
 
 /**

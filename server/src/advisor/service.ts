@@ -1,9 +1,10 @@
-import { normalizeSuggestions } from './validation.js'
+import { isHumanizedUserText, LIMITS, normalizeSuggestions } from './validation.js'
 import type { FallbackGenerator } from './fallback.js'
 import {
   AdvisorProviderError,
   silentLogger,
   type AdvisorFallbackReason,
+  type AdvisorChatRequest,
   type AdvisorLogger,
   type AdvisorProvider,
   type AdvisorRequest,
@@ -56,7 +57,12 @@ export interface AdvisorService {
   readonly providerName: string
   readonly timeoutMs: number
   recommend(request: AdvisorRequest): Promise<AdvisorServiceResult>
+  chat(request: AdvisorChatRequest): Promise<AdvisorChatServiceResult>
 }
+
+export interface AdvisorChatServiceSuccess { ok: true; source: 'model' | 'fallback'; fallbackReason: AdvisorFallbackReason | null; answer: string }
+export interface AdvisorChatServiceFailure { ok: false; code: AdvisorRuntimeErrorCode; retryable: boolean; retryAfterSeconds: number | null }
+export type AdvisorChatServiceResult = AdvisorChatServiceSuccess | AdvisorChatServiceFailure
 
 class ProviderTimeoutError extends Error {
   constructor() {
@@ -147,7 +153,11 @@ export function createAdvisorService(options: AdvisorServiceOptions): AdvisorSer
       const normalized = normalizeSuggestions(outcome.output, request)
       logNotes(request, normalized.notes)
 
-      if (!normalized.ok || normalized.suggestions.length === 0) {
+      const modelTextHasInternalTerm = normalized.ok && normalized.suggestions.some((suggestion) =>
+        [suggestion.title, suggestion.whyNow, suggestion.doneCriteria].some((text) => !isHumanizedUserText(text)),
+      )
+
+      if (!normalized.ok || normalized.suggestions.length === 0 || modelTextHasInternalTerm) {
         logger.warn('模型输出不合法，改用规则兜底', { requestId: request.requestId })
         return runFallback(request, 'INVALID_MODEL_OUTPUT')
       }
@@ -159,6 +169,22 @@ export function createAdvisorService(options: AdvisorServiceOptions): AdvisorSer
         cached: false,
         suggestions: normalized.suggestions,
       }
+    },
+    async chat(request: AdvisorChatRequest): Promise<AdvisorChatServiceResult> {
+      const providerWithChat = provider.generateChat
+      const outcome = providerWithChat === undefined
+        ? { ok: false as const, reason: 'MODEL_UNAVAILABLE' as const }
+        : await callChatProvider(providerWithChat.bind(provider), request, timeoutMs)
+      if (outcome.ok && typeof outcome.output.answer === 'string') {
+        const answer = outcome.output.answer.replace(/[\u0000-\u001f\u007f]/g, ' ').trim()
+        if (answer.length > 0 && answer.length <= LIMITS.answerLength && isHumanizedUserText(answer)) {
+          return { ok: true, source: 'model', fallbackReason: null, answer }
+        }
+      }
+      const reason = outcome.ok ? 'INVALID_MODEL_OUTPUT' : outcome.reason
+      const fallback = '目前无法可靠生成回答。请根据当前项目中的任务、证据和未解决疑问继续推进，并把新的发现记录为证据后再提问。'
+      logger.warn('聊天模型失败，使用安全兜底', { requestId: request.requestId, reason })
+      return { ok: true, source: 'fallback', fallbackReason: reason, answer: fallback }
     },
   }
 }
@@ -191,4 +217,20 @@ async function callProvider(
   } finally {
     if (timer !== undefined) clearTimeout(timer)
   }
+}
+
+async function callChatProvider(
+  generate: (request: AdvisorChatRequest) => Promise<{ answer: unknown }>,
+  request: AdvisorChatRequest,
+  timeoutMs: number,
+): Promise<{ ok: true; output: { answer: unknown } } | { ok: false; reason: AdvisorFallbackReason }> {
+  let timer: NodeJS.Timeout | undefined
+  try {
+    const timeout = new Promise<never>((_resolve, reject) => { const handle = setTimeout(() => reject(new ProviderTimeoutError()), timeoutMs); handle.unref(); timer = handle })
+    return { ok: true, output: await Promise.race([generate(request), timeout]) }
+  } catch (error) {
+    if (error instanceof ProviderTimeoutError) return { ok: false, reason: 'MODEL_TIMEOUT' }
+    if (error instanceof AdvisorProviderError) return { ok: false, reason: error.reason }
+    return { ok: false, reason: 'MODEL_UNAVAILABLE' }
+  } finally { if (timer !== undefined) clearTimeout(timer) }
 }

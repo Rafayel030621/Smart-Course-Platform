@@ -1,10 +1,12 @@
-# 智慧课程平台 · 前后端接口契约（首轮 MVP）
+# 智慧课程平台 · 前后端接口契约
 
-> 文档修订：v1.1（接口 `contractVersion` 仍为 `"1.0"`）
-> 编制日期：2026-09-25
+> 文档修订：v2.1（接口 `contractVersion` 仍为 `"1.0"`）
+> 编制日期：2026-09-25（v2.0：2026-10-12，姜-1 冻结 M1：项目基本信息与材料）
 > owner：负责人（后端）
-> 地位：**本文件是首轮 MVP 前后端唯一契约。** 三位成员不得自行新增字段或创建第二套 DTO。
-> 适用范围：`POST /api/advisor/recommendations`、前端 store action 契约、任务 / 证据 / 疑问 / 建议的最小字段。
+> 地位：**本文件是前后端唯一契约。** 三位成员不得自行新增字段或创建第二套 DTO。
+> 适用范围：`POST /api/advisor/recommendations`、`POST /api/advisor/chat`、`POST /api/materials`、`POST /api/materials/understanding`、前端 store action 契约、任务 / 证据 / 疑问 / 建议 / 材料 / 理解草稿的最小字段。
+> v2 章节（第 12–18 节）是 M1 冻结内容：本轮只支持 `md` / `txt`（M2-A）；CSV/XLSX 属 M2-B，PDF/DOCX/ZIP 属 M4。
+> 节号说明：原第 11 节“变更记录”已移到文末第 19 节；为避免破坏既有引用，其余旧节号不重排。
 > **本文定义接口，不能替代部署验证。** 当前线上验证结果与仍需复验的事项见第 7 节。
 
 本文引用并取代《首轮 MVP 任务分配与智能体提示词》第 4 节的草案；差异逐条列在第 9 节。
@@ -18,6 +20,7 @@
 3. 建议有三个来源：`model`（模型）、`fallback`（服务端规则兜底）、`local-rule`（前端本地规则兜底）。三者共用同一份数据结构。
 4. 任何响应都要用 `projectId` + `projectRevision` + `requestId` 三者校验，不匹配就丢弃。
 5. 模型永远不能把任务标记为完成、不能解决疑问、不能改变项目事实。
+6. v2（M2-A）新增 `POST /api/materials`（材料登记与解析）与 `POST /api/materials/understanding`（材料理解草稿），以及 `projectProfile`、`confirmedMaterials` 两个可选请求字段；本轮只支持 `md` / `txt`，详见第 12–18 节。
 
 ---
 
@@ -148,12 +151,12 @@ Recommendation 有两个形态，**字段名完全一致，只是前端多两个
 | --- | --- |
 | 类型 | 正整数，从 1 开始 |
 | 所有者 | 前端（MVP 无服务端持久化，服务端只回显） |
-| 何时 +1 | 每一次会改变项目状态的本地写入：`createProject`、`claimTask`、`submitEvidence`（含幂等命中时不加）、`resolveDoubt` |
+| 何时 +1 | 每一次会改变项目状态的本地写入：`createProject`、`claimTask`、`submitEvidence`（含幂等命中时不加）、`resolveDoubt`；v2 增加：保存项目基本信息、材料登记、草稿条目确认/修改/删除、整份草稿确认 |
 | 何时不变 | 纯读取、切换项目、界面筛选、建议请求本身 |
 | 用途 | ① 丢弃过期响应；② 服务端缓存键；③ 将来服务端持久化后判断冲突 |
 | 不可变性 | 递增，不重用，回退不还原 |
 
-> **兼容实现说明（当前 main）**：现有旧项目模型暂时用影响建议的状态摘要生成稳定正整数，前端按相等性判断响应是否过期，并不把它当作连续计数。迁移到结构化任务模型后，改为按本表递增；调用方只能依赖“同一状态相等、状态变化不相等”，不能依赖具体数值大小。
+> **当前实现（2026-09-28）**：`Project.projectRevision` 已是项目字段中的递增整数；前端在成功写入项目状态时递增，重复 `submissionId` 命中时不递增。旧版项目由 `src/stores/persistence.ts` 迁移到当前结构。
 
 
 ---
@@ -181,7 +184,7 @@ type ActionResult<T> =
 | `createProject(input)` | `{ topicId: string \| null; customName?: string; members: number; manualName?: string \| null; dataName?: string \| null }` | `{ projectId; projectRevision }` | 否 |
 | `selectProject(projectId)` | `string` | `{ projectId; projectRevision }` | 否 |
 | `claimTask(input)` | `{ taskId: string } \| { draft: NewTaskDraft }`（二者互斥） | `{ taskId; status: 'doing'; projectRevision }` | 否 |
-| `submitEvidence(input)` | `{ submissionId; taskId: string \| null; didWhat; foundWhat?; stillUnsure?; attachmentName?; complete: boolean }` | `{ evidenceId; submissionId; deduplicated: boolean; doubtId: string \| null; taskStatus: 'doing' \| 'done' \| null; projectRevision }` | 否 |
+| `submitEvidence(input)` | `{ submissionId; taskId: string \| null; didWhat; foundWhat?; stillUnsure?; attachmentName?; complete: boolean }` | `{ evidenceId; submissionId; deduplicated: boolean; doubtId: string \| null; taskStatus: 'doing' \| 'done' \| null; projectRevision }` | **间接访问**：证据成功保存后自动触发 `refreshRecommendations`；建议请求失败不影响证据结果 |
 | `resolveDoubt(doubtId)` | `string` | `{ doubtId; projectRevision }` | 否 |
 | `refreshRecommendations(options?)` | `{ forceRefresh?: boolean }` | `{ source; suggestions: Recommendation[]; cached: boolean; fallbackReason: string \| null; requestId: string \| null }` | **是** |
 
@@ -199,7 +202,8 @@ type ActionResult<T> =
 
 1. 传 `draft` 时由**前端**生成 `taskId`，任务直接以 `doing` 落库（不经过 `todo`），并 `projectRevision + 1`；
 2. 传 `taskId` 时任务必须存在且不能是 `done`，否则返回 `NOT_FOUND` 或 `TASK_NOT_CLAIMABLE`；
-3. 两种入参不得同时出现，同时出现按 `INVALID_INPUT` 处理。
+3. 两种入参不得同时出现，同时出现按 `INVALID_INPUT` 处理；
+4. 同一项目中，字段完全相同的 `draft` 重复提交必须幂等：返回同一个 `taskId`，不得新增第二条任务或再次递增 `projectRevision`。实现可使用规范化后的 draft 内容生成稳定键；不同 draft 可以生成不同任务。
 
 三条动作语义（必须互相独立，见首轮任务文档 4.1）：
 
@@ -217,7 +221,7 @@ type ActionResult<T> =
 | `PROJECT_MISMATCH` | id 属于另一个项目 | 不提示用户，清理并重新加载 |
 | `INVALID_INPUT` | 必填字段为空、超出长度上限 | 高亮出错的字段 |
 | `TASK_NOT_CLAIMABLE` | 对 `done` 任务再次认领 | 提示"该任务已完成" |
-| `ALREADY_RESOLVED` | 重复解决同一疑问 | 静默成功语义（不报错、不改状态） |
+| `ALREADY_RESOLVED` | 预留；当前 `resolveDoubt` 重复调用直接返回 `ok: true`，不改状态、不递增版本 | 不作为失败处理 |
 | `STORAGE_FULL` | localStorage 写入失败 | 提示"本地存储已满"，**保留表单内容** |
 | `NETWORK_ERROR` | 只由 `refreshRecommendations` 返回：未收到契约定义的 HTTP 响应 | 切到 `local-rule`，见 5.1 |
 
@@ -234,7 +238,7 @@ type ActionResult<T> =
 | Method / 头 | `POST`，`Content-Type: application/json`（`charset=utf-8`） |
 | 鉴权 | MVP 无账号，**不带** Cookie、不带自定义 token；当前部署使用生产来源白名单，IP 限流暂未启用 |
 | 请求体上限 | 256 KB，超出返回 400 `INVALID_INPUT` |
-| 连接超时 | 适配层 20 秒；服务端模型调用超时 20 秒（两者对齐，见 7.5） |
+| 连接超时 | 当前前端适配层为 20 秒；服务端 provider 为 20 秒，服务层安全网为 25 秒。目标前端单次请求为 30 秒，见 7.5 的待修正项 |
 | 重试 | 适配层最多自动重试 1 次，仅限 `retryable: true` 的失败，退避 1 秒 |
 
 ### 4.1 请求字段
@@ -263,6 +267,8 @@ type ActionResult<T> =
 | `DoubtSnapshot` | `doubtId`、`text`、`status`、`sourceEvidenceId`、`createdAt` |
 
 请求中**不允许**出现其他项目的 ID。服务端以顶层 `projectId` 为准；发现无法归属的 ID 按 4.6 处理。
+
+> **v2 新增可选字段（M2-A）**：请求体可携带 `projectProfile`（项目基本信息）与 `confirmedMaterials`（已确认材料片段），字段、上限与版本要求见第 17 节；两个字段缺失时行为与 v1.3 完全一致。
 
 ### 4.2 完整请求 JSON 示例
 
@@ -349,6 +355,8 @@ HTTP `200`。
 | `cached` | boolean | 是 | 是否直接复用服务端缓存 |
 | `promptVersion` | string | 是 | 本次实际使用的提示词版本，必须等于请求值 |
 | `suggestions` | Suggestion[] | 是 | 1～3 条，见 4.5 |
+
+`title`、`whyNow`、`doneCriteria` 是直接展示给用户的文本，必须使用自然、易懂的中文。模型不得在这些文本中输出字段名、JSON 键名、变量名或内部状态名；例如 `currentMilestone`、`confirmedContext`、`projectRevision`、`doneCriteria`、`evidence`、`doubts`、`tasks`、`doing`、`done` 必须分别改写为“当前里程碑”“已确认背景”“项目版本”“完成标准”“证据”“未解决疑问”“任务”“进行中”“已完成”。服务端检测到内部词或非中文用户文案时按非法模型输出进入规则兜底，不把原始模型文本返回给客户端。
 
 ```json
 {
@@ -515,21 +523,23 @@ HTTP 状态码见第 6 节。响应体结构固定，**不含** `suggestions`。
 
 **服务端**：MVP 无项目持久化，服务端**不知道**当前真实 `projectRevision`，因此只做回显，**不返回** `STALE_REVISION`。等进入服务端持久化阶段（阶段 5）再启用该码。
 
-**前端**：收到响应后依次校验，任一不通过就整份丢弃，不写入 store、不改变 loading：
+**前端**：收到响应后依次校验，任一不通过就整份丢弃，不写入建议数据：
 
 | 顺序 | 条件 | 处理 |
 | --- | --- | --- |
 | 1 | `response.requestId !== 本次请求的 requestId` | 丢弃（视为串包，记日志） |
 | 2 | `response.projectId !== 当前项目 projectId` | 丢弃（用户已切项目） |
-| 3 | `response.projectRevision !== 本次请求发出时的 projectRevision` | 丢弃（项目已在新响应之前发生了变化） |
+| 3 | 响应版本不等于本次请求版本，或当前项目版本已不同于请求发出时 | 丢弃（响应串包或项目状态已变化） |
 | 4 | 期间又发起过新的 `refreshRecommendations` | 丢弃（只保留最后一次，建议用 `AbortController` 取消前一次） |
 | 5 | 用户已离开工作台或进入创建页 | 丢弃 |
 
 补充约定：
 
-1. 丢弃时**不得**把 `aiStatus` 置回 `idle`；状态由最新一次请求负责；
-2. `projectRevision` 只在本地写入成功后 +1，因此第 3 条校验天然排除了"请求发出后用户又提交了证据"的结果；
-3. 通过校验后写入 store 的 `recommendations` 必须整体替换，不是追加（避免同一轮出现两批建议）。
+1. 过期响应不能覆盖当前项目的 `suggestions`、`aiError`、任务、证据、疑问或 `projectRevision`；
+2. 如果期间已有更新的 `refreshRecommendations`，由更新的请求负责 `loading` 和最终状态，旧请求只能静默结束；
+3. 如果当前项目没有更新的有效请求接管（例如认领任务后版本变化，或服务端回显与本次请求不符），旧请求必须结束，当前项目回到可重试的 `idle`，不得留下没有在途请求却永久 `loading` 的状态；
+4. `projectRevision` 只在本地写入成功后 +1，因此第 3 条校验天然排除了"请求发出后用户又提交了证据"的旧响应；提交证据本身会在保存后自动发起新建议请求；
+5. 通过校验后写入 store 的 `recommendations` 必须整体替换，不是追加（避免同一轮出现两批建议）。
 
 ---
 
@@ -547,7 +557,7 @@ HTTP 状态码见第 6 节。响应体结构固定，**不含** `suggestions`。
 
 理由：
 
-1. 服务端兜底能保证引用 ID 合法（依据必须来自本次请求），这是前端做不到的；
+1. 服务端在输出阶段校验引用 ID；前端掌握本次请求快照，收到响应后也能校验引用 ID，并防御残缺或错误响应；
 2. 前端兜底能覆盖"后端整个不可用"的情况，而验收要求"API 失败时证据不丢且显示 fallback"；
 3. 两层**内容不共享文件**：后端的兜底规则写在 `server/` 内，只依赖请求体；前端的 `src/data/mvpFallbacks.ts`（吴佳璐）只被前端使用。服务端不导入 `src/` 下任何文件。
 
@@ -556,9 +566,9 @@ HTTP 状态码见第 6 节。响应体结构固定，**不含** `suggestions`。
 **这是两个独立动作，不是一个原子操作。**
 
 ```text
-submitEvidence()  → 先落 localStorage，返回 ok
+submitEvidence()  → 先落 localStorage，证据写入结果不因建议失败而变成失败
         ↓ 成功后
-refreshRecommendations()  → 网络请求，允许失败
+refreshRecommendations()  → 网络请求，允许失败（submitEvidence 内部自动触发）
 ```
 
 | 不变量 | 说明 |
@@ -578,7 +588,7 @@ refreshRecommendations()  → 网络请求，允许失败
 
 | 状态 | 何时进入 | 页面表现 |
 | --- | --- | --- |
-| `idle` | 初始、切换项目后 | 显示"点击获取下一步建议" |
+| `idle` | 初始、切换项目后，或旧请求失效且无新请求接管 | 显示"点击获取下一步建议"；允许重新请求 |
 | `loading` | 请求发出 | 骨架或转圈；**禁止**在此期间重复点击触发并发请求 |
 | `model` | `source: 'model'` | 显示 1～3 条建议与依据（可展开看到依据的证据/疑问原文） |
 | `fallback` | `source: 'fallback'` | 同上，另加一条"本次使用规则结果（原因：…）" |
@@ -589,8 +599,8 @@ refreshRecommendations()  → 网络请求，允许失败
 
 1. `existingTaskId` 非空 → 建议卡上的主按钮是「认领这一步」（调用 `claimTask`）；
 2. `existingTaskId` 为 `null` → 属于**新任务候选**：MVP 不自动创建任务，按钮文案是「就按这个做」，点击后调用 `claimTask({ draft })`，由前端生成任务并直接置为 `doing`，`projectRevision + 1`；
-3. 已经 `done` 的任务不得出现在建议里（服务端保证，前端不需要再过滤）；
-4. 同一建议重复点击只产生一次任务（用 `id` 去重）。
+3. 已经 `done` 的任务不得出现在建议里；服务端负责过滤，前端按本次请求快照再核验一次；
+4. 页面用建议 `id` 防止同一张卡重复点击；store 还必须按第 3.2 条对完全相同的 draft 幂等，不能只依赖页面状态。
 
 ---
 
@@ -607,19 +617,21 @@ refreshRecommendations()  → 网络请求，允许失败
 | `MODEL_UNAVAILABLE` | 503 | `true` | 上游 5xx、连接失败、上游返回无法归类的错误 | 同上 |
 | `MODEL_NOT_CONFIGURED` | 503 | `false` | 服务端没有可用密钥或配置缺失 | 不重试（重试不会变好）；切 `local-rule`；日志中标记为配置问题 |
 
+> v2（M2-A）新增的错误码（材料类型、文件过大、空文件、编码不可读、解析失败等）见第 16 节；`retryable` 语义相同。
+
 `retryable` 的含义统一为：**"在用户不改变输入的前提下，稍后重试有可能成功"**。
 
 - `true` 只用于瞬态失败（限流、超时、上游故障）；
 - `false` 用于确定性失败（输入问题、配置缺失）；
 - `retryable: true` 不代表前端必须无限重试，适配层上限是 1 次。
 
-### 6.2 保留错误码（本轮**不会**返回，前端可先留分支）
+### 6.2 特殊与预留错误码
 
-| code | 计划 HTTP | 用途 |
+| code | HTTP | 用途 |
 | --- | --- | --- |
-| `STALE_REVISION` | 409 | 服务端开始保存项目状态后，`projectRevision` 落后于服务端时返回 |
-| `INTERNAL` | 500 | 服务端未预期异常，`message` 不含堆栈与密钥 |
-| `UNAUTHORIZED` | 401 | 引入账号体系后 |
+| `INTERNAL` | 500 | **当前可能返回**：服务端未预期异常，`message` 不含堆栈与密钥；前端按契约失败处理并尝试本地规则 |
+| `STALE_REVISION` | 409（预留） | 服务端开始保存项目状态后，`projectRevision` 落后于服务端时返回；MVP 不返回 |
+| `UNAUTHORIZED` | 401（预留） | 引入账号体系后；MVP 不返回 |
 
 ### 6.3 `GET /health`
 
@@ -638,6 +650,42 @@ GET /health
 
 - 健康时返回 `200`；当前实现只报告进程健康，不探测模型依赖，因此不返回 `degraded` 或 `modelConfigured` 字段；
 - 该接口不得返回任何项目数据。
+
+### 6.4 `POST /api/advisor/chat`
+
+聊天接口接收当前项目快照和有限聊天上下文，调用服务端模型生成纯文本回答。请求必须使用
+`contractVersion: "1.0"`、`promptVersion: "advisor-chat-v1"`，并包含 `requestId`、`projectId`、正整数
+`projectRevision`、`projectName`、`currentMilestone`、`tasks`、`evidence`、`doubts`、`chatHistory` 和非空 `question`。
+`chatHistory` 最多 20 条，每条 `role` 只能为 `user` 或 `assistant`，文本最多 2000 字；问题最多 2000 字。
+任务、证据和疑问沿用 4.1 的数组上限，请求体最多 256 KB。
+
+```http
+POST /api/advisor/chat
+Content-Type: application/json
+```
+
+```json
+{
+  "contractVersion": "1.0",
+  "promptVersion": "advisor-chat-v1",
+  "requestId": "req_...",
+  "projectId": "prj_...",
+  "projectRevision": 1,
+  "projectName": "项目名称",
+  "currentMilestone": "首轮 MVP",
+  "tasks": [],
+  "evidence": [],
+  "doubts": [],
+  "chatHistory": [{"role": "user", "text": "上一轮问题"}],
+  "question": "我下一步应该做什么？"
+}
+```
+
+成功响应为 HTTP 200，`source` 为 `model` 或 `fallback`；模型成功时 `fallbackReason` 为 `null`，并返回非空 `answer`。
+模型不可用、超时或输出非法时，服务端返回安全的推进提示，`source: "fallback"`，并设置对应的
+`fallbackReason`（例如 `MODEL_TIMEOUT`），不返回 API Key、环境变量、服务器路径或上游响应原文。
+面向用户的建议文本和聊天回答必须使用自然、易懂的中文。模型不得在用户可见文本中输出字段名、JSON 键名、变量名或内部状态名（例如 `currentMilestone`、`doneCriteria`、`evidence`、`doubts`、`tasks`、`doing`、`done`）；需要表达这些概念时应使用“当前里程碑”“完成标准”“证据”“未解决疑问”“任务”“进行中”“已完成”等中文。服务端检测到这类内部词时按模型输出非法处理并安全兜底，不把原始模型文本返回给客户端。
+非法 JSON、缺字段、超限请求返回 400 `INVALID_INPUT`；GET 返回 405；允许的 CORS 预检返回 204，其他来源返回 403。
 
 ---
 
@@ -678,20 +726,24 @@ GET /health
 
 | 项 | 约定 |
 | --- | --- |
-| 允许来源 | 当前部署只允许生产来源 `https://course.xinxian-music.xyz`；其他来源返回 403。本地开发需使用 Vite 代理或部署同源环境 |
+| 允许来源 | 允许生产来源 `https://course.xinxian-music.xyz` 与本地开发来源 `http://localhost:5173`、`http://127.0.0.1:5173`；其他带 `Origin` 的来源返回 403 |
 | 方法 | `POST`、`OPTIONS`（预检必须显式处理） |
 | 请求头 | `Content-Type`；MVP 不使用 Cookie，因此 `Access-Control-Allow-Credentials` 保持关闭 |
 | 缓存 | API 响应禁止公共边缘缓存（`Cache-Control: no-store`）；当前未实现服务端建议缓存，`cached` 固定为 `false` |
 | 限流 | 当前部署尚未启用 IP 限流；`RATE_LIMITED` 保留为契约错误码，启用限流后才返回 |
 | 预算 | 单日调用上限与单次 token 上限尚未在本轮部署中启用；启用后超限应走 `fallback`，不返回 5xx 给前端 |
 
+> v2 新增的 `POST /api/materials`、`POST /api/materials/understanding` 路径沿用本节 CORS 策略（同一份白名单与预检处理），不新增第二套跨域规则。
+
 ### 7.5 超时与重试（约定）
 
 | 层 | 值 | 说明 |
 | --- | --- | --- |
-| 前端适配层 | 20 秒 | 超时按 `NETWORK_ERROR` 处理 → `local-rule` |
-| 服务端模型调用 | 20 秒 | 超时 → 服务端规则兜底（`fallbackReason: MODEL_TIMEOUT`） |
-| 反向代理 / Cloudflare | 需 ≥ 30 秒 | 若代理早于服务端超时断开，前端将收到 5xx 而非契约响应 |
+| 前端适配层（当前实现） | 20 秒 | 超时按 `NETWORK_ERROR` 处理 → `local-rule` |
+| 服务端 provider | 20 秒 | provider 超时 → 服务端规则兜底（`fallbackReason: MODEL_TIMEOUT`） |
+| 服务层安全网（当前实现） | 25 秒 | 仅兜住 provider 未遵守超时的异常情况 |
+| 目标前端单次请求 | 30 秒，待实现 | 比服务层安全网多 5 秒，给服务端规则兜底和响应传输留时间；当前 20 秒可能先触发 `local-rule`，收不到服务端 `fallback` |
+| 反向代理 / Cloudflare | 至少 35 秒，待核验 | 代理早于服务端结束会导致前端收到网络/5xx，而不是契约响应；可重试时前端最多发两次请求，每次各自计时 |
 
 ---
 
@@ -704,7 +756,7 @@ GET /health
 | 字段 | 本轮 | 用途 |
 | --- | --- | --- |
 | `contractVersion` | `"1.0"` | 契约结构版本；不兼容变更时 +1，服务端对不支持的版本返回 400 |
-| `promptVersion` | `"mvp-prompt-v1"` | 提示词版本，由吴佳璐在 `docs/ai/prompt-spec.md` 维护；服务端支持列表必须以本契约为准同步更新 |
+| `promptVersion` | 建议 / 聊天：`"mvp-prompt-v1"`、`"advisor-chat-v1"`（兼容保留）与 `"mvp-prompt-v2"`、`"advisor-chat-v2"`（M2-A 启用）；材料理解：`"material-understanding-v1"` | 提示词版本，由吴佳璐在 `docs/ai/prompt-spec.md` 维护；服务端支持列表必须以本契约为准同步更新。取值与切换规则见第 17.4 节 |
 
 ### 8.2 预留键名（本轮不发送、不定义结构，服务端必须忽略）
 
@@ -759,15 +811,7 @@ GET /health
 | 14 | 未规定 `evidence` / `doubts` 的发送范围 | `tasks` 发全部（含已完成）；`evidence` 发最近 30 条；`doubts` 只发 `open` | 不发已完成任务，服务端无法执行"已完成任务不得再推荐"；已解决疑问不参与判断 |
 | 15 | `claimTask(taskId)` 只能认领已有任务 | 入参扩为 `{ taskId } \| { draft: NewTaskDraft }` | 建议里存在"新任务候选"（`existingTaskId: null`），而约定的 6 个 action 中没有创建任务的入口。不新增第 7 个 action（会破坏"雍蕾只调这些 action"的约定），也不允许组件自己造任务 |
 
-与**实现现状**（不是草案）的差异，供李焰彬迁移时参考：
-
-| 现状 | 契约要求 |
-| --- | --- |
-| `selectProject(index)`、`claimStep(stepIndex)`、`resolveDoubt(index)` 用数组下标 | 全部改为 ID 参数 |
-| `submitEvidence` 入参是 `{ stepLabel, didWhat, foundWhat, solved, unsure, attachment }` | 改为 `{ submissionId, taskId, didWhat, foundWhat?, stillUnsure?, attachmentName?, complete }` |
-| 认领步骤会 `cur.p += 25` | 认领**不得**改变进度；进度只由已完成任务推导 |
-| `EvidenceItem.time` 是展示字符串 | 改为 ISO 时间字段，展示在组件里格式化 |
-| 无任何 action 返回值（只弹 toast） | 全部返回 `ActionResult<T>` |
+**前端迁移状态（2026-09-28）**：上述旧模型差异已在 `main` 的 `src/types/platform.ts`、`src/stores/workbench.ts`、`src/stores/persistence.ts` 和 `src/domain/**` 中处理。结构化任务与证据使用稳定 ID 和 ISO 时间；认领不改变完成比例；`submitEvidence` 使用 `submissionId` 幂等键；公开 action 返回 `ActionResult<T>`。为兼容旧页面，部分 action 仍接受旧入参并在内部转换；新调用方应使用本契约规定的 ID 与结构化入参。前端环境与业务测试现已合入 `main`，当前验收仍发现 draft 幂等和过期响应状态收尾问题，修复后需重新运行完整验收。
 
 ---
 
@@ -785,9 +829,734 @@ GET /health
 
 ---
 
-## 11. 变更记录
+## 12. v2 契约（M1 冻结）：项目基本信息与材料
+
+> 版本：v2.0（2026-10-12，姜-1 冻结）。`contractVersion` 仍为 `"1.0"`：本轮是**增量扩展**（两个新接口 + 若干可选字段），既有字段语义不变，旧客户端行为不变。
+> 本轮范围：M1 + M2-A，文件白名单只有 `.md` / `.txt`；CSV/XLSX 属 M2-B（M2-A 验收通过后），PDF/DOCX/ZIP 属 M4，**本轮不得实现**。
+> 分工：接口字段以本节为准；提示词内容以 `docs/ai/prompt-spec.md` 为准；页面文案由前端负责。
+
+### 12.1 新增与修订一览
+
+| 位置 | 内容 |
+| --- | --- |
+| 第 2.6 节 | `projectRevision` 的 +1 事件增加：保存项目基本信息、材料登记、草稿条目确认/修改/删除、整份草稿确认 |
+| 第 13 节 | 项目基本信息（ProjectProfile）字段与请求接入 |
+| 第 14 节 | 材料元数据、分段、理解草稿的领域对象 |
+| 第 15 节 | `POST /api/materials`、`POST /api/materials/understanding` |
+| 第 16 节 | 材料与理解相关的新错误码（稳定 code + 中文 message + retryable） |
+| 第 17 节 | 建议 / 聊天的“已确认材料上下文”最小接入与 `promptVersion` 取值 |
+| 第 18 节 | 给李焰彬 / 雍蕾 / 吴佳璐使用的 mock JSON |
+
+### 12.2 边界与不变式
+
+1. 服务端**仍然无状态**：材料、草稿与确认状态保存在浏览器 `localStorage`，服务端不保存材料正文，也不生成项目事实；
+2. 只有学生**确认**过的材料片段能进入建议与聊天请求；未确认草稿绝不进入请求体；
+3. 材料解析失败只影响该份材料：不阻塞项目创建，不影响已有项目与其他接口；
+4. 上传被拒绝必须给中文提示，不做静默忽略，不返回 500；
+5. 错误响应不回显材料正文，不含服务器路径、密钥或上游响应原文；
+6. 模型输出一律是“候选 / 草稿”，不是事实；学生确认前不得被当作项目事实使用；
+7. 服务端日志与错误响应只记录类别与数量（例如未知引用次数、丢弃条数），不记录材料正文、模型原始文本或原始引用编号——模型输出不可信，原始编号可能夹带敏感内容。
+
+---
+
+## 13. 项目基本信息（ProjectProfile）
+
+### 13.1 字段
+
+| 字段 | 类型 | 必填 | 约束 | 中文含义 |
+| --- | --- | --- | --- | --- |
+| `goal` | string \| null | 是 | ≤ 300 字 | 项目目标 |
+| `expectedOutcome` | string \| null | 是 | ≤ 300 字 | 预期结果或交付物 |
+| `memberNames` | string[] | 是 | ≤ 10 人，每人 1～30 字 | 项目成员姓名 |
+| `researchPeriod` | string \| null | 是 | ≤ 100 字 | 研究周期（本轮为自由文本，结构化日期推迟） |
+| `scope` | string \| null | 是 | ≤ 300 字 | 项目范围 |
+| `outOfScope` | string \| null | 是 | ≤ 300 字 | 暂不处理的内容 |
+
+约定：
+
+1. 缺失值一律 `null`，空字符串按 `null` 处理（与第 2 节通用约定一致）；
+2. 这些字段必须保存在项目结构化状态里（默认值与旧数据迁移由前端负责），不能只作为一段聊天文本保存；
+3. 修改并保存后 `projectRevision + 1`（见 2.6）。
+
+### 13.2 请求接入（可选字段）
+
+`POST /api/advisor/recommendations` 与 `POST /api/advisor/chat` 的请求体新增**可选**字段 `projectProfile`：
+
+| 情形 | 行为 |
+| --- | --- |
+| 缺失 / `null` | 与 v1.3 完全一致（旧客户端不受影响） |
+| 存在 | 必须满足 13.1 的类型与长度约束，否则 400 `INVALID_INPUT` |
+| 存在时的版本要求 | 必须使用 v2 提示词版本（17.4）；与 v1 组合 → 400 `INVALID_INPUT` |
+
+服务端在提示词中用中文标签呈现（“项目目标：……”“项目范围：……”“暂不处理：……”），不发送字段名。`confirmedContext` 保留原语义；v2 前端不应把基本信息重复写进 `confirmedContext`。
+
+---
+
+## 14. 材料领域对象（M2-A）
+
+### 14.1 MaterialMetadata（材料元数据）
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `materialId` | string | 是 | `mat_` 前缀 + 可打印字符串，≤ 64；**前端生成**，服务端只当不透明字符串 |
+| `projectId` | string | 是 | 所属项目 |
+| `name` | string | 是 | 原始文件名，1～200 字；扩展名必须是 `.md` 或 `.txt`（不区分大小写） |
+| `type` | `'md' \| 'txt'` | 是 | 服务端按扩展名推导并回显，统一小写 |
+| `size` | number | 是 | 原始字节数（服务端按 base64 解码后的实际字节数计算），1～1,048,576 |
+| `encoding` | `'utf-8' \| 'gbk'` | 是 | 实际用于解码的编码：UTF-8 优先，失败回退 GBK |
+| `state` | `'parsed' \| 'parse_failed'` | 是 | 解析状态；被拒绝的文件不产生材料记录，只返回错误响应 |
+| `version` | number | 是 | 前端维护的整数，≥ 1；同一 `materialId` 重新上传时必须 +1 |
+| `createdAt` / `updatedAt` | string | 是 | ISO 8601 带时区；服务端生成，同一次解析内两值相同 |
+| `failureReason` | string \| null | 是 | `state: 'parse_failed'` 时为中文原因；否则为 `null` |
+
+前端本地另需保存“已读状态”（仅登记文件名 / 待确认草稿 / 已确认）：这是界面展示口径，不进接口。
+
+### 14.2 MaterialSegment（分段）
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `segmentId` | string | 服务端生成，`seg_<序号>`；**只在同一 `materialId` + `version` 内唯一** |
+| `index` | number | 从 0 开始的稳定序号 |
+| `startLine` / `endLine` | number | 1 起始、包含两端；同一行内被切分时两段都指向该行 |
+| `text` | string | 分段正文，1～2,000 字 |
+
+### 14.3 MaterialUnderstandingDraft（理解草稿）
+
+服务端响应里的线格式（`draft`）：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `goalCandidates` | DraftItem[] | 项目目标候选 |
+| `outcomeCandidates` | DraftItem[] | 预期产出候选 |
+| `dataNotes` | DraftItem[] | 数据字段与数据规模线索 |
+| `methodNotes` | DraftItem[] | 方法或约束线索 |
+| `openQuestions` | DraftItem[] | 待确认问题；材料中找不到某类依据时也要在这里用中文说明 |
+
+DraftItem：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `itemId` | string | 服务端生成 `cnd_<块短名>_<序号>`；只在**本次响应内**唯一，用作列表 key |
+| `text` | string | 1～300 字自然中文 |
+| `sources` | MaterialSourceRef[] | 1～3 条；模型只允许引用本次请求中出现的 `segmentId`，材料名、行号、版本由服务端回填 |
+
+MaterialSourceRef：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `materialId` | string | 材料 ID |
+| `materialName` | string | 材料名（服务端回填） |
+| `materialVersion` | number | 材料版本（服务端回填） |
+| `segmentId` | string | 片段 ID（模型唯一允许提供的内容） |
+| `startLine` / `endLine` | number | 行号（服务端回填，模型不得自造） |
+
+前端本地字段（不在服务端响应里，由前端 store 维护）：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `status` | `'pending' \| 'confirmed' \| 'modified'` | 待确认 / 已确认 / 已修改；单块确认、修改、删除与整份确认都只改本地状态，并按 2.6 递增 `projectRevision` |
+
+### 14.4 分段规则（必须确定性）
+
+1. 统一换行后按行切分（`\r\n`、`\r` 视为 `\n`）；
+2. 连续非空行构成一个自然段；空行（仅含空白字符的行）是段落分隔；
+3. 相邻自然段合并为一段，直到再加入下一段会超过 2,000 字；单个自然段本身超过 2,000 字时在 2,000 字处切分；
+4. 每段记录 `startLine` / `endLine`（1 起始、包含两端）；同一行内发生切分时，两段都指向该行；
+5. 相同输入与相同版本必须得到**完全一致**的分段结果（同一文件两次解析结果稳定）。
+
+### 14.5 材料版本与过期响应
+
+1. 材料登记成功后 `projectRevision + 1`；
+2. 草稿条目确认 / 修改 / 删除、整份确认后 `projectRevision + 1`；
+3. 旧的理解响应、建议响应、聊天响应一律按 4.7 丢弃（`requestId` / `projectId` / `projectRevision` 三项校验）；
+4. 重新上传同一 `materialId` 时 `version + 1`；旧版本的片段引用视为过期，不得再进入任何请求。
+
+---
+
+## 15. 材料接口
+
+### 15.0 公共约定
+
+| 项 | 约定 |
+| --- | --- |
+| 路径 | `POST /api/materials`、`POST /api/materials/understanding` |
+| 方法 | 只支持 `POST`；其他方法 405，并返回 `Allow: POST` |
+| 头 | `Content-Type: application/json`（charset 可选） |
+| 公共字段 | 两个接口都使用 `contractVersion`、`requestId`、`projectId`、`projectRevision`，并在响应中回显 |
+| 版本字段 | 理解接口（调用模型）额外使用 `promptVersion`、`source`、`fallbackReason`；上传接口不调用模型，因此**不使用**这三个字段（不返回、也不接受） |
+| 失败结构 | 完全沿用 4.5：`contractVersion` / `requestId`（取不到时为 `null`）/ `code` / `message` / `retryable` / `retryAfterSeconds` |
+| 跨域 | 沿用 7.4 白名单与预检处理 |
+| 缓存 | 响应一律 `Cache-Control: no-store`（沿用 7.4） |
+
+### 15.1 POST /api/materials（材料登记与解析）
+
+用途：校验、解码、分段，并把结果**完整返回**给客户端；服务端不保存材料。
+
+请求字段：
+
+| 字段 | 类型 | 必填 | 约束 | 说明 |
+| --- | --- | --- | --- | --- |
+| `contractVersion` | string | 是 | 固定 `"1.0"` | 契约版本 |
+| `requestId` | string | 是 | 可打印，≤ 64 | 响应原样回显 |
+| `projectId` | string | 是 | ≤ 64 | 项目 ID |
+| `projectRevision` | number | 是 | ≥ 1 整数 | 前端发出请求时的版本 |
+| `materialId` | string | 是 | `mat_` 前缀，≤ 64 | 前端生成 |
+| `version` | number | 是 | ≥ 1 整数 | 前端维护的材料版本 |
+| `name` | string | 是 | 1～200 字，扩展名 `.md` / `.txt` | 原始文件名 |
+| `contentBase64` | string | 是 | 标准 base64（不带 data URL 前缀） | 文件原始字节 |
+
+为什么用 base64：GBK 检测必须在**原始字节**上做（浏览器按 UTF-8 读文本会把 GBK 内容写成替换字符，服务端再无法判定编码）；同时保持 JSON 单协议，复用现有 CORS、校验与体积上限结构，不引入 multipart 依赖。
+
+校验顺序（固定，测试与反例按此构造）：
+
+1. 方法 / Content-Type / JSON 可解析；
+2. `contractVersion` 必须是 `"1.0"`；`requestId`、`projectId`、`projectRevision`、`materialId`、`version`、`name`、`contentBase64` 的存在性、类型与长度；
+3. `name` 扩展名白名单（不区分大小写）：不是 `.md` / `.txt` → `UNSUPPORTED_MATERIAL_TYPE`；
+4. `contentBase64` 必须是合法 base64 → 否则 `INVALID_INPUT`；解码后字节数 > 1 MB → `MATERIAL_TOO_LARGE`；
+5. 解码顺序：UTF-8（严格）→ GBK（严格）；都失败 → `MATERIAL_ENCODING_UNREADABLE`；
+6. 内容特征：解码结果含 NUL（U+0000）→ `UNSUPPORTED_MATERIAL_TYPE`（判为二进制内容）；
+7. 解码结果为空或仅空白 → `EMPTY_MATERIAL`；
+8. 按 14.4 分段；分段过程异常 → `MATERIAL_PARSE_FAILED`。
+
+成功响应 200：`material`（14.1）+ `segments`（14.2）+ `segmentCount` + 回显字段；示例见 18.2。
+
+> 上传失败不会产生材料记录；前端必须保留用户已填内容并允许重试（与 5.2“证据与建议相互独立”同一原则）。
+
+### 15.2 POST /api/materials/understanding（材料理解草稿）
+
+用途：把**客户端选定**的材料片段发送给服务端，生成四块理解草稿；模型失败时服务端规则兜底（`source: "fallback"`）。
+
+请求字段：
+
+| 字段 | 类型 | 必填 | 约束 |
+| --- | --- | --- | --- |
+| `contractVersion` | string | 是 | `"1.0"` |
+| `promptVersion` | string | 是 | `"material-understanding-v1"` |
+| `requestId` | string | 是 | 可打印，≤ 64，响应回显 |
+| `projectId` | string | 是 | ≤ 64 |
+| `projectRevision` | number | 是 | ≥ 1 整数 |
+| `projectName` | string \| null | 是 | ≤ 120 字；可为 `null` |
+| `material` | object | 是 | 见下表 |
+
+`material`：
+
+| 字段 | 类型 | 必填 | 约束 |
+| --- | --- | --- | --- |
+| `materialId` | string | 是 | ≤ 64 |
+| `name` | string | 是 | 1～200 字 |
+| `type` | `'md' \| 'txt'` | 是 | 必须与 `name` 扩展名一致，否则 `INVALID_INPUT` |
+| `version` | number | 是 | ≥ 1 整数 |
+| `segments` | SegmentInput[] | 是 | 1～100 条；合计文本 ≤ 24,000 字 |
+
+`SegmentInput`：`segmentId`（1～64）、`startLine` / `endLine`（≥ 1 整数，`endLine ≥ startLine`）、`text`（1～2,000 字）。
+
+**唯一性**：同一份材料的 `segments` 内 `segmentId` 必须唯一；出现重复返回 400 `INVALID_INPUT`（message 中文说明），服务端不依赖"后写覆盖"来容忍重复编号。
+
+> 为什么只发片段、且要限长：控制 token、超时与费用；前端默认从第 1 段开始累计发送直到到达上限（未发送部分留给下一批做片段检索）。超过上限返回 400 `INVALID_INPUT`，message 用中文说明。
+
+响应 200：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `contractVersion` / `requestId` / `projectId` / `projectRevision` | | 回显 |
+| `materialId` / `materialVersion` | | 回显 |
+| `promptVersion` | string | 与请求一致 |
+| `source` | `'model' \| 'fallback'` | 与建议接口同一语义 |
+| `fallbackReason` | string \| null | `source: "model"` 时为 `null`；fallback 时为第 16 节的稳定原因码 |
+| `notice` | string \| null | 中文说明，≤ 300 字；`source: "model"` 且成功时为 `null` |
+| `draft` | MaterialUnderstandingDraft | 见 14.3 |
+
+1. `source: "model"`：`draft` 五块合计至少 1 条候选；
+2. `source: "fallback"`：`notice` 必填（中文说明模型未参与、用户可以先做什么）；`draft` 允许四块为空数组；**兜底不得编造材料中不存在的事实**，也不得把猜测写成确定事实；
+3. 未配置 / 超时 / 上游故障 / 输出非法**不返回 4xx / 5xx**，而是 200 + `fallback`（与 5.1 的分层一致）；`MODEL_*` 失败码只在兜底本身也失败时才返回（见第 16 节）。
+
+### 15.3 模型输出校验与清理
+
+模型只输出五块候选文本与 `segmentIds` 引用（不输出材料名与行号）：
+
+```json
+{
+  "goalCandidates": [{ "text": "……", "segmentIds": ["seg_0"] }],
+  "outcomeCandidates": [],
+  "dataNotes": [],
+  "methodNotes": [],
+  "openQuestions": [{ "text": "材料中没有出现数据规模说明，需要补充", "segmentIds": ["seg_2"] }]
+}
+```
+
+处理规则（与 4.6 同一风格：能修就修、不能修就丢）：
+
+| 检查 | 规则 | 不通过时 |
+| --- | --- | --- |
+| `text` | 非空，trim 后 1～300 字 | 超长截断；为空 → 丢弃该条 |
+| `segmentIds` | 数组必须存在；每个 ID 必须在本次请求的 `segments` 中 | 未知 ID 剔除并记日志；剔除后为空 → **丢弃该条**（无来源不可用） |
+| 单块数量 | 每块 ≤ 5 条 | 超出部分丢弃并记日志 |
+| 五块合计 | ≥ 1 条 | 为 0 → 判非法输出 → 走 fallback |
+| 用户可见文本 | 自然中文，且不含内部字段名（沿用 4.3 的检查，词表扩充 `materialId`、`segments`、`draft`、`goalCandidates`、`dataNotes` 等） | 判非法输出 → 走 fallback，不把原始文本返回客户端 |
+
+服务端不做的事：不修改材料正文，不生成行号（行号一律由 `segmentId` 回填），不判断“这条候选对不对”。
+
+### 15.4 上限汇总
+
+| 项 | 值 |
+| --- | --- |
+| 上传请求体上限 | 2 MB（1 MB 文件的 base64 约 1.37 MB） |
+| 理解请求体上限 | 256 KB（沿用 4.0） |
+| 单份材料大小 | 1,048,576 字节（1 MB，按解码后字节数） |
+| 单段长度 | ≤ 2,000 字 |
+| 理解片段数 / 合计 | ≤ 100 条 / ≤ 24,000 字 |
+| 模型调用超时 | 20 秒，安全网 25 秒（沿用 7.5） |
+| 重试 | 适配层最多自动重试 1 次，仅 `retryable: true`（沿用 4.0） |
+
+### 15.5 兼容性
+
+1. 未知字段一律忽略（8.4）；`projectName` 必须存在但可为 `null`；
+2. 两个接口不改变 `/health`、建议、聊天接口的既有行为；
+3. 旧前端（不带材料功能）不调用这两个接口、不带新字段，行为与 v1.3 完全一致。
+
+---
+
+## 16. 材料与理解相关错误码
+
+新增码（建议与聊天接口继续使用第 6 节的码；`retryable` 语义与 6.1 相同）：
+
+| code | HTTP | retryable | 触发条件 | 对外中文 message |
+| --- | --- | --- | --- | --- |
+| `INVALID_INPUT` | 400 | false | 请求非法：缺字段、类型 / 长度 / 数量超限、Content-Type 错误、`contractVersion` / `promptVersion` 不支持、base64 非法 | `请求内容不合法：<第一条具体问题>` |
+| `UNSUPPORTED_MATERIAL_TYPE` | 400 | false | 扩展名不是 `.md` / `.txt`，或内容特征判为二进制（含 NUL） | `当前只支持 md、txt 文件；CSV、XLSX 将在下一批支持，PDF、DOCX、ZIP 将在后续版本支持` |
+| `MATERIAL_TOO_LARGE` | 400 | false | 解码后字节数超过 1 MB | `文件超过 1 MB 上限，请压缩或拆分后再上传` |
+| `EMPTY_MATERIAL` | 400 | false | 解码后内容为空或仅空白 | `文件内容为空，请检查后再上传` |
+| `MATERIAL_ENCODING_UNREADABLE` | 400 | false | UTF-8 与 GBK 均无法解码 | `文件编码无法识别（已尝试 UTF-8 与 GBK），请另存为 UTF-8 后重试` |
+| `MATERIAL_PARSE_FAILED` | 400 | false | 校验通过但分段失败 | `材料解析失败，请检查文件内容后重试` |
+| `MODEL_TIMEOUT` | 504 | true | provider 超时，且服务端兜底也失败（正常不返回） | `模型调用超时，材料已保留，请稍后重试` |
+| `INVALID_MODEL_OUTPUT` | 502 | true | 模型输出非法，且服务端兜底也失败（正常不返回） | `模型返回内容不合法，请稍后重试` |
+| `MODEL_UNAVAILABLE` | 503 | true | 上游故障，且服务端兜底也失败（正常不返回） | `模型服务暂不可用，请稍后重试` |
+| `MODEL_NOT_CONFIGURED` | 503 | false | 未配置 URL / Key / 模型名，且服务端兜底也失败（正常不返回） | `服务端未配置模型密钥，暂时无法生成理解草稿` |
+
+约定：
+
+1. 所有拒绝类错误都返回 4.5 的失败结构，`requestId` 取不到时为 `null`；
+2. `message` 只描述问题与用户能做什么：不含密钥、路径、堆栈、上游原文，不回显材料正文（最多回显材料名）；
+3. 上传 / 理解失败不影响用户已有项目数据与已保存材料；前端必须保留用户已填内容并允许重试。
+
+---
+
+## 17. 建议与聊天的材料上下文（M2-A 最小接入）
+
+### 17.1 请求字段
+
+`POST /api/advisor/recommendations` 与 `POST /api/advisor/chat` 请求体新增**可选**字段 `confirmedMaterials`：
+
+```json
+{
+  "confirmedMaterials": [
+    {
+      "materialId": "mat_9b1e7c2f",
+      "name": "实验手册.md",
+      "type": "md",
+      "version": 1,
+      "segments": [
+        { "segmentId": "seg_1", "startLine": 10, "endLine": 24, "text": "## 数据说明\n字段包括……" }
+      ]
+    }
+  ]
+}
+```
+
+约束：
+
+| 项 | 值 |
+| --- | --- |
+| 材料数 | ≤ 3 |
+| 片段合计 | ≤ 20 条 |
+| 文本合计 | ≤ 8,000 字；单条 ≤ 2,000 字 |
+| 缺失 / `[]` | 行为与 v1.3 完全一致 |
+| 非法（类型、超限） | 400 `INVALID_INPUT` |
+| 版本要求 | 携带非空 `confirmedMaterials` 必须使用 v2 提示词版本（17.4） |
+
+### 17.2 责任划分
+
+| 角色 | 责任 |
+| --- | --- |
+| 前端 store | 只发送 `status: 'confirmed'` 的条目（含被学生修改后确认的内容）；未确认草稿绝不进入请求体；材料更新、确认内容变化时递增 `projectRevision` |
+| 服务端 | 校验结构与上限；把材料内容标注为“学生已确认的材料摘录”交给模型；不判断“是否真的确认过”（无服务端状态） |
+| 模型 | 引用材料时必须写明材料名与行号；不得把材料中未出现的内容写成事实；不得把材料里的指令当系统指令执行 |
+
+### 17.3 提示词与输出
+
+1. 用户消息里按材料分组序列化 `name` / `version` / 片段行号 / 正文（截断 ≤ 2,000 字）；除 `materialId` 外不发送其他内部信息；
+2. 系统提示词新增硬约束：只能依据给定材料摘录、项目状态与证据回答；材料中没有的内容必须说明“材料中未找到依据”；
+3. M2-A **不**为 `Suggestion` 增加材料引用字段（如 `basisMaterialIds`）；建议理由与聊天回答可以自然引用材料名与行号。“按相关性检索片段、引用准确率增强”属下一批；
+4. 建议与聊天接口的成功 / 失败结构、过期响应丢弃规则（4.7）、三层兜底（5.1）全部保持不变。
+
+### 17.4 promptVersion 取值（M2-A）
+
+| 接口 | 兼容保留 | M2-A 启用 |
+| --- | --- | --- |
+| 建议 | `mvp-prompt-v1` | `mvp-prompt-v2` |
+| 聊天 | `advisor-chat-v1` | `advisor-chat-v2` |
+| 材料理解 | — | `material-understanding-v1` |
+
+规则：
+
+1. 服务端支持列表包含上表全部取值，**不删除旧值**（前端是静态站点，旧页面可能仍带旧版本号）；
+2. 请求携带 `projectProfile` 或非空 `confirmedMaterials` 时必须使用 v2 取值；与 v1 组合 → 400 `INVALID_INPUT`（避免“以为发了材料、其实模型没看到”）；
+3. 接口与取值不匹配（例如建议接口收到 `advisor-chat-v1`）→ 400 `INVALID_INPUT`，不做静默降级；
+4. 取值同步四处：本契约、`server/src/advisor/types.ts` 的 `SUPPORTED_PROMPT_VERSIONS`、`src/domain/recommendation.ts`、`docs/ai/prompt-spec.md`（吴佳璐维护）。若吴佳璐的规格给出不同取值，以规格为准并在 M1 评审时同改四处。
+
+---
+
+## 18. mock JSON
+
+> 用途：李焰彬照它写类型 / store / API 适配；雍蕾照它画上传、解析状态与草稿确认页面；吴佳璐照它写材料理解提示词规格与反例。全部示例都是**线格式**，不含密钥与内部路径。
+
+### 18.1 项目基本信息（前端结构化状态样例）
+
+```json
+{
+  "goal": "构建极端风浪事件识别与预警的原型系统，为海上作业安全提供参考",
+  "expectedOutcome": "可交互原型 + 正文不超过 4 页的会议论文",
+  "memberNames": ["张同学", "李同学", "王同学"],
+  "researchPeriod": "第 3 周至第 14 周",
+  "scope": "先做西北太平洋，暂不覆盖全球海域",
+  "outOfScope": "不做实时业务系统，不做移动端"
+}
+```
+
+### 18.2 POST /api/materials：请求与成功响应
+
+请求：
+
+```json
+{
+  "contractVersion": "1.0",
+  "requestId": "5f2c1d0a-8a3e-4b7c-9f21-2d6e5a4c8b90",
+  "projectId": "prj_3f7a91d24c8b4e0a9d5f1b7c2e6a8031",
+  "projectRevision": 12,
+  "materialId": "mat_9b1e7c2f",
+  "version": 1,
+  "name": "实验手册.md",
+  "contentBase64": "IyDlrp7pqozmiYvlhowK"
+}
+```
+
+成功响应（`encoding: "utf-8"` 的示例；GBK 文件同样结构，`encoding` 为 `"gbk"`）：
+
+```json
+{
+  "contractVersion": "1.0",
+  "requestId": "5f2c1d0a-8a3e-4b7c-9f21-2d6e5a4c8b90",
+  "projectId": "prj_3f7a91d24c8b4e0a9d5f1b7c2e6a8031",
+  "projectRevision": 12,
+  "material": {
+    "materialId": "mat_9b1e7c2f",
+    "projectId": "prj_3f7a91d24c8b4e0a9d5f1b7c2e6a8031",
+    "name": "实验手册.md",
+    "type": "md",
+    "size": 20480,
+    "encoding": "utf-8",
+    "state": "parsed",
+    "version": 1,
+    "createdAt": "2026-10-12T10:12:00+08:00",
+    "updatedAt": "2026-10-12T10:12:00+08:00",
+    "failureReason": null
+  },
+  "segmentCount": 3,
+  "segments": [
+    {
+      "segmentId": "seg_0",
+      "index": 0,
+      "startLine": 1,
+      "endLine": 8,
+      "text": "# 实验手册\n本实验使用 ERA5 海浪场数据，任务是复现极端风浪事件的识别流程。"
+    },
+    {
+      "segmentId": "seg_1",
+      "index": 1,
+      "startLine": 10,
+      "endLine": 24,
+      "text": "## 数据说明\n主要字段：有效波高、风速、时间、经纬度；单次样例约 20 万行。"
+    },
+    {
+      "segmentId": "seg_2",
+      "index": 2,
+      "startLine": 26,
+      "endLine": 30,
+      "text": "## 交付要求\n提交一页方法说明和可复现的实验记录。"
+    }
+  ]
+}
+```
+
+### 18.3 POST /api/materials/understanding：请求与 model 响应
+
+请求：
+
+```json
+{
+  "contractVersion": "1.0",
+  "promptVersion": "material-understanding-v1",
+  "requestId": "9c1f0a6b-2c4d-4e77-9a3f-7b5e8d1c2043",
+  "projectId": "prj_3f7a91d24c8b4e0a9d5f1b7c2e6a8031",
+  "projectRevision": 13,
+  "projectName": "面向海洋环境安全保障的极端风和浪事件的智能分析系统",
+  "material": {
+    "materialId": "mat_9b1e7c2f",
+    "name": "实验手册.md",
+    "type": "md",
+    "version": 1,
+    "segments": [
+      {
+        "segmentId": "seg_0",
+        "startLine": 1,
+        "endLine": 8,
+        "text": "# 实验手册\n本实验使用 ERA5 海浪场数据，任务是复现极端风浪事件的识别流程。"
+      },
+      {
+        "segmentId": "seg_1",
+        "startLine": 10,
+        "endLine": 24,
+        "text": "## 数据说明\n主要字段：有效波高、风速、时间、经纬度；单次样例约 20 万行。"
+      },
+      {
+        "segmentId": "seg_2",
+        "startLine": 26,
+        "endLine": 30,
+        "text": "## 交付要求\n提交一页方法说明和可复现的实验记录。"
+      }
+    ]
+  }
+}
+```
+
+model 响应：
+
+```json
+{
+  "contractVersion": "1.0",
+  "requestId": "9c1f0a6b-2c4d-4e77-9a3f-7b5e8d1c2043",
+  "projectId": "prj_3f7a91d24c8b4e0a9d5f1b7c2e6a8031",
+  "projectRevision": 13,
+  "materialId": "mat_9b1e7c2f",
+  "materialVersion": 1,
+  "promptVersion": "material-understanding-v1",
+  "source": "model",
+  "fallbackReason": null,
+  "notice": null,
+  "draft": {
+    "goalCandidates": [
+      {
+        "itemId": "cnd_goal_0",
+        "text": "使用 ERA5 海浪场数据复现极端风浪事件的识别流程",
+        "sources": [
+          {
+            "materialId": "mat_9b1e7c2f",
+            "materialName": "实验手册.md",
+            "materialVersion": 1,
+            "segmentId": "seg_0",
+            "startLine": 1,
+            "endLine": 8
+          }
+        ]
+      }
+    ],
+    "outcomeCandidates": [
+      {
+        "itemId": "cnd_outcome_0",
+        "text": "提交一页方法说明和可复现的实验记录",
+        "sources": [
+          {
+            "materialId": "mat_9b1e7c2f",
+            "materialName": "实验手册.md",
+            "materialVersion": 1,
+            "segmentId": "seg_2",
+            "startLine": 26,
+            "endLine": 30
+          }
+        ]
+      }
+    ],
+    "dataNotes": [
+      {
+        "itemId": "cnd_data_0",
+        "text": "数据包含有效波高、风速、时间与经纬度字段，单次样例约 20 万行",
+        "sources": [
+          {
+            "materialId": "mat_9b1e7c2f",
+            "materialName": "实验手册.md",
+            "materialVersion": 1,
+            "segmentId": "seg_1",
+            "startLine": 10,
+            "endLine": 24
+          }
+        ]
+      }
+    ],
+    "methodNotes": [],
+    "openQuestions": [
+      {
+        "itemId": "cnd_question_0",
+        "text": "材料中没有给出数据时间范围与统计口径，需要补充确认",
+        "sources": [
+          {
+            "materialId": "mat_9b1e7c2f",
+            "materialName": "实验手册.md",
+            "materialVersion": 1,
+            "segmentId": "seg_1",
+            "startLine": 10,
+            "endLine": 24
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+### 18.4 POST /api/materials/understanding：fallback 响应
+
+```json
+{
+  "contractVersion": "1.0",
+  "requestId": "9c1f0a6b-2c4d-4e77-9a3f-7b5e8d1c2043",
+  "projectId": "prj_3f7a91d24c8b4e0a9d5f1b7c2e6a8031",
+  "projectRevision": 13,
+  "materialId": "mat_9b1e7c2f",
+  "materialVersion": 1,
+  "promptVersion": "material-understanding-v1",
+  "source": "fallback",
+  "fallbackReason": "MODEL_TIMEOUT",
+  "notice": "模型调用超时，未生成理解草稿；材料已解析成功，可以先手动登记要点，稍后重新生成。",
+  "draft": {
+    "goalCandidates": [],
+    "outcomeCandidates": [],
+    "dataNotes": [],
+    "methodNotes": [],
+    "openQuestions": []
+  }
+}
+```
+
+### 18.5 建议接口 v2 请求片段（`projectProfile` + `confirmedMaterials`）
+
+```json
+{
+  "contractVersion": "1.0",
+  "promptVersion": "mvp-prompt-v2",
+  "requestId": "1b7c9e40-6c2f-4f18-8d5a-0e2b7c4a9f31",
+  "projectId": "prj_3f7a91d24c8b4e0a9d5f1b7c2e6a8031",
+  "projectRevision": 14,
+  "projectName": "面向海洋环境安全保障的极端风和浪事件的智能分析系统",
+  "currentMilestone": "数据获取与预处理",
+  "projectProfile": {
+    "goal": "构建极端风浪事件识别与预警的原型系统，为海上作业安全提供参考",
+    "expectedOutcome": "可交互原型 + 正文不超过 4 页的会议论文",
+    "memberNames": ["张同学", "李同学", "王同学"],
+    "researchPeriod": "第 3 周至第 14 周",
+    "scope": "先做西北太平洋，暂不覆盖全球海域",
+    "outOfScope": "不做实时业务系统，不做移动端"
+  },
+  "confirmedContext": [],
+  "confirmedMaterials": [
+    {
+      "materialId": "mat_9b1e7c2f",
+      "name": "实验手册.md",
+      "type": "md",
+      "version": 1,
+      "segments": [
+        {
+          "segmentId": "seg_1",
+          "startLine": 10,
+          "endLine": 24,
+          "text": "## 数据说明\n主要字段：有效波高、风速、时间、经纬度；单次样例约 20 万行。"
+        }
+      ]
+    }
+  ],
+  "tasks": [],
+  "evidence": [],
+  "doubts": [],
+  "forceRefresh": false
+}
+```
+
+### 18.6 错误响应示例
+
+```json
+{
+  "contractVersion": "1.0",
+  "requestId": "5f2c1d0a-8a3e-4b7c-9f21-2d6e5a4c8b90",
+  "code": "UNSUPPORTED_MATERIAL_TYPE",
+  "message": "当前只支持 md、txt 文件；CSV、XLSX 将在下一批支持，PDF、DOCX、ZIP 将在后续版本支持",
+  "retryable": false,
+  "retryAfterSeconds": null
+}
+```
+
+```json
+{
+  "contractVersion": "1.0",
+  "requestId": "5f2c1d0a-8a3e-4b7c-9f21-2d6e5a4c8b90",
+  "code": "MATERIAL_TOO_LARGE",
+  "message": "文件超过 1 MB 上限，请压缩或拆分后再上传",
+  "retryable": false,
+  "retryAfterSeconds": null
+}
+```
+
+```json
+{
+  "contractVersion": "1.0",
+  "requestId": "5f2c1d0a-8a3e-4b7c-9f21-2d6e5a4c8b90",
+  "code": "EMPTY_MATERIAL",
+  "message": "文件内容为空，请检查后再上传",
+  "retryable": false,
+  "retryAfterSeconds": null
+}
+```
+
+```json
+{
+  "contractVersion": "1.0",
+  "requestId": "5f2c1d0a-8a3e-4b7c-9f21-2d6e5a4c8b90",
+  "code": "MATERIAL_ENCODING_UNREADABLE",
+  "message": "文件编码无法识别（已尝试 UTF-8 与 GBK），请另存为 UTF-8 后重试",
+  "retryable": false,
+  "retryAfterSeconds": null
+}
+```
+
+```json
+{
+  "contractVersion": "1.0",
+  "requestId": null,
+  "code": "INVALID_INPUT",
+  "message": "请求内容不合法：contentBase64 不是合法的 base64",
+  "retryable": false,
+  "retryAfterSeconds": null
+}
+```
+
+```json
+{
+  "contractVersion": "1.0",
+  "requestId": "9c1f0a6b-2c4d-4e77-9a3f-7b5e8d1c2043",
+  "code": "MODEL_NOT_CONFIGURED",
+  "message": "服务端未配置模型密钥，暂时无法生成理解草稿",
+  "retryable": false,
+  "retryAfterSeconds": null
+}
+```
+
+前端应对每个 code 映射中文提示（沿用 `src/domain/recommendation.ts` 的 `describeAdvisorFailure()` 思路扩充）。
+
+## 19. 变更记录
 
 | 版本 | 日期 | 变更 | 作者 |
 | --- | --- | --- | --- |
 | v1.0 | 2026-09-25 | 首版：确定建议接口、store action、最小字段、错误码、失败分层、扩展位 | 负责人（后端） |
 | v1.1 | 2026-09-25 | 同步已实现的健康检查、生产域名、CORS、缓存现状、ID 形态和线上验收状态；接口版本仍为 1.0 | 负责人（后端） |
+| v1.2 | 2026-09-28 | 更新前端结构化状态迁移的实现说明；请求与响应字段及接口版本不变 | 负责人（后端） |
+| v1.3 | 2026-09-28 | 明确过期响应状态收尾、draft 幂等责任、证据提交后的网络调用及超时层级；接口版本不变 | 负责人（后端） |
+| v2.0 | 2026-10-12 | M1 冻结：新增项目基本信息（第 13 节）、材料元数据 / 分段 / 理解草稿（第 14 节）、`POST /api/materials` 与 `POST /api/materials/understanding`（第 15 节）、材料错误码（第 16 节）、建议与聊天的已确认材料接入与 `promptVersion` 取值（第 17 节）、mock JSON（第 18 节）；`contractVersion` 仍为 `"1.0"` | 姜厚禄（后端） |
+| v2.1 | 2026-10-12 | 补充 `segmentId` 唯一性（重复返回 400 `INVALID_INPUT`）与日志卫生边界（只记类别与数量，不记材料正文、模型原始文本与原始引用编号）；接口字段与 `contractVersion` 不变 | 姜厚禄（后端） |

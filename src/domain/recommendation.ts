@@ -9,15 +9,73 @@
  *      按契约 2.5(b) 只挂在 Recommendation 上，不混进线格式 Suggestion。
  */
 
-import type { DoubtStatus, NewTaskDraft, TaskStatus } from '@/types/platform'
+import type {
+  DoubtStatus,
+  Material,
+  MaterialEncoding,
+  MaterialState,
+  MaterialType,
+  NewTaskDraft,
+  ProjectProfile,
+  TaskStatus,
+  UnderstandingBlockStatus,
+  UnderstandingDraft,
+} from '@/types/platform'
 
 export type { DoubtStatus, TaskStatus, NewTaskDraft }
 
 /** 契约版本：与 docs/contracts.md 第 8.1 节一致 */
 export const CONTRACT_VERSION = '1.0'
 
-/** 本轮服务端支持的提示词版本（契约 4.1） */
-export const DEFAULT_PROMPT_VERSION = 'mvp-prompt-v1'
+/**
+ * 建议接口的当前提示词版本（契约 17.4）。
+ *
+ * v1.3 起默认值就是 v2：`docs/ai/prompt-spec.md` §9.1 已登记「四处取值全部切换完毕」。
+ * 调用方**显式**传入的值一律原样保留，不做静默改写——「带 v2 字段却发 v1」这类接线
+ * 错误应当由服务端按契约 17.4 规则 2 返回 400 暴露出来，前端藏起来只会更难排查。
+ */
+export const DEFAULT_PROMPT_VERSION = 'mvp-prompt-v2'
+
+/** 契约 17.4：v1 取值兼容保留（旧页面可能仍在用，服务端不删除该取值） */
+export const ADVISOR_PROMPT_VERSION_V1 = 'mvp-prompt-v1'
+
+/** 契约 17.4：聊天接口的当前提示词版本；`advisor-chat-v1` 兼容保留 */
+export const ADVISOR_CHAT_PROMPT_VERSION = 'advisor-chat-v2'
+
+/** 契约 17.4：材料理解接口的提示词版本，只此一值 */
+export const MATERIAL_UNDERSTANDING_PROMPT_VERSION = 'material-understanding-v1'
+
+/** 契约 6.4：聊天问题 ≤ 2,000 字、历史 ≤ 20 条、每条文本 ≤ 2,000 字 */
+/** 契约 4.1 / 15.2：`projectName` 最多 120 字（超长会让整个请求被 400 拒绝） */
+export const MAX_PROJECT_NAME_LENGTH = 120
+
+/** 契约 4.1：`currentMilestone` 最多 60 字 */
+export const MAX_CURRENT_MILESTONE_LENGTH = 60
+
+/**
+ * 按契约上限裁剪项目名 / 里程碑名。
+ *
+ * 自定义题目允许学生随意填写，超长时**不能让整个请求失败**：
+ * 服务端会按 §4.1 的上限返回 400 `INVALID_INPUT`，那时建议与聊天就完全不可用了。
+ * 这里与 `question` / `chatHistory` 的处理一致——超长截断，不改变正常输入。
+ */
+export function clampProjectName(value: string | null | undefined): string | null {
+  if (value === undefined || value === null) return null
+  const text = value.trim()
+  if (text === '') return null
+  return text.length > MAX_PROJECT_NAME_LENGTH ? text.slice(0, MAX_PROJECT_NAME_LENGTH) : text
+}
+
+export function clampCurrentMilestone(value: string | null | undefined): string | null {
+  if (value === undefined || value === null) return null
+  const text = value.trim()
+  if (text === '') return null
+  return text.length > MAX_CURRENT_MILESTONE_LENGTH ? text.slice(0, MAX_CURRENT_MILESTONE_LENGTH) : text
+}
+
+export const MAX_ADVISOR_CHAT_QUESTION_LENGTH = 2_000
+export const MAX_ADVISOR_CHAT_HISTORY = 20
+export const MAX_ADVISOR_CHAT_TEXT_LENGTH = 2_000
 
 /**
  * 建议来源。
@@ -61,7 +119,32 @@ export interface DoubtSnapshot {
   createdAt: string
 }
 
-/** 契约 4.1 请求体 */
+/* ------------------------------------------------- v2 请求快照（契约 15.2 / 17.1） */
+
+/**
+ * 契约 15.2 / 17.1：发出去的一个材料片段。
+ * 只发片段文本与行号，不发材料正文全文。
+ */
+export interface UnderstandingSegmentInput {
+  segmentId: string
+  startLine: number
+  endLine: number
+  text: string
+}
+
+/** 契约 17.1：建议 / 聊天请求里的「已确认材料」 */
+export interface ConfirmedMaterial {
+  materialId: string
+  name: string
+  type: MaterialType
+  version: number
+  segments: UnderstandingSegmentInput[]
+}
+
+/** 契约 17.1：`confirmedMaterials` 里的一条片段（与 UnderstandingSegmentInput 同形） */
+export type ConfirmedMaterialSegment = UnderstandingSegmentInput
+
+/** 契约 4.1 请求体；`projectProfile` 与 `confirmedMaterials` 是 v2 可选字段 */
 export interface AdvisorRecommendationsRequest {
   contractVersion: string
   requestId: string
@@ -69,7 +152,11 @@ export interface AdvisorRecommendationsRequest {
   projectRevision: number
   projectName: string
   currentMilestone: string | null
+  /** 契约 13.2：全部为空时**不出现**在请求体里 */
+  projectProfile?: ProjectProfile
   confirmedContext: string[]
+  /** 契约 17.1：没有已确认材料时**不出现**在请求体里（与 v1.3 行为一致） */
+  confirmedMaterials?: ConfirmedMaterial[]
   /** 必须包含该项目全部任务（含已完成） */
   tasks: TaskSnapshot[]
   /** 最近若干条，按 createdAt 倒序 */
@@ -111,9 +198,146 @@ export interface AdvisorRecommendationsSuccess {
   suggestions: Suggestion[]
 }
 
+/* ---------------------------------------------- 聊天接口 DTO（契约 6.4） */
+
+/**
+ * 契约 6.4：聊天里的一条历史消息。
+ * `role` 只有 `user` / `assistant` 两种，`text` ≤ 2,000 字。
+ */
+export interface AdvisorChatMessage {
+  role: 'user' | 'assistant'
+  text: string
+}
+
+/** 契约 6.4：`POST /api/advisor/chat` 请求体；`projectProfile` / `confirmedMaterials` 是 v2 可选字段 */
+export interface AdvisorChatRequest {
+  contractVersion: string
+  promptVersion: string
+  requestId: string
+  projectId: string
+  projectRevision: number
+  projectName: string
+  currentMilestone: string | null
+  /** 契约 13.2：全部为空时**不出现**在请求体里 */
+  projectProfile?: ProjectProfile
+  /** 契约 17.1：没有已确认材料时**不出现**在请求体里（与 v1.3 行为一致） */
+  confirmedMaterials?: ConfirmedMaterial[]
+  tasks: TaskSnapshot[]
+  evidence: EvidenceSnapshot[]
+  doubts: DoubtSnapshot[]
+  /** ≤ 20 条，按时间正序 */
+  chatHistory: AdvisorChatMessage[]
+  /** 非空，≤ 2,000 字 */
+  question: string
+}
+
+/** 契约 6.4：成功响应。`answer` 非空；`source` 只可能是 model / fallback */
+export interface AdvisorChatSuccess {
+  contractVersion: string
+  requestId: string
+  projectId: string
+  projectRevision: number
+  source: AdvisorResponseSource
+  fallbackReason: AdvisorFallbackReason | null
+  promptVersion: string
+  answer: string
+}
+
+/** 契约 6.4：聊天接口适配层的返回（不抛异常，与建议接口同一套失败结构） */
+export type AdvisorChatResult =
+  | { ok: true; data: AdvisorChatSuccess }
+  | { ok: false; error: AdvisorApiError }
+
+/* ---------------------------------------------- 材料接口 DTO（契约 15） */
+
+/** 契约 15.0：两个材料接口共用的身份字段 */
+export interface MaterialContractIdentity {
+  contractVersion: string
+  requestId: string
+  projectId: string
+  projectRevision: number
+}
+
+/** 契约 15.1：`POST /api/materials` 请求体 */
+export interface MaterialUploadRequest extends MaterialContractIdentity {
+  materialId: string
+  version: number
+  name: string
+  /** 标准 base64，不带 data URL 前缀 */
+  contentBase64: string
+}
+
+/**
+ * 契约 14.1：材料的**线格式**（服务端响应里的形状）。
+ *
+ * 与本地形态 `types/platform.ts` 的 `Material` 的区别只有一处：线格式里
+ * `type` / `size` / `encoding` / `state` 一定有值（被拒绝的文件根本不会产生材料记录），
+ * 而本地形态允许为 `null`（旧数据迁移来的「仅登记」材料）。
+ */
+export interface MaterialMetadata {
+  materialId: string
+  projectId: string
+  name: string
+  type: MaterialType
+  /** 解码后的原始字节数，1～1,048,576 */
+  size: number
+  encoding: MaterialEncoding
+  state: MaterialState
+  version: number
+  createdAt: string
+  updatedAt: string
+  failureReason: string | null
+}
+
+/** 契约 15.1：成功响应（服务端不保存材料，结果完整返回） */
+export interface MaterialUploadSuccess extends MaterialContractIdentity {
+  material: MaterialMetadata
+  segmentCount: number
+  /** 线格式分段：契约 14.2，不带 materialId / materialVersion（由响应顶层决定归属） */
+  segments: MaterialSegmentDto[]
+}
+
+/** 契约 14.2：分段的线格式（`segmentId` 只保证在同一 materialId + version 内唯一） */
+export interface MaterialSegmentDto {
+  segmentId: string
+  index: number
+  startLine: number
+  endLine: number
+  text: string
+}
+
+/** 契约 15.2：`POST /api/materials/understanding` 请求体里的材料 */
+export interface UnderstandingMaterialInput {
+  materialId: string
+  name: string
+  type: MaterialType
+  version: number
+  segments: UnderstandingSegmentInput[]
+}
+
+/** 契约 15.2：`POST /api/materials/understanding` 请求体 */
+export interface MaterialsUnderstandingRequest extends MaterialContractIdentity {
+  promptVersion: string
+  /** 可为 null */
+  projectName: string | null
+  material: UnderstandingMaterialInput
+}
+
+/** 契约 15.2：成功响应（`source` 只可能是 model / fallback） */
+export interface MaterialsUnderstandingSuccess extends MaterialContractIdentity {
+  materialId: string
+  materialVersion: number
+  promptVersion: string
+  source: AdvisorResponseSource
+  fallbackReason: AdvisorFallbackReason | null
+  /** 中文说明，≤ 300 字；model 且成功时为 null */
+  notice: string | null
+  draft: UnderstandingDraft
+}
+
 /* ---------------------------------------------------------------- 错误 */
 
-/** 契约 6.1 本轮启用的错误码 + 6.2 保留码 */
+/** 契约 6.1 本轮启用的错误码 + 6.2 保留码 + 16 材料相关码 */
 export type AdvisorErrorCode =
   | 'INVALID_INPUT'
   | 'RATE_LIMITED'
@@ -122,6 +346,12 @@ export type AdvisorErrorCode =
   | 'MODEL_UNAVAILABLE'
   | 'MODEL_NOT_CONFIGURED'
   | 'INTERNAL'
+  // 契约第 16 节：材料上传与理解新增的码
+  | 'UNSUPPORTED_MATERIAL_TYPE'
+  | 'MATERIAL_TOO_LARGE'
+  | 'EMPTY_MATERIAL'
+  | 'MATERIAL_ENCODING_UNREADABLE'
+  | 'MATERIAL_PARSE_FAILED'
   // 以下为契约 6.2 的保留码：服务端持久化后才会返回，前端先留分支
   | 'STALE_REVISION'
   | 'UNAUTHORIZED'
@@ -228,6 +458,11 @@ export interface CreateProjectInput {
   members: number
   manualName?: string | null
   dataName?: string | null
+  /**
+   * 契约 13.1（可选）：创建时就能填的项目基本信息。
+   * 全部为空与不传等价；不改变 `createProject` 的既有语义与返回值。
+   */
+  profile?: Partial<ProjectProfile>
   /** 兼容入口：旧表单传 `topic` 而不是 `topicId` */
   topic?: string
   /** 兼容入口：旧表单的成员是「3 人」这类字符串 */
@@ -337,7 +572,7 @@ export interface Recommendation extends Suggestion {
 
 /* ------------------------------------------------------------ 运行时工具 */
 
-/** 契约 6.1：retryable 的权威值是响应里的字段，这里只在字段缺失时兜底 */
+/** 契约 6.1 / 16：retryable 的权威值是响应里的字段，这里只在字段缺失时兜底 */
 export const RETRYABLE_BY_CODE: Record<AdvisorErrorCode, boolean> = {
   INVALID_INPUT: false,
   RATE_LIMITED: true,
@@ -346,8 +581,83 @@ export const RETRYABLE_BY_CODE: Record<AdvisorErrorCode, boolean> = {
   MODEL_UNAVAILABLE: true,
   MODEL_NOT_CONFIGURED: false,
   INTERNAL: true,
+  // 契约 16：材料类错误都是确定性失败，重试不会变好
+  UNSUPPORTED_MATERIAL_TYPE: false,
+  MATERIAL_TOO_LARGE: false,
+  EMPTY_MATERIAL: false,
+  MATERIAL_ENCODING_UNREADABLE: false,
+  MATERIAL_PARSE_FAILED: false,
   STALE_REVISION: false,
   UNAUTHORIZED: false,
+}
+
+/** 契约 16：材料与理解相关错误码，供页面先做本地提示（服务端也会回中文 message） */
+export const MATERIAL_ERROR_CODES: readonly AdvisorErrorCode[] = [
+  'UNSUPPORTED_MATERIAL_TYPE',
+  'MATERIAL_TOO_LARGE',
+  'EMPTY_MATERIAL',
+  'MATERIAL_ENCODING_UNREADABLE',
+  'MATERIAL_PARSE_FAILED',
+]
+
+export function isMaterialErrorCode(value: unknown): value is AdvisorErrorCode {
+  return typeof value === 'string' && (MATERIAL_ERROR_CODES as string[]).includes(value)
+}
+
+/**
+ * 契约 16：材料与理解相关错误码的**对外中文 message**。
+ *
+ * 页面在请求还没发出去时就能给同一套文案（例如本地先挡住非法扩展名），
+ * 服务端返回时以响应里的 `message` 为准。这里只做"文案唯一出处"，
+ * 不含任何密钥、路径或上游原文。
+ */
+export const MATERIAL_ERROR_MESSAGES: Record<
+  | 'INVALID_INPUT'
+  | 'RATE_LIMITED'
+  | 'INTERNAL'
+  | 'UNSUPPORTED_MATERIAL_TYPE'
+  | 'MATERIAL_TOO_LARGE'
+  | 'EMPTY_MATERIAL'
+  | 'MATERIAL_ENCODING_UNREADABLE'
+  | 'MATERIAL_PARSE_FAILED'
+  | 'MODEL_TIMEOUT'
+  | 'INVALID_MODEL_OUTPUT'
+  | 'MODEL_UNAVAILABLE'
+  | 'MODEL_NOT_CONFIGURED',
+  string
+> = {
+  // 契约 16 的模板是「请求内容不合法：<第一条具体问题>」；
+  // 前端本地校验没有具体问题列表，用冒号式句式保持同构（服务端 message 永远优先）
+  INVALID_INPUT: '请求内容不合法：请检查后重试',
+  // 契约 6.1 / 6.2：材料接口沿用这两个码（限流预留、服务端未预期异常）
+  RATE_LIMITED: '请求过于频繁，请稍后重试',
+  INTERNAL: '服务端出现异常，请稍后重试',
+  UNSUPPORTED_MATERIAL_TYPE:
+    '当前只支持 md、txt 文件；CSV、XLSX 将在下一批支持，PDF、DOCX、ZIP 将在后续版本支持',
+  MATERIAL_TOO_LARGE: '文件超过 1 MB 上限，请压缩或拆分后再上传',
+  EMPTY_MATERIAL: '文件内容为空，请检查后再上传',
+  MATERIAL_ENCODING_UNREADABLE: '文件编码无法识别（已尝试 UTF-8 与 GBK），请另存为 UTF-8 后重试',
+  MATERIAL_PARSE_FAILED: '材料解析失败，请检查文件内容后重试',
+  MODEL_TIMEOUT: '模型调用超时，材料已保留，请稍后重试',
+  INVALID_MODEL_OUTPUT: '模型返回内容不合法，请稍后重试',
+  MODEL_UNAVAILABLE: '模型服务暂不可用，请稍后重试',
+  MODEL_NOT_CONFIGURED: '服务端未配置模型密钥，暂时无法生成理解草稿',
+}
+
+/** 契约 16（+ 6.1 / 6.2）：材料与理解相关错误码的 retryable 兜底值（响应缺字段时使用） */
+export const MATERIAL_RETRYABLE_BY_CODE: Record<string, boolean> = {
+  INVALID_INPUT: false,
+  RATE_LIMITED: true,
+  INTERNAL: true,
+  UNSUPPORTED_MATERIAL_TYPE: false,
+  MATERIAL_TOO_LARGE: false,
+  EMPTY_MATERIAL: false,
+  MATERIAL_ENCODING_UNREADABLE: false,
+  MATERIAL_PARSE_FAILED: false,
+  MODEL_TIMEOUT: true,
+  INVALID_MODEL_OUTPUT: true,
+  MODEL_UNAVAILABLE: true,
+  MODEL_NOT_CONFIGURED: false,
 }
 
 const ADVISOR_ERROR_CODES = Object.keys(RETRYABLE_BY_CODE) as AdvisorErrorCode[]
@@ -375,3 +685,160 @@ export function isAdvisorErrorCode(value: unknown): value is AdvisorErrorCode {
  *
  * 类型与 ID 约定以本文件为准；规则内容不需要新的线上字段。
  */
+
+/* ------------------------------------- v2 store action（契约 13 / 14） */
+
+/** 契约 13.1：保存项目基本信息。缺省字段表示"不改这一项"由调用方决定，统一按全量提交处理 */
+export type UpdateProjectProfileInput = Partial<ProjectProfile>
+
+export interface UpdateProjectProfileResult {
+  projectRevision: number
+}
+
+/** 兼容别名：团队既有页面用 `updateProjectBasicInfo` 命名，二者指向同一个 action */
+export type UpdateProjectBasicInfoInput = UpdateProjectProfileInput
+export type ProjectBasicInfoResult = UpdateProjectProfileResult
+
+/**
+ * 契约 14.1：登记一份材料（本地写入，不访问网络）。
+ *
+ * 只有 `state === 'parsed'` 且带 `segments` 的材料才能参与理解与建议请求；
+ * 无法识别编码 / 类型不支持的文件由服务端在 15.1 阶段拒绝，不产生材料记录。
+ */
+export interface RegisterMaterialInput {
+  name: string
+  /** 不传则前端生成 `mat_...` */
+  materialId?: string
+  /** 不传则沿用同名材料的现有版本（首次为 1），同名重传时 +1（契约 14.5 第 4 条） */
+  version?: number
+  size?: number
+  encoding?: MaterialEncoding
+  state?: MaterialState
+  failureReason?: string | null
+  /** 线格式分段（契约 14.2，不带 materialId / materialVersion，由 store 补上） */
+  segments?: MaterialSegmentDto[]
+}
+
+export interface RegisterMaterialResult {
+  materialId: string
+  version: number
+  segmentCount: number
+  projectRevision: number
+  /** true = 同一 materialId 重新登记，version 已 +1，旧版本草稿已作废 */
+  updated: boolean
+}
+
+/** 契约 15.1：上传并解析一份材料（读原始字节 → base64 → POST /api/materials） */
+export interface UploadMaterialFileInput {
+  /** 不传则取 `file.name` */
+  name?: string
+  /** 文件内容（浏览器 File / Blob） */
+  file?: Blob
+  /** 重新上传已有材料时传入，服务端按 version 区分版本 */
+  materialId?: string
+  signal?: AbortSignal
+}
+
+export interface UploadMaterialFileResult {
+  /** 写入 store 后的本地形态（`needsReupload` 已按片段数算好） */
+  material: Material
+  version: number
+  segmentCount: number
+  projectRevision: number
+  /** 服务端返回的线格式片段（界面可直接展示解析结果） */
+  segments: MaterialSegmentDto[]
+}
+
+/** 契约 15.2：请求某份材料的理解草稿 */
+export interface RequestUnderstandingInput {
+  materialId: string
+  signal?: AbortSignal
+  /** 只发送选定的片段；不传则从第 1 段开始累计到上限（契约 15.2） */
+  segmentIds?: string[]
+}
+
+/** 契约 15.2：理解请求的结果（含 fallback；`blockCount` 是本次写入的草稿条数） */
+export interface RequestUnderstandingResult {
+  materialId: string
+  materialVersion: number
+  source: RecommendationSource
+  fallbackReason: AdvisorFallbackReason | null
+  notice: string | null
+  /** 界面展示用：本次生成/写入的草稿条数 */
+  blockCount: number
+  draft: UnderstandingDraft
+  projectRevision: number
+}
+
+/** 契约 14.3：把服务端草稿写入本地状态（不访问网络） */
+export interface RecordUnderstandingInput {
+  materialId: string
+  materialVersion: number
+  draft: UnderstandingDraft
+  /** fallback 时服务端给的中文说明 */
+  notice?: string | null
+}
+
+export interface RecordUnderstandingResult {
+  materialId: string
+  blockCount: number
+  projectRevision: number
+}
+
+/** 契约 14.3：单条草稿的入参。`blockId` 是**本地**唯一条目 id（不是服务端 itemId） */
+export interface UnderstandingBlockIdInput {
+  blockId: string
+}
+
+export interface ModifyUnderstandingBlockInput {
+  blockId: string
+  /** 修改后的正文，1～300 字 */
+  content: string
+}
+
+export interface UnderstandingBlockResult {
+  blockId: string
+  status: UnderstandingBlockStatus
+  projectRevision: number
+}
+
+export interface DeleteUnderstandingBlockResult {
+  blockId: string
+  projectRevision: number
+}
+
+/** 契约 14.3：整份草稿确认（按材料） */
+export interface ConfirmAllUnderstandingInput {
+  materialId: string
+}
+
+export interface ConfirmAllUnderstandingResult {
+  materialId: string
+  confirmedCount: number
+  projectRevision: number
+}
+
+/* ------------------------------------------------- 错误 → 界面文案 */
+
+const ADVISOR_FAILURE_TEXT: Partial<Record<AdvisorErrorCode, string>> = {
+  INVALID_INPUT: '请求内容不合法，请检查后重试',
+  RATE_LIMITED: '请求过于频繁，请稍后重试',
+  MODEL_TIMEOUT: '模型响应超时，可稍后重试',
+  INVALID_MODEL_OUTPUT: '模型返回内容不合法，可稍后重试',
+  MODEL_UNAVAILABLE: '模型服务暂不可用，可稍后重试',
+  MODEL_NOT_CONFIGURED: '服务端未配置模型密钥',
+  UNSUPPORTED_MATERIAL_TYPE: '当前只支持 md、txt 文件',
+  MATERIAL_TOO_LARGE: '文件超过 1 MB 上限，请压缩或拆分后再上传',
+  EMPTY_MATERIAL: '文件内容为空，请检查后再上传',
+  MATERIAL_ENCODING_UNREADABLE: '文件编码无法识别，请另存为 UTF-8 后重试',
+  MATERIAL_PARSE_FAILED: '材料解析失败，请检查文件内容后重试',
+}
+
+/**
+ * 把适配层错误映射成给人看的中文说明（契约 18：界面不显示英文码）。
+ * 服务端给了 `message` 时优先用它——它比本地映射更贴近当时的失败原因。
+ */
+export function describeAdvisorFailure(error: AdvisorApiError): string {
+  if (error.message.trim() !== '') return error.message
+  return ADVISOR_FAILURE_TEXT[error.code as AdvisorErrorCode] ?? '请求未能完成，请稍后重试'
+}

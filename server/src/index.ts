@@ -8,15 +8,24 @@ import { createOpenAiCompatibleProvider } from './advisor/openaiCompatibleProvid
 import { createAdvisorService, type AdvisorService } from './advisor/service.js'
 import { createConsoleLogger, type AdvisorLogger, type AdvisorProvider } from './advisor/types.js'
 import { createAdvisorHandler } from './routes/advisor.js'
+import { createAdvisorChatHandler } from './routes/advisorChat.js'
 import { handleHealth, sendJson } from './routes/health.js'
-import { handleAdvisorCors } from './routes/cors.js'
+import { handleApiCors } from './routes/cors.js'
+import {
+  MATERIALS_PATH,
+  MATERIALS_UNDERSTANDING_PATH,
+  createMaterialsHandler,
+  createMaterialsUnderstandingHandler,
+} from './routes/materials.js'
+import { createMaterialsService, type MaterialsService } from './materials/understanding.js'
 
 /**
  * HTTP 服务入口
  * ----------------------------------------------------------------------------
  * 只负责装配：创建 provider 与服务、注册路由、兜底 404。
  *
- * 当前路由：GET /health、POST /api/advisor/recommendations。
+ * 当前路由：GET /health、POST /api/advisor/recommendations、POST /api/advisor/chat、
+ * POST /api/materials（材料登记与解析，v2 / M2-A）、POST /api/materials/understanding（材料理解草稿）。
  * 运行时**默认使用真实模型 provider**（OpenAI 兼容）；
  * mock provider 只在 ADVISOR_PROVIDER=mock（本地联调）或测试注入时使用。
  */
@@ -31,6 +40,8 @@ const SERVICE_TIMEOUT_MARGIN_MS = 5_000
 export interface AppDependencies {
   /** 覆盖建议服务，测试用它注入 provider（离线、不发真实请求） */
   advisorService?: AdvisorService
+  /** 覆盖材料服务（v2 / M2-A），测试同理 */
+  materialsService?: MaterialsService
   logger?: AdvisorLogger
 }
 
@@ -44,7 +55,9 @@ function readMockProviderMode(env: NodeJS.ProcessEnv = process.env): MockProvide
   const raw = env.MOCK_PROVIDER_MODE?.trim()
   if (raw === undefined || raw === '') return 'ok'
   if (!MOCK_PROVIDER_MODES.includes(raw)) {
-    console.warn(`[server] MOCK_PROVIDER_MODE 取值不被识别（${MOCK_PROVIDER_MODES.join(' / ')}），已按 ok 处理`)
+    console.warn(
+      `[server] MOCK_PROVIDER_MODE 取值不被识别（${MOCK_PROVIDER_MODES.join(' / ')}），已按 ok 处理`,
+    )
     return 'ok'
   }
   return raw as MockProviderMode
@@ -88,27 +101,47 @@ function createAdvisorProvider(logger: AdvisorLogger): AdvisorProvider {
 export function createApp(serverConfig: ServerConfig = config, deps: AppDependencies = {}): Server {
   const logger = deps.logger ?? createConsoleLogger('server')
 
+  // 同一个 provider 实例同时供建议 / 聊天 / 材料理解使用（替换 provider 只改 createAdvisorProvider）
+  const provider = createAdvisorProvider(logger)
+
   const advisorService =
     deps.advisorService ??
     createAdvisorService({
-      provider: createAdvisorProvider(logger),
+      provider,
       fallback: createRuleFallback(),
       timeoutMs: modelConfig.timeoutMs + SERVICE_TIMEOUT_MARGIN_MS,
       logger,
     })
 
+  const materialsService =
+    deps.materialsService ??
+    createMaterialsService({
+      provider,
+      timeoutMs: modelConfig.timeoutMs + SERVICE_TIMEOUT_MARGIN_MS,
+      logger,
+    })
+
   const handleAdvisor = createAdvisorHandler({ service: advisorService, logger })
+  const handleAdvisorChat = createAdvisorChatHandler({ service: advisorService, logger })
+  const handleMaterials = createMaterialsHandler({ service: materialsService, logger })
+  const handleMaterialsUnderstanding = createMaterialsUnderstandingHandler({
+    service: materialsService,
+    logger,
+  })
 
   return createServer((req, res) => {
-    if (handleAdvisorCors(req, res)) return
+    if (handleApiCors(req, res)) return
 
     // 同步路由
     if (handleHealth(req, res, serverConfig)) return
 
     // 异步路由
     void handleAdvisor(req, res)
-      .then((handled) => {
+      .then(async (handled) => {
         if (handled) return
+        if (await handleAdvisorChat(req, res)) return
+        if (await handleMaterials(req, res)) return
+        if (await handleMaterialsUnderstanding(req, res)) return
         sendJson(res, 404, { status: 'error', message: '接口不存在' })
       })
       .catch((error: unknown) => {
@@ -139,6 +172,15 @@ function start(): void {
     console.log(`[${config.serviceName}] advisor provider: ${describeAdvisorProvider()}`)
     console.log(
       `[${config.serviceName}] advisor route: POST http://${config.host}:${config.port}/api/advisor/recommendations`,
+    )
+    console.log(
+      `[${config.serviceName}] chat route: POST http://${config.host}:${config.port}/api/advisor/chat`,
+    )
+    console.log(
+      `[${config.serviceName}] materials route: POST http://${config.host}:${config.port}${MATERIALS_PATH}`,
+    )
+    console.log(
+      `[${config.serviceName}] materials understanding route: POST http://${config.host}:${config.port}${MATERIALS_UNDERSTANDING_PATH}`,
     )
 
     if (modelConfig.provider !== 'mock' && modelConfig.endpoint === null) {

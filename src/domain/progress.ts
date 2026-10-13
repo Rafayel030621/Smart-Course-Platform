@@ -50,8 +50,12 @@ function randomToken(length: number): string {
 /**
  * 契约 2 通用约定：`<前缀>_<可打印字符串>`，长度 ≤ 64。
  * ID 只在**创建时**生成一次并随项目一起持久化。
+ *
+ * `mat` 是 v2 新增的材料前缀（契约 14.1，前端生成）；`ublk` 是理解草稿条目的
+ * **本地**前缀——服务端的 `itemId` 只在单次响应内唯一，本地还需要一个项目内唯一的
+ * 稳定 id（契约 14.3）。
  */
-export function createId(prefix: 'prj' | 'tsk' | 'evd' | 'dbt'): string {
+export function createId(prefix: 'prj' | 'tsk' | 'evd' | 'dbt' | 'mat' | 'ublk'): string {
   return `${prefix}_${randomToken(ID_TOKEN_LENGTH)}`
 }
 

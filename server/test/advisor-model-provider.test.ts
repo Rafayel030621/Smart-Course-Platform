@@ -7,6 +7,7 @@ import {
   AdvisorProviderError,
   silentLogger,
   type AdvisorProvider,
+  type AdvisorChatRequest,
   type AdvisorRequest,
   type FetchLike,
   type ModelEndpoint,
@@ -176,6 +177,22 @@ test('按完整 URL 发请求，带上 Authorization 与规定请求体', async 
   assert.match(body.messages[1].content, /dbt_1/)
 
   assert.deepEqual(output.suggestions, [validSuggestion])
+})
+
+test('聊天 provider 发送项目状态、历史和问题，并返回纯文本答案', async () => {
+  const { calls, fetchImpl } = recordingFetch(() => jsonResponse(contentPayload('请先核对已有证据，再决定下一步。')))
+  const provider = createOpenAiCompatibleProvider({ endpoint: endpointWith(), fetchImpl })
+  const chatRequest: AdvisorChatRequest = {
+    requestId: 'chat_1', projectId: 'prj_1', projectRevision: 2, projectName: '测试项目', currentMilestone: 'MVP',
+    tasks: [], evidence: [], doubts: [], chatHistory: [{ role: 'user', text: '之前的问题' }], question: '下一步是什么？', promptVersion: 'advisor-chat-v1',
+  }
+  const output = await provider.generateChat?.(chatRequest)
+  assert.equal(output?.answer, '请先核对已有证据，再决定下一步。')
+  const sent = JSON.parse(String(calls[0].init.body)) as { messages: Array<{ content: string }> }
+  const combined = sent.messages.map((message) => message.content).join('\n')
+  assert.match(combined, /prj_1/)
+  assert.match(combined, /之前的问题/)
+  assert.match(combined, /下一步是什么/)
 })
 
 test('URL 原样使用，不自行拼接 /v1/chat/completions 之类的路径', async () => {

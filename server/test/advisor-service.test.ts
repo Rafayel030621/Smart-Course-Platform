@@ -7,6 +7,7 @@ import { LIMITS, normalizeSuggestions, parseAdvisorRequest } from '../src/adviso
 import {
   AdvisorProviderError,
   silentLogger,
+  type AdvisorChatRequest,
   type AdvisorRequest,
   type AdvisorProvider,
 } from '../src/advisor/types.js'
@@ -68,6 +69,20 @@ const validRequest: AdvisorRequest = {
   ],
   promptVersion: 'mvp-prompt-v1',
   forceRefresh: false,
+}
+
+const validChatRequest: AdvisorChatRequest = {
+  requestId: 'chat_service_test_1',
+  projectId: 'prj_1',
+  projectRevision: 3,
+  projectName: '测试项目',
+  currentMilestone: '选题确认与文献调研',
+  tasks: validRequest.tasks,
+  evidence: validRequest.evidence,
+  doubts: validRequest.doubts,
+  chatHistory: [{ role: 'user', text: '之前的问题' }],
+  question: '下一步应该做什么？',
+  promptVersion: 'advisor-chat-v1',
 }
 
 /** 线格式的请求体：validRequest 是校验之后的结构，所以这里补上顶层才有的 contractVersion */
@@ -322,6 +337,106 @@ describe('服务层', () => {
     if (result.ok) {
       assert.equal(result.source, 'fallback')
       assert.equal(result.fallbackReason, 'INVALID_MODEL_OUTPUT')
+    }
+  })
+
+  test('建议模型文本包含内部字段名时进入中文兜底且不回显原文', async () => {
+    const leaked = '请先检查 currentMilestone 和 doneCriteria，再继续。'
+    const provider: AdvisorProvider = {
+      name: 'leaky-suggestions',
+      async generate() {
+        return { suggestions: [{ title: leaked, whyNow: '当前需要推进', doneCriteria: '提交一条证据' }] }
+      },
+    }
+    const result = await serviceWith(provider).recommend(validRequest)
+
+    assert.equal(result.ok, true)
+    if (result.ok) {
+      assert.equal(result.source, 'fallback')
+      assert.equal(result.fallbackReason, 'INVALID_MODEL_OUTPUT')
+      const visibleText = result.suggestions.flatMap((suggestion) => [suggestion.title, suggestion.whyNow, suggestion.doneCriteria]).join('\n')
+      assert.doesNotMatch(visibleText, /currentMilestone|doneCriteria/)
+    }
+  })
+
+  test('纯英文建议文本视为非法并进入中文规则兜底', async () => {
+    const provider: AdvisorProvider = {
+      name: 'english-suggestions',
+      async generate() {
+        return {
+          suggestions: [{ title: 'Define the next milestone', whyNow: 'The project needs a clear next step', doneCriteria: 'Submit evidence' }],
+        }
+      },
+    }
+    const result = await serviceWith(provider).recommend(validRequest)
+
+    assert.equal(result.ok, true)
+    if (result.ok) {
+      assert.equal(result.source, 'fallback')
+      assert.equal(result.fallbackReason, 'INVALID_MODEL_OUTPUT')
+      assert.doesNotMatch(JSON.stringify(result), /Define the next milestone|Submit evidence/)
+    }
+  })
+
+  test('聊天模型文本包含内部字段名时返回中文兜底且不回显原文', async () => {
+    const leaked = '请根据 evidence 和 doubts 更新 doneCriteria。'
+    const provider: AdvisorProvider = {
+      name: 'leaky-chat',
+      async generate() {
+        return { suggestions: buildMockSuggestions(validRequest) }
+      },
+      async generateChat() {
+        return { answer: leaked }
+      },
+    }
+    const result = await serviceWith(provider).chat(validChatRequest)
+
+    assert.equal(result.ok, true)
+    if (result.ok) {
+      assert.equal(result.source, 'fallback')
+      assert.equal(result.fallbackReason, 'INVALID_MODEL_OUTPUT')
+      assert.match(result.answer, /目前无法可靠生成回答/)
+      assert.doesNotMatch(result.answer, /evidence|doubts|doneCriteria/)
+    }
+  })
+
+  test('正常中文聊天模型回答仍返回 source=model', async () => {
+    const provider: AdvisorProvider = {
+      name: 'chinese-chat',
+      async generate() {
+        return { suggestions: buildMockSuggestions(validRequest) }
+      },
+      async generateChat() {
+        return { answer: '请先明确当前里程碑，再用一条新证据验证下一步。' }
+      },
+    }
+    const result = await serviceWith(provider).chat(validChatRequest)
+
+    assert.equal(result.ok, true)
+    if (result.ok) {
+      assert.equal(result.source, 'model')
+      assert.equal(result.fallbackReason, null)
+      assert.equal(result.answer, '请先明确当前里程碑，再用一条新证据验证下一步。')
+    }
+  })
+
+  test('纯英文聊天回答视为非法并进入中文兜底', async () => {
+    const provider: AdvisorProvider = {
+      name: 'english-chat',
+      async generate() {
+        return { suggestions: buildMockSuggestions(validRequest) }
+      },
+      async generateChat() {
+        return { answer: 'Please check the next step and continue.' }
+      },
+    }
+    const result = await serviceWith(provider).chat(validChatRequest)
+
+    assert.equal(result.ok, true)
+    if (result.ok) {
+      assert.equal(result.source, 'fallback')
+      assert.equal(result.fallbackReason, 'INVALID_MODEL_OUTPUT')
+      assert.match(result.answer, /目前无法可靠生成回答/)
     }
   })
 
