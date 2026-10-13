@@ -4,6 +4,10 @@ import { useRouter } from 'vue-router'
 import ProjectCreate from '@/components/ProjectCreate.vue'
 import ProjectMindMap from '@/components/ProjectMindMap.vue'
 import SuggestionCard from '@/components/SuggestionCard.vue'
+// v2（M1 / M2-A）：项目基本信息、材料上传与理解草稿三个面板（页面组件由雍蕾维护）
+import MaterialPanel from '@/components/MaterialPanel.vue'
+import ProjectProfileForm from '@/components/ProjectProfileForm.vue'
+import UnderstandingDraft from '@/components/UnderstandingDraft.vue'
 import { CHINESE_NUM, WEEK_LABELS, useWorkbenchStore } from '@/stores/workbench'
 import { deriveDoubtSnapshots, deriveEvidenceSnapshots, toDisplayTime } from '@/domain/activity'
 import { deriveTaskSnapshots } from '@/domain/progress'
@@ -579,6 +583,21 @@ const adviceNote = computed(() => {
             <input ref="manualInput" type="file" style="display:none" @change="upload('实验手册', $event)" />
             <input ref="dataInput" type="file" style="display:none" @change="upload('数据集', $event)" />
             <input ref="otherInput" type="file" style="display:none" @change="upload('材料', $event)" />
+          </div>
+        </div>
+
+        <div class="card" style="margin-bottom:14px;">
+          <div class="card-h">项目基本信息（目标 / 预期结果 / 成员 / 研究周期）</div>
+          <div class="card-b">
+            <ProjectProfileForm />
+          </div>
+        </div>
+
+        <div class="card" style="margin-bottom:14px;">
+          <div class="card-h">材料与理解草稿</div>
+          <div class="card-b">
+            <MaterialPanel />
+            <UnderstandingDraft />
           </div>
         </div>
 

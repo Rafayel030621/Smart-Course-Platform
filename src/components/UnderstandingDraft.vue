@@ -134,6 +134,22 @@ function saveEdit(block: UnderstandingBlock): void {
   }
 }
 
+/**
+ * 撤销确认：把已确认的条目退回「待确认 / 已修改」，让它不再进入建议与问答请求。
+ * 学生不必先删除再重新生成（契约 14.3 的三种 status 语义）。
+ */
+function unconfirmBlock(block: UnderstandingBlock): void {
+  busyId.value = block.id
+  try {
+    const result = store.unconfirmUnderstandingBlock({ blockId: block.id })
+    actionHint.value = result.ok
+      ? '已撤销确认。这条不再用于建议与问答，需要时再点「确认这条」。'
+      : result.message
+  } finally {
+    busyId.value = null
+  }
+}
+
 function deleteBlock(block: UnderstandingBlock): void {
   busyId.value = block.id
   try {
@@ -238,6 +254,15 @@ function confirmGroup(materialId: string): void {
                   @click="startEdit(block)"
                 >
                   {{ block.status === 'confirmed' ? '修改（改完需再确认）' : '修改' }}
+                </button>
+                <button
+                  v-if="block.status === 'confirmed'"
+                  class="btn"
+                  type="button"
+                  :disabled="busyId === block.id"
+                  @click="unconfirmBlock(block)"
+                >
+                  撤销确认
                 </button>
                 <button
                   class="btn danger"
