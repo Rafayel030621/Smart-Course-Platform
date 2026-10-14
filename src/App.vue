@@ -6,7 +6,7 @@ import { useWorkbenchStore } from '@/stores/workbench'
 /**
  * 应用外壳
  * ----------------------------------------------------------------------------
- * 顶部标题栏 + 两个页签（工作台 / 论文推荐）+ 全局提示条。
+ * 顶部标题栏 + 三个页签（工作台 / 项目地图 / 论文推荐）+ 全局提示条。
  * 与 platform-ui-mockup(3).html 的 header / nav / toast 一致。
  */
 const store = useWorkbenchStore()
@@ -15,6 +15,7 @@ const router = useRouter()
 
 const NAV = [
   { path: '/', label: '工作台' },
+  { path: '/map', label: '项目地图' },
   { path: '/papers', label: '论文推荐' },
 ]
 

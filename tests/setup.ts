@@ -1,53 +1,20 @@
+import { afterEach } from 'vitest'
+
 /**
- * 测试环境的浏览器桩
+ * Vitest 全局环境准备（只管环境，不含任何业务断言）
  * ----------------------------------------------------------------------------
- * `src/stores/**` 会用到 `window.localStorage` / `window.setTimeout` / `window.scrollTo`，
- * 但本轮的测试全部是状态层的纯逻辑测试，不需要真实 DOM 与 jsdom：
- * 这里用最小的内存实现替身即可，读取路径与浏览器一致（`persistence.ts` 只调用
- * `getItem` / `setItem` / `removeItem`）。
+ * 1. localStorage：由 jsdom 提供，测试里直接用 `localStorage` 即可。
+ *    这里在每个用例之后清空它——store 将来落 localStorage 时，用例之间不会互相污染。
+ * 2. window.scrollTo：jsdom 没有实现，而 store 的 `showCreate()` / `createProject()`
+ *    会调用它；不补空实现的话，jsdom 会打印 "Not implemented: window.scrollTo" 噪音。
  */
 
-const store = new Map<string, string>()
-
-const memoryStorage: Storage = {
-  get length(): number {
-    return store.size
-  },
-  clear(): void {
-    store.clear()
-  },
-  getItem(key: string): string | null {
-    return store.has(key) ? (store.get(key) as string) : null
-  },
-  key(index: number): string | null {
-    return Array.from(store.keys())[index] ?? null
-  },
-  removeItem(key: string): void {
-    store.delete(key)
-  },
-  setItem(key: string, value: string): void {
-    store.set(key, String(value))
-  },
-}
-
-const windowStub = {
-  localStorage: memoryStorage,
-  setTimeout: (handler: () => void, timeout?: number): number =>
-    Number(setTimeout(handler, timeout)),
-  clearTimeout: (handle?: number): void => {
-    clearTimeout(handle as unknown as NodeJS.Timeout)
-  },
-  scrollTo: (): void => {
-    /* 测试不关心滚动 */
-  },
-}
-
-globalThis.window = windowStub as unknown as Window & typeof globalThis
-globalThis.localStorage = memoryStorage
-
-/** 每个用例之间清空本地存储，避免相互污染 */
-beforeEach(() => {
-  memoryStorage.clear()
+afterEach(() => {
+  localStorage.clear()
 })
 
-export { memoryStorage }
+// 用 defineProperty 而不是直接赋值：scrollTo 有重载签名，直接赋值类型不匹配
+Object.defineProperty(window, 'scrollTo', {
+  value: () => {},
+  writable: true,
+})

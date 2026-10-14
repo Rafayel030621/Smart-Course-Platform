@@ -1,6 +1,6 @@
 # 后端服务：配置、启动、健康检查与建议接口（首轮 MVP）
 
-> 编制日期：2026-09-25（最近更新：接入真实模型 provider）
+> 编制日期：2026-09-25（2026-09-28 同步 CORS 与测试现状）
 > 对应契约：`docs/contracts.md`（第 4 节建议接口、第 6 节错误码、第 7 节域名与端口）
 > 当前已实现：`GET /health`、`POST /api/advisor/recommendations`。
 > **运行时默认使用真实模型 provider（OpenAI 兼容）**；mock provider 只在 `ADVISOR_PROVIDER=mock`（本地联调）或测试注入时使用。
@@ -15,7 +15,7 @@
 | npm | ≥ 10 | 10.9.2 |
 | 网络 | 首次 `npm install` 需要能访问 npm registry；调用真实模型需要能访问模型网关 | — |
 
-后端是**独立**的 npm 包：`server/` 有自己的 `package.json`、`node_modules` 和 `tsconfig.json`，与仓库根目录的前端依赖互不影响。根目录的 `package.json`、`vite.config.ts`、`src/**` 未被改动。
+后端是**独立**的 npm 包：`server/` 有自己的 `package.json`、`node_modules` 和 `tsconfig.json`，与仓库根目录的前端依赖互不影响。根目录现已配置前端 Vitest；它不参与后端的 `npm test`。
 
 **不使用任何模型 SDK**：调用真实模型用的是 Node 22 原生 `fetch` + `AbortController`。
 
@@ -101,7 +101,7 @@ EOF
 # 2) systemd 里引用环境文件（示例片段）
 #    [Service]
 #    EnvironmentFile=/home/w-4090/wzh-jhl/advisor.env
-#    ExecStart=/usr/bin/node /home/w-4090/wzh-jhl/server/dist/src/index.js
+#    ExecStart=/usr/bin/node /home/w-4090/wzh-jhl/backend/dist/src/index.js
 sudo systemctl daemon-reload
 sudo systemctl restart <你的服务名>
 ```
@@ -112,7 +112,7 @@ sudo systemctl restart <你的服务名>
 export MODEL_API_URL='https://your-gateway.example.com/v1/chat/completions'
 export MODEL_API_KEY='...'
 export MODEL_NAME='...'
-cd /home/w-4090/wzh-jhl/server && npm start
+cd /home/w-4090/wzh-jhl/backend && npm start
 ```
 
 ### 4.3 Windows 本地怎么设置
@@ -170,7 +170,7 @@ npm test
 
 `npm test` 先编译再运行测试，使用 Node 内置的 `node:test` + `node:assert`，**没有引入 jest / vitest**。HTTP 测试用随机空闲端口（`port: 0`），不占用 8080。
 
-当前结果：**83 条用例，全部通过**。
+2026-10-08 本地结果：**90 条用例，全部通过**。
 
 **测试不会调用真实模型**：
 
@@ -184,6 +184,7 @@ npm test
 | `test/advisor-recommendations.test.ts` | 建议接口的 HTTP 行为：请求校验、错误响应、引用清理、兜底、405/404 |
 | `test/advisor-service.test.ts` | 校验层与服务层：不补默认值、截断与丢弃规则、超时/失败映射、兜底失败 |
 | `test/advisor-model-provider.test.ts` | 真实 provider：请求形态、响应解析、各类失败映射、超时中断、不泄露密钥 |
+| `test/cors.test.ts` | 生产与本地开发来源的 OPTIONS/POST CORS 头，以及其他来源的拒绝行为 |
 
 ## 6. 健康检查
 
@@ -409,12 +410,12 @@ server/
 | 项 | 状态 |
 | --- | --- |
 | 本地 `127.0.0.1:8080` | 已实测：`GET /health` 与 `POST /api/advisor/recommendations` 均返回预期结果 |
-| 服务器上的 8080 端口 | 已确认空闲（可由本服务使用） |
+| 服务器上的 8080 端口 | 后端 systemd 服务监听 `127.0.0.1:8080`（2026-09-25 验收记录） |
 | 服务器上的 **18080** 端口 | **由现有 Python 进程占用，禁止停止、修改或复用** |
-| `api.xinxian-music.xyz` 的 DNS、证书、隧道连通、CORS | **尚未验证** |
-| 真实模型调用 | 代码已接入（OpenAI 兼容），但**尚未对着真实端点实测过**（本机没有配置） |
+| `api.xinxian-music.xyz` 的 DNS、证书、隧道连通、CORS | **已验证**（2026-09-25；OPTIONS 204、POST 200、生产来源白名单生效） |
+| 真实模型调用 | 服务器侧已用 DeepSeek 验证返回 `source: model`；本地离线测试仍不调用真实端点 |
 
-因此：在上表"尚未验证"的项全部实测通过之前，**任何文档、PR 说明或汇报都不得写成"API 已上线"或"已实测接通大模型"**。
+因此：上表结果是历史验收记录。后续后端、前端静态文件、隧道或环境变量变更后，必须重新实测，不能只依据 Git 合并记录宣称当前线上状态。
 
 ## 10. 常见问题
 
@@ -435,7 +436,7 @@ server/
 3. **`forceRefresh` / `cached` 已按契约出现，但服务端还没有缓存层**：`cached` 恒为 `false`。
 4. **提示词与 `docs/ai/prompt-spec.md` 需要对齐**：运行时提示词在 `src/advisor/prompt.ts`，版本号在 `src/advisor/types.ts` 的 `SUPPORTED_PROMPT_VERSIONS`；改内容时要同步升级版本号。
 5. **provider 对 ```json 代码块做了最小宽容**：系统提示词已禁止围栏输出，这里只在明显带围栏时剥掉，避免个例导致整次调用作废。
-6. **`server/dist` 尚未加入 `.gitignore`**：`npm run build` 会产生该目录。
+6. **`server/dist` 已加入仓库根 `.gitignore`**：`npm run build` 会产生该目录，但不会作为源码提交。
 
 ## 12. 变更记录
 
@@ -444,3 +445,4 @@ server/
 | 2026-09-25 | 首版：后端骨架 + `GET /health` + 12 条测试 |
 | 2026-09-25 | 建议接口：请求校验、统一错误响应、规则兜底、mock provider + 49 条测试 |
 | 2026-09-25 | 接入真实模型 provider（OpenAI 兼容，原生 fetch）：环境变量配置、提示词模块、超时与失败映射 + 22 条测试（合计 83 条） |
+| 2026-09-25 | 增加生产来源 CORS 白名单与预检处理；后端测试达到 86 条并通过 |

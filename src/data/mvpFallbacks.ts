@@ -52,8 +52,8 @@ export interface LocalRecommendationInput {
  * 本地规则兜底建议。
  *
  * 优先级（契约 5.1 的兜底顺序）：
- *   1. 进行中的任务      2. 未解决的疑问      3. 未开始的任务
- *   4. 当前里程碑        5. 证据不足
+ *   0. 空白项目（先补基本信息）  1. 进行中的任务      2. 未解决的疑问
+ *   3. 未开始的任务              4. 当前里程碑        5. 证据不足
  * 前三条按项目实际状态各取一条，最多 3 条。
  */
 export function buildLocalRecommendations(input: LocalRecommendationInput): Recommendation[] {
@@ -66,16 +66,46 @@ export function buildLocalRecommendations(input: LocalRecommendationInput): Reco
     if (candidate !== null && candidates.length < MAX_SUGGESTIONS) candidates.push(candidate)
   }
 
+  take(buildBlankProjectSuggestion(tasks, evidence, doubts, input.currentMilestone))
   take(buildDoingSuggestion(tasks, evidence))
   take(buildDoubtSuggestion(doubts, evidence))
   take(buildTodoSuggestion(tasks))
   take(buildMilestoneSuggestion(input.currentMilestone, tasks, doubts))
   take(buildEvidenceSuggestion(tasks, evidence))
+  take(buildEvidenceOnlySuggestion(tasks, evidence))
 
   return candidates.map((candidate, index) => toLocalRecommendation(candidate, input, index))
 }
 
 /* --------------------------------------------------------------- 各条规则 */
+
+/**
+ * 0. 空白项目：创建之后还没有任务、证据、疑问与里程碑。
+ * 这时不该凭空编造研究事实，只提示"先补基本信息"，把主动权交回用户。
+ */
+function buildBlankProjectSuggestion(
+  tasks: TaskSnapshot[],
+  evidence: EvidenceSnapshot[],
+  doubts: DoubtSnapshot[],
+  currentMilestone: string | null,
+): Suggestion | null {
+  const hasAnyBasis =
+    tasks.length > 0 ||
+    evidence.length > 0 ||
+    doubts.length > 0 ||
+    (currentMilestone ?? '').trim() !== ''
+  if (hasAnyBasis) return null
+
+  return {
+    title: '先补上项目的基本信息',
+    whyNow:
+      '这是一个空白项目：还没有任务、证据和未解决的疑问，AI 没有可分析的依据。先上传材料或写下项目目标，之后每一步建议才有落点。',
+    doneCriteria: '上传实验手册或数据集，或写下项目目标与预期产出',
+    existingTaskId: null,
+    basisEvidenceIds: [],
+    basisDoubtIds: [],
+  }
+}
 
 /** 1. 进行中的任务：先把已有投入收尾，不要让进度虚高 */
 function buildDoingSuggestion(tasks: TaskSnapshot[], evidence: EvidenceSnapshot[]): Suggestion | null {
@@ -88,7 +118,7 @@ function buildDoingSuggestion(tasks: TaskSnapshot[], evidence: EvidenceSnapshot[
   return {
     title: `先把进行中的任务收尾：${task.title}`,
     whyNow: `「${task.title}」正在进行中${scopeHint}；先把它收尾，后面的步骤才有稳定的前提。`,
-    doneCriteria: task.doneCriteria ?? '补齐这一步的完成标志，并提交一条证据',
+    doneCriteria: task.doneCriteria ?? '补齐这一步的完成标准，并提交一条证据',
     existingTaskId: task.taskId,
     basisEvidenceIds: latestEvidenceIdOfTask(evidence, task.taskId),
     basisDoubtIds: [],
@@ -170,6 +200,26 @@ function buildEvidenceSuggestion(tasks: TaskSnapshot[], evidence: EvidenceSnapsh
     doneCriteria: '提交一条包含「完成了什么」和「发现了什么」的证据',
     existingTaskId: null,
     basisEvidenceIds: [],
+    basisDoubtIds: [],
+  }
+}
+
+/** 有证据但还没有任务时，先把这条真实进展整理成下一步输入。 */
+function buildEvidenceOnlySuggestion(
+  tasks: TaskSnapshot[],
+  evidence: EvidenceSnapshot[],
+): Suggestion | null {
+  if (tasks.length > 0 || evidence.length === 0) return null
+
+  const latest = evidence[0]
+  if (latest === undefined) return null
+
+  return {
+    title: '根据这条进展补出第一项任务',
+    whyNow: '项目里已经有一条真实进展，但还没有正式任务；先把这次进展整理成可执行的下一步。',
+    doneCriteria: '写下一条任务，并说明完成时会留下什么证据',
+    existingTaskId: null,
+    basisEvidenceIds: [latest.evidenceId],
     basisDoubtIds: [],
   }
 }

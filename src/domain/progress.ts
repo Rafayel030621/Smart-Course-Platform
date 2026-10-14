@@ -1,4 +1,4 @@
-import type { Milestone, Project, SuggestedStep, Task } from '@/types/platform'
+import type { Milestone, NewTaskDraft, Project, SuggestedStep, Task } from '@/types/platform'
 import type { TaskSnapshot } from '@/domain/recommendation'
 
 /**
@@ -113,6 +113,82 @@ function normalizeNullable(value: string | null | undefined): string | null {
   return value.trim() === '' ? null : value
 }
 
+function isBlankText(value: string | null | undefined): boolean {
+  return typeof value !== 'string' || value.trim() === ''
+}
+
+/**
+ * 契约 3.2 约束 4：同一项目内字段完全相同的 `draft` 重复提交必须幂等。
+ *
+ * 用规范化后的 draft 内容生成稳定键：字段顺序固定、ID 数组排序后再参与拼接，
+ * 因此「同一组引用、书写顺序不同」也会命中同一条任务；
+ * 标题、完成标志、来源请求与两组依据任一不同都会生成不同的键，不会误合并不同任务。
+ *
+ * **输入是纯数据**，所以 domain 层与 store 层用的是同一份实现（只有一处规则）。
+ */
+export function draftKeyOf(draft: NewTaskDraft): string {
+  const normalizeIds = (value: string[] | null | undefined): string[] => {
+    if (!Array.isArray(value)) return []
+    return value.map((item) => String(item)).sort()
+  }
+
+  return JSON.stringify([
+    draft.title.trim(),
+    isBlankText(draft.doneCriteria) ? null : (draft.doneCriteria as string).trim(),
+    isBlankText(draft.requestId) ? null : draft.requestId,
+    normalizeIds(draft.basisEvidenceIds),
+    normalizeIds(draft.basisDoubtIds),
+  ])
+}
+
+/**
+ * 「这条建议是否已经认领」的判断依据。
+ *
+ * 只用两种稳定标识，**不用数组下标**（任务顺序会随插入变化）：
+ *   1. 建议自带 `existingTaskId` → 直接在项目任务里按 id 找，任务已进入项目（doing / done）即算已认领；
+ *   2. `existingTaskId === null` 的候选建议 → 用 `draftKeyOf` 生成幂等键，
+ *      在项目任务里找同键的 draft 任务。
+ *
+ * 兜底规则：重新获取建议后 `requestId` 会变（draftKey 随之变化），AI 也可能给出同标题的
+ * 新候选建议。因此最后再按标题匹配一次：**同标题且已经进入项目（doing / done）** 就算已认领。
+ * 宁可提示「已认领」，也不要在项目里凭空多出一条同名任务。
+ * 还没认领（todo）的同名任务不在此列——那种情况仍应显示可认领。
+ */
+export interface ClaimCandidate {
+  existingTaskId: string | null
+  title: string
+  doneCriteria: string | null
+  requestId: string | null
+  basisEvidenceIds: string[]
+  basisDoubtIds: string[]
+}
+
+/** 建议对应的「已认领任务」；返回 null 表示这条建议还没进入项目 */
+export function findClaimedTaskFor(project: Project, suggestion: ClaimCandidate): Task | null {
+  const tasks = tasksOf(project)
+
+  if (suggestion.existingTaskId !== null) {
+    const task = tasks.find((item) => item.id === suggestion.existingTaskId)
+    return task !== undefined && task.status !== 'todo' ? task : null
+  }
+
+  const key = draftKeyOf({
+    title: suggestion.title,
+    doneCriteria: suggestion.doneCriteria ?? '',
+    requestId: suggestion.requestId,
+    basisEvidenceIds: suggestion.basisEvidenceIds,
+    basisDoubtIds: suggestion.basisDoubtIds,
+  })
+  const byKey = tasks.find((item) => item.draftKey === key)
+  if (byKey !== undefined) return byKey.status === 'todo' ? null : byKey
+
+  const title = suggestion.title.trim()
+  if (title === '') return null
+
+  const byTitle = tasks.find((item) => item.title.trim() === title && item.status !== 'todo')
+  return byTitle ?? null
+}
+
 /* ---------------------------------------------------------------- 任务快照 */
 
 /**
@@ -184,8 +260,11 @@ export function syncMilestones(project: Project): void {
 /* ---------------------------------------------------------------- 旧页面投影 */
 
 /**
- * `Project.steps` 的兼容投影：旧页面（中栏步骤卡、项目地图）仍在读它。
+ * `Project.steps` 的兼容投影：中栏「AI 项目顾问」步骤卡与项目地图仍在读它。
  * 顺序与 `tasks` 一致，新任务追加在末尾。
+ *
+ * 除了展示文案，还带上 `taskId` 与 `status`：
+ * 页面据此显示「进行中 / 未开始 / 已完成」，并按 taskId 认领或提问——不使用数组下标。
  */
 export function deriveStepViews(project: Project): SuggestedStep[] {
   return tasksOf(project).map((task) => ({
@@ -194,5 +273,24 @@ export function deriveStepViews(project: Project): SuggestedStep[] {
     owner: normalizeNullable(task.suggestedOwner) ?? '待定',
     why: normalizeNullable(task.why) ?? '',
     done: normalizeNullable(task.doneCriteria) ?? '',
+    taskId: task.id,
+    status: task.status,
   }))
+}
+
+/** 任务状态 → 界面上的人话（进行中 / 未开始 / 已完成） */
+export function taskStatusText(status: Task['status'] | undefined): string {
+  if (status === 'doing') return '进行中'
+  if (status === 'done') return '已完成'
+  return '未开始'
+}
+
+/**
+ * 里程碑状态 → 界面上的人话。
+ * 注意里程碑用的是 `cur`（进行中），与任务的 `doing` 不同，不能复用 taskStatusText。
+ */
+export function milestoneStatusText(status: Project['ms'][number]['s'] | undefined): string {
+  if (status === 'done') return '已完成'
+  if (status === 'cur') return '进行中'
+  return '未开始'
 }

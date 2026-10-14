@@ -12,8 +12,13 @@
 /** 本地开发的默认后端地址：VITE_API_BASE_URL 未配置时使用 */
 export const DEFAULT_API_BASE_URL = 'http://127.0.0.1:8080'
 
-/** 与契约 7.5 对齐：前端适配层 20 秒超时，超时按 NETWORK_ERROR 处理 */
-export const DEFAULT_TIMEOUT_MS = 20_000
+/**
+ * 与契约 7.5 对齐：前端适配层单次请求 30 秒超时，超时按 NETWORK_ERROR 处理。
+ *
+ * 契约要求前端比服务层 25 秒安全网多留 5 秒，好接住服务端的规则兜底响应；
+ * 20 秒会先于服务端兜底触发，导致收不到 `source: 'fallback'` 而直接落到 `local-rule`。
+ */
+export const DEFAULT_TIMEOUT_MS = 30_000
 
 /** 去掉末尾斜杠，避免拼出 `//api/...` */
 function normalizeBaseUrl(value: string): string {
