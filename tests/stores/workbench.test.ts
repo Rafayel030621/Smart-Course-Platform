@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { CURRENT_SCHEMA_VERSION, STORAGE_KEY_PROJECTS } from '@/stores/persistence'
+import { draftKeyOf } from '@/domain/progress'
 import { useWorkbenchStore } from '@/stores/workbench'
 import { TOPICS } from '@/data/topics'
 import type { AdvisorRecommendationsRequest, NewTaskDraft } from '@/domain/recommendation'
@@ -1477,6 +1478,53 @@ describe('F2 回归：相同 draft 重复认领必须幂等', () => {
     if (!created.ok) return
     const task = project.tasks.find((item) => item.id === created.data.taskId)
     expect(typeof task?.draftKey).toBe('string')
+  })
+
+  it('同键任务已存在但仍是 todo：认领它而不是新建，原任务转为 doing', () => {
+    const store = freshStore()
+    createProjectWithContentOrThrow(store)
+    const project = currentProject(store)
+    const countBefore = project.tasks.length
+    const revisionBefore = project.projectRevision
+
+    // 模拟其他入口先前创建的一条同键 todo 任务（draftKey 已持久化）
+    const key = draftKeyOf(draftOf())
+    project.tasks.push({
+      id: 'tsk_todo001',
+      projectId: project.projectId,
+      title: draftOf().title,
+      status: 'todo',
+      doneCriteria: draftOf().doneCriteria ?? null,
+      owner: null,
+      suggestedOwner: null,
+      milestone: null,
+      why: null,
+      draftKey: key,
+      createdAt: '2026-10-14T00:00:00.000Z',
+      updatedAt: '2026-10-14T00:00:00.000Z',
+    })
+
+    const persistCalls = countSetItemCalls()
+    const result = store.claimTask({ draft: draftOf() })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    // 返回原任务 ID 并转为 doing，而不是新建任务
+    expect(result.data.taskId).toBe('tsk_todo001')
+    expect(result.data.status).toBe('doing')
+    expect(project.tasks).toHaveLength(countBefore + 1)
+    const hit = project.tasks.find((item) => item.id === 'tsk_todo001')
+    expect(hit?.status).toBe('doing')
+    // 认领真实发生：revision 只递增一次；一次保存流程（projects + currentProjectId 两次 setItem）
+    expect(project.projectRevision).toBe(revisionBefore + 1)
+    expect(persistCalls()).toBe(2)
+    // 键已持久化，刷新后仍能命中
+    const persisted = JSON.parse(localStorage.getItem(STORAGE_KEY_PROJECTS) ?? '{}') as {
+      projects: Array<{ tasks: Array<{ id: string; status: string; draftKey: string | null }> }>
+    }
+    const persistedTask = persisted.projects[0]?.tasks.find((item) => item.id === 'tsk_todo001')
+    expect(persistedTask?.status).toBe('doing')
+    expect(persistedTask?.draftKey).toBe(key)
   })
 
   it('draft 幂等键不进入 advisor 请求快照', async () => {

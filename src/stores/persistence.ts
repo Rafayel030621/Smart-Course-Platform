@@ -121,6 +121,9 @@ function normalizeTask(raw: unknown, projectId: string, nowIso: string): Task | 
     suggestedOwner: asNullableString(raw.suggestedOwner ?? raw.owner),
     milestone: asNullableString(raw.milestone),
     why: asNullableString(raw.why),
+    // v2（schemaVersion 3）：任务 draft 幂等键。旧数据（v1/v2）没有该字段，读取时统一补 null，
+    // 已有合法键原样保留——同 draft 重复认领的幂等判断依赖它跨刷新持久化。
+    draftKey: typeof raw.draftKey === 'string' && raw.draftKey !== '' ? raw.draftKey : null,
     createdAt: asString(raw.createdAt, nowIso),
     updatedAt: asString(raw.updatedAt, nowIso),
   }

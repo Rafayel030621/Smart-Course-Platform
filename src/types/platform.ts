@@ -27,6 +27,14 @@ export interface SuggestedStep {
   why: string
   /** 完成标志 */
   done: string
+  /**
+   * 该步骤对应的真实任务 ID。
+   * 由 `deriveStepViews` 从 `Project.tasks` 投影出来，页面据此认领 / 提问，**不用数组下标**。
+   * 题目模板里的示例步骤没有真实任务，因此是可选的。
+   */
+  taskId?: string
+  /** 该步骤对应任务的真实状态，页面（项目地图 / 步骤卡）据此显示「进行中 / 未开始 / 已完成」 */
+  status?: TaskStatus
 }
 
 /* ------------------------------------------------------------------ 结构化状态模型 */
@@ -81,6 +89,14 @@ export interface Task {
   milestone: string | null
   /** 旧页面展示用的「为什么现在做」，不参与请求 */
   why: string | null
+  /**
+   * v2：任务的 draft 幂等键（契约 3.2 约束 4）。
+   * 由 `draftKeyOf` 对「标题 + 完成标准 + requestId + 依据 ID（排序后）」做规范化摘要；
+   * 相同 draft 内容重复认领时按它命中同一条任务，**不重复创建、不重复写盘**。
+   * 模板任务与认领已有任务（taskId 路径）没有幂等键，取 `null`；
+   * 旧数据（v1/v2）里没有该字段，读取时统一补 `null`。
+   */
+  draftKey: string | null
   createdAt: string
   updatedAt: string
 }

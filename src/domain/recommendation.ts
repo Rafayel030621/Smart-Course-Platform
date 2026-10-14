@@ -493,7 +493,11 @@ export type ClaimTaskInput = { taskId: string } | { draft: NewTaskDraft }
 
 export interface ClaimTaskResult {
   taskId: string
-  status: 'doing'
+  /**
+   * 新建 / 认领 draft 任务时是 `'doing'`；
+   * 对已在进行或已完成的任务重复认领时是**该任务的真实状态**（幂等，不写盘）。
+   */
+  status: TaskStatus
   projectRevision: number
 }
 

@@ -82,6 +82,7 @@ import {
   currentMilestoneName,
   deriveStepViews,
   deriveTaskSnapshots,
+  draftKeyOf,
   syncMilestones,
 } from '@/domain/progress'
 import type {
@@ -499,6 +500,8 @@ export const useWorkbenchStore = defineStore('workbench', () => {
       suggestedOwner: normalizeNullable(step.owner),
       milestone,
       why: normalizeNullable(step.why),
+      // 模板任务不是从 draft 认领的，没有幂等键
+      draftKey: null,
       createdAt: timestamp,
       updatedAt: timestamp,
     }))
@@ -1447,6 +1450,49 @@ export const useWorkbenchStore = defineStore('workbench', () => {
         return localFailure('INVALID_INPUT', '任务标题不能为空')
       }
 
+      // 契约 3.2 约束 4：draft 幂等。键由 `draftKeyOf` 对标题 / 完成标准 / requestId /
+      // 依据 ID（排序后）规范化生成——相同 draft 内容重复认领时命中同一条任务，
+      // 不重复创建、不重复写盘、不重复递增 projectRevision。
+      const key = draftKeyOf({
+        title,
+        doneCriteria: draft.doneCriteria ?? '',
+        requestId: draft.requestId,
+        basisEvidenceIds: draft.basisEvidenceIds,
+        basisDoubtIds: draft.basisDoubtIds,
+      })
+
+      const draftTask = project.tasks.find((item) => item.draftKey === key)
+      if (draftTask !== undefined) {
+        if (draftTask.status === 'todo') {
+          // 同键任务还没认领：把它置为 doing（不新建任务）
+          const saved = commit(project, () => {
+            draftTask.status = 'doing'
+            draftTask.updatedAt = nowIso()
+            project.tasks = [...project.tasks]
+            project.projectRevision += 1
+            project.updated = `最近更新：认领了任务「${draftTask.title}」`
+          })
+          if (!saved.ok) return saved
+
+          toast(`已认领任务「${draftTask.title}」，完成后请提交证据`)
+          return {
+            ok: true,
+            data: { taskId: draftTask.id, status: 'doing', projectRevision: project.projectRevision },
+          }
+        }
+
+        // 同键任务已在进行 / 已完成：幂等，不写盘、不递增 revision
+        toast('该任务已认领，完成后请提交证据')
+        return {
+          ok: true,
+          data: { taskId: draftTask.id, status: draftTask.status, projectRevision: project.projectRevision },
+        }
+      }
+
+      // 注意：draft 认领**不做标题兜底**——draftKey 才是 draft 的唯一身份（标题相同但
+      // requestId / 依据不同是两条不同任务）。标题匹配只用于建议展示层的
+      // `findClaimedTaskFor`（progress.ts），两者职责不同。
+
       const timestamp = nowIso()
       const taskId = createTaskId()
       const task: Task = {
@@ -1459,6 +1505,7 @@ export const useWorkbenchStore = defineStore('workbench', () => {
         suggestedOwner: null,
         milestone: currentMilestoneName(project),
         why: null,
+        draftKey: key,
         createdAt: timestamp,
         updatedAt: timestamp,
       }
@@ -1495,8 +1542,9 @@ export const useWorkbenchStore = defineStore('workbench', () => {
       return localFailure('TASK_NOT_CLAIMABLE', '该任务已完成')
     }
 
-    // 已经是 doing：幂等，不改变状态、不递增 revision
+    // 已经是 doing：幂等，不改变状态、不递增 revision，但反馈要区别于首次认领
     if (task.status === 'doing') {
+      toast('该任务已认领，完成后请提交证据')
       return {
         ok: true,
         data: { taskId, status: 'doing', projectRevision: project.projectRevision },

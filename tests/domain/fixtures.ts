@@ -1,5 +1,6 @@
 import type { Doubt, Evidence, Milestone, Project, Task } from '@/types/platform'
 import { PROJECT_SCHEMA_VERSION } from '@/types/platform'
+import { emptyProjectProfile } from '@/domain/materials'
 
 /**
  * 测试夹具（不是测试文件）
@@ -75,10 +76,14 @@ export function makeProject(overrides: Partial<Project> = {}): Project {
     members: '3 名成员',
     updated: '',
     ms: [makeMilestone()],
+    profile: emptyProjectProfile(),
     banner: '',
     papers: [],
     weekly: [0, 0, 0, 0],
     materials: [],
+    materialRecords: [],
+    materialSegments: [],
+    understandingBlocks: [],
     chat: [],
     aiPapers: [],
     tasks: [],
