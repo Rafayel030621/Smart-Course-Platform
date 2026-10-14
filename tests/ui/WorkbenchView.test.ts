@@ -948,10 +948,20 @@ describe('WorkbenchView', () => {
         const request = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
         if (String(input).includes('/api/materials/understanding')) return understandingSuccess(request)
         if (String(input).includes('/api/materials')) return materialUploadSuccess(request)
-        return new Response(JSON.stringify({ contractVersion: '1.0', requestId: null, code: 'INVALID_INPUT', message: '测试替身', retryable: false, retryAfterSeconds: null }), {
-          status: 400,
-          headers: { 'content-type': 'application/json' },
-        })
+        return new Response(
+          JSON.stringify({
+            contractVersion: '1.0',
+            requestId: null,
+            code: 'INVALID_INPUT',
+            message: '测试替身',
+            retryable: false,
+            retryAfterSeconds: null,
+          }),
+          {
+            status: 400,
+            headers: { 'content-type': 'application/json' },
+          },
+        )
       }),
     )
     const wrapper = mount(WorkbenchView)
@@ -984,7 +994,10 @@ describe('WorkbenchView', () => {
     expect(store.confirmedMaterials).toHaveLength(1)
     expect(wrapper.get('.dc').text()).toContain('已确认')
 
-    const undo = wrapper.get('.dc').findAll('button').find((button) => button.text() === '撤销确认')
+    const undo = wrapper
+      .get('.dc')
+      .findAll('button')
+      .find((button) => button.text() === '撤销确认')
     expect(undo).toBeDefined()
     await undo?.trigger('click')
     await flushPromises()
@@ -1002,24 +1015,28 @@ describe('WorkbenchView', () => {
       '    at handleChat (/var/app/server/src/routes/chat.ts:27)'
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () =>
-        new Response(
-          JSON.stringify({
-            contractVersion: '1.0',
-            requestId: null,
-            code: 'INVALID_INPUT',
-            message: raw,
-            retryable: false,
-            retryAfterSeconds: null,
-          }),
-          { status: 400, headers: { 'content-type': 'application/json' } },
-        ),
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              contractVersion: '1.0',
+              requestId: null,
+              code: 'INVALID_INPUT',
+              message: raw,
+              retryable: false,
+              retryAfterSeconds: null,
+            }),
+            { status: 400, headers: { 'content-type': 'application/json' } },
+          ),
       ),
     )
     const wrapper = mount(WorkbenchView)
 
     await wrapper.get('.chat-input input').setValue('这条提问本身是合法的')
-    await wrapper.findAll('button').find((button) => button.text() === '发送')?.trigger('click')
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === '发送')
+      ?.trigger('click')
     await flushPromises()
 
     const text = visibleTextOf(wrapper)
@@ -1077,7 +1094,10 @@ describe('WorkbenchView', () => {
         )
       }),
     )
-    const retry = wrapper.get('.chat-error').findAll('button').find((button) => button.text() === '再问一次')
+    const retry = wrapper
+      .get('.chat-error')
+      .findAll('button')
+      .find((button) => button.text() === '再问一次')
     await retry?.trigger('click')
     await vi.waitFor(() => expect(store.current?.chat.length).toBe(2), { timeout: 3_000 })
 

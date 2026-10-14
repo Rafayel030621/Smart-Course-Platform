@@ -446,14 +446,10 @@ describe('recordUnderstanding（契约 14.3 / 15.3）', () => {
         endLine: 2,
       },
     ]
-    expect(store.recordUnderstanding({ materialId, materialVersion: 1, draft: regenerated }).ok).toBe(
-      true,
-    )
+    expect(store.recordUnderstanding({ materialId, materialVersion: 1, draft: regenerated }).ok).toBe(true)
 
     expect(store.confirmedUnderstandingBlocks).toHaveLength(0)
-    expect(store.pendingUnderstandingBlocks.map((block) => block.sources[0]?.segmentId)).toEqual([
-      'seg_1',
-    ])
+    expect(store.pendingUnderstandingBlocks.map((block) => block.sources[0]?.segmentId)).toEqual(['seg_1'])
     // 两条请求字段里都不能再出现这条内容
     expect(buildConfirmedMaterials(project(store))).toEqual([])
     expect(buildConfirmedContext(project(store))).toEqual([])
@@ -812,9 +808,12 @@ describe('sendChat（契约 6.4 / 13.2 / 17.1 / 17.4）', () => {
   it('失败后重试同一个问题：不重复记录，问题与回答各一条', async () => {
     const { captured, fetchStub } = stubChatFetch()
     const store = withProject()
-    vi.stubGlobal('fetch', vi.fn(async () => {
-      throw new TypeError('Failed to fetch')
-    }))
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new TypeError('Failed to fetch')
+      }),
+    )
 
     await store.sendChat('同一个问题')
     expect(project(store).chat).toHaveLength(1)
