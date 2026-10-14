@@ -1,22 +1,28 @@
-import { computed, ref, watch } from 'vue'
+import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import type {
   Doubt,
   Evidence,
-  MaterialType,
+  Material,
+  MaterialItemType,
+  MaterialReadState,
+  MaterialSegment,
   NewTaskDraft,
   Project,
+  ProjectProfile,
   Task,
+  Template,
+  UnderstandingBlock,
+  UnderstandingBlockStatus,
 } from '@/types/platform'
 import { PROJECT_SCHEMA_VERSION } from '@/types/platform'
-// 只借用题目名称列表：TEMPLATES 不再参与创建流程（见 createProject 的说明）
-import { TOPICS } from '@/data/topics'
+import { TEMPLATES, TOPICS } from '@/data/topics'
 // 论文方向只从这一个入口取：现在返回模板预置内容，接入后端后换实现即可，页面无需改动
-import { generateDirection } from '@/services/papers'
+import { generateDirection, genericDirections, presetDirections } from '@/services/papers'
 // 建议请求：适配层负责 HTTP 与契约校验，mvpFallbacks 负责后端不可用时的本地兜底
 import {
-  buildAdvisorRequest,
   buildAdvisorChatRequest,
+  buildAdvisorRequest,
   createRequestId,
   fetchAdvisorChat,
   fetchRecommendations,
@@ -25,6 +31,42 @@ import {
   toRecommendations,
 } from '@/services/advisorApi'
 import { buildLocalRecommendations } from '@/data/mvpFallbacks'
+// v2：材料与理解草稿（契约 13 / 14）
+import {
+  buildUnderstandingRequest,
+  buildMaterialUploadRequest,
+  bytesToBase64,
+  fetchMaterialUnderstanding,
+  isStaleMaterialResponse,
+  // 与 store 里旧页面的 `uploadMaterial(typeLabel, name)` 包装同名，这里用别名区分
+  uploadMaterial as requestMaterialUpload,
+} from '@/services/materialsApi'
+import {
+  MAX_MATERIAL_NAME_LENGTH,
+  MATERIAL_MAX_BYTES,
+  UNDERSTANDING_BLOCK_ORDER,
+  allSegmentsOf,
+  buildConfirmedContext,
+  buildConfirmedMaterials,
+  buildProjectProfile,
+  confirmedBlocksOf,
+  createMaterialId,
+  emptyProjectProfile,
+  findMaterial,
+  isMaterialInOtherProject,
+  materialReadStates,
+  materialTypeFromFileName,
+  normalizeBlockContent,
+  normalizeProjectProfile,
+  pendingBlocksOf,
+  modifiedBlocksOf,
+  segmentsOfMaterial,
+  selectUnderstandingSegments,
+  statusAfterUnconfirm,
+  understandingBlockKey,
+  understandingBlocksOf,
+  validateProjectProfileInput,
+} from '@/domain/materials'
 import {
   deriveDoubtSnapshots,
   deriveDoubtTexts,
@@ -40,31 +82,45 @@ import {
   currentMilestoneName,
   deriveStepViews,
   deriveTaskSnapshots,
-  draftKeyOf,
   syncMilestones,
 } from '@/domain/progress'
-// 项目状态摘要：空白项目提示与「AI 项目顾问」说明文字的唯一来源
-import { BLANK_PROJECT_NOTE, summarizeProjectStatus } from '@/domain/projectStatus'
 import type {
   ActionResult,
   AdvisorApiError,
+  AdvisorChatMessage,
   AdvisorFallbackReason,
   AdvisorOutcome,
   ClaimTaskInput,
   ClaimTaskResult,
+  ConfirmAllUnderstandingInput,
+  ConfirmAllUnderstandingResult,
   CreateProjectInput,
   CreateProjectResult,
+  DeleteUnderstandingBlockResult,
   LegacyCreateProjectInput,
   LegacyEvidenceInput,
+  ModifyUnderstandingBlockInput,
   Recommendation,
   RecommendationSource,
+  RecordUnderstandingInput,
+  RecordUnderstandingResult,
+  RegisterMaterialInput,
+  RegisterMaterialResult,
+  RequestUnderstandingInput,
+  RequestUnderstandingResult,
   ResolveDoubtResult,
   SelectProjectResult,
   SubmitEvidenceInput,
   SubmitEvidenceResult,
+  UnderstandingBlockIdInput,
+  UnderstandingBlockResult,
+  UpdateProjectProfileInput,
+  UpdateProjectProfileResult,
+  UploadMaterialFileInput,
+  UploadMaterialFileResult,
 } from '@/domain/recommendation'
 import {
-  MAX_ADVISOR_CHAT_QUESTION_LENGTH,
+  MATERIAL_ERROR_MESSAGES,
   MAX_EVIDENCE_DID_WHAT_LENGTH,
   MAX_EVIDENCE_FOUND_WHAT_LENGTH,
   MAX_EVIDENCE_UNSURE_LENGTH,
@@ -125,28 +181,35 @@ function normalizeNullable(value: string | null | undefined): string | null {
   return isBlank(value) ? null : (value as string).trim()
 }
 
-// 契约 3.2 约束 4 的 draft 幂等键实现在 domain（domain/progress.ts），
-// 页面判断「是否已认领」时用的是同一个键，因此从 store 再导出一次保持既有入口不变。
-export { draftKeyOf }
-
 /**
  * 把真实状态（`tasks` / `evidenceRecords` / `doubtRecords`）投影成旧页面读的字段。
  * 每次本地写入成功后调用：**真实数据只有一份**，这三个数组永远是派生结果。
- *
- * `banner` 也在这里按真实数据重算：项目一旦有材料 / 证据 / 疑问 / 任务，
- * 就不该再显示「这是一个空白项目」——刷新恢复时同样走这里，文案不会退回空白态。
  */
 function syncProjectView(project: Project): void {
   if (!Array.isArray(project.tasks)) project.tasks = []
   if (!Array.isArray(project.evidenceRecords)) project.evidenceRecords = []
   if (!Array.isArray(project.doubtRecords)) project.doubtRecords = []
+
+  // v2 状态（契约 13 / 14）：旧项目或半截数据先把容器补齐，再谈投影
+  if (project.profile === undefined || project.profile === null) project.profile = emptyProjectProfile()
+  if (!Array.isArray(project.materialRecords)) project.materialRecords = []
+  if (!Array.isArray(project.materialSegments)) project.materialSegments = []
   if (!Array.isArray(project.materials)) project.materials = []
+  if (!Array.isArray(project.understandingBlocks)) project.understandingBlocks = []
+
+  // 契约 14.5 第 4 条：材料已删或已升版时，旧版本的草稿引用一律作废
+  const currentVersions = new Map(
+    project.materialRecords.map((material) => [material.materialId, material.version]),
+  )
+  const kept = project.understandingBlocks.filter(
+    (block) => currentVersions.get(block.materialId) === block.materialVersion,
+  )
+  if (kept.length !== project.understandingBlocks.length) project.understandingBlocks = kept
 
   syncMilestones(project)
   project.steps = deriveStepViews(project)
   project.evidence = deriveEvidenceViews(project)
   project.doubts = deriveDoubtTexts(project)
-  project.banner = summarizeProjectStatus(project).note
 }
 
 /**
@@ -179,10 +242,6 @@ export const useWorkbenchStore = defineStore('workbench', () => {
   creating.value = projects.value.length === 0
 
   let toastTimer: number | undefined
-  const chatLoadingByProject = ref<Record<string, boolean>>({})
-  const chatErrorByProject = ref<Record<string, string | null>>({})
-  let chatAbort: AbortController | null = null
-  let chatRequest: { projectId: string; projectRevision: number; requestId: string } | null = null
 
   const current = computed<Project | undefined>(() =>
     curIdx.value >= 0 ? projects.value[curIdx.value] : undefined,
@@ -197,12 +256,6 @@ export const useWorkbenchStore = defineStore('workbench', () => {
   let inFlightToken = 0
   /** 在途请求的控制器：新请求会取消上一次（契约 4.7 第 4 条） */
   let inFlightAbort: AbortController | null = null
-  /**
-   * 在途请求的身份（序号 + 项目 + 版本）。
-   * 用于判断「是否已有更新的请求负责当前的项目与版本」（契约 4.7 补充约定 2、3）：
-   * 有更新请求时旧请求只能静默结束；没有时旧请求必须自己把 loading 收尾，不能留下永久 loading。
-   */
-  let inFlightRequest: { token: number; projectId: string; projectRevision: number } | null = null
 
   /** 当前项目的 projectId */
   const currentProjectId = computed<string | null>(() => current.value?.projectId ?? null)
@@ -218,24 +271,59 @@ export const useWorkbenchStore = defineStore('workbench', () => {
   const aiStatus = computed<AiStatus>(() => advisor.value.status)
   const recommendations = computed<Recommendation[]>(() => advisor.value.suggestions)
   const aiError = computed<AdvisorApiError | null>(() => advisor.value.error)
-  const chatLoading = computed(() => currentProjectId.value !== null && chatLoadingByProject.value[currentProjectId.value] === true)
-  const chatError = computed(() => currentProjectId.value === null ? null : chatErrorByProject.value[currentProjectId.value] ?? null)
 
-  function cancelChat(): void {
-    if (chatRequest !== null) {
-      chatLoadingByProject.value = { ...chatLoadingByProject.value, [chatRequest.projectId]: false }
-    }
-    chatRequest = null
-    chatAbort?.abort()
-    chatAbort = null
-  }
+  /* ------------------------------------------- v2 读取器（契约 13 / 14） */
 
-  // 同步作废身份，切换后再切回来也不能接受旧回答；新建项目同样适用。
-  watch(
-    () => [currentProjectId.value, current.value?.projectRevision],
-    cancelChat,
-    { flush: 'sync' },
-  )
+  /** 契约 13.1：当前项目的项目基本信息（结构化状态，不是一段聊天文本） */
+  const basicInfo = computed<ProjectProfile>(() => current.value?.profile ?? emptyProjectProfile())
+
+  /** 契约 13.2：要发出去的 `projectProfile`；全为空时是 `null`（请求体里不出现该字段） */
+  const projectProfile = computed<ProjectProfile | null>(() => buildProjectProfile(current.value?.profile))
+
+  /** 契约 14.1：当前项目的材料（每种材料只保留最新版本） */
+  const materials = computed<Material[]>(() => current.value?.materialRecords ?? [])
+
+  /** 契约 14.2：当前项目全部材料的**当前版本**片段（自带 materialId / materialVersion） */
+  const materialSegments = computed<MaterialSegment[]>(() => {
+    const project = current.value
+    return project === undefined ? [] : allSegmentsOf(project)
+  })
+
+  /** 契约 14.1 备注：材料的本地读取口径（仅登记 / 待确认草稿 / 已确认） */
+  const materialReadStateMap = computed<Record<string, MaterialReadState>>(() => {
+    const project = current.value
+    return project === undefined ? {} : materialReadStates(project)
+  })
+
+  /** 契约 14.3：待确认的理解草稿（模型刚生成，学生还没动过） */
+  const pendingUnderstandingBlocks = computed<UnderstandingBlock[]>(() => {
+    const project = current.value
+    return project === undefined ? [] : pendingBlocksOf(project)
+  })
+
+  /** 契约 14.3：已修改但**还没再次确认**的理解草稿（同样不是项目事实） */
+  const modifiedUnderstandingBlocks = computed<UnderstandingBlock[]>(() => {
+    const project = current.value
+    return project === undefined ? [] : modifiedBlocksOf(project)
+  })
+
+  /** 契约 14.3 / 17.2：已确认的理解草稿（只有这些会进入请求体） */
+  const confirmedUnderstandingBlocks = computed<UnderstandingBlock[]>(() => {
+    const project = current.value
+    return project === undefined ? [] : confirmedBlocksOf(project)
+  })
+
+  /** 契约 4.1 / 13.2：已确认的项目事实（不含项目基本信息） */
+  const confirmedContext = computed<string[]>(() => {
+    const project = current.value
+    return project === undefined ? [] : buildConfirmedContext(project)
+  })
+
+  /** 契约 17.1：要发出去的 `confirmedMaterials`；没有已确认材料时是空数组 */
+  const confirmedMaterials = computed(() => {
+    const project = current.value
+    return project === undefined ? [] : buildConfirmedMaterials(project)
+  })
 
   /** 只替换目标项目的那一份状态，不碰其他项目 */
   function patchAdvisor(projectId: string, patch: Partial<AdvisorState>): void {
@@ -299,6 +387,44 @@ export const useWorkbenchStore = defineStore('workbench', () => {
     window.scrollTo(0, 0)
   }
 
+  /** 自定义题目的通用模板，字段与 mockup 一致，名称按输入插值 */
+  function customTemplate(name: string): Template {
+    return {
+      short: name.length > 8 ? `${name.slice(0, 8)}…` : name,
+      ms: [
+        { t: '选题确认与文献调研', s: 'cur', p: 10, sub: '刚启动' },
+        { t: '数据获取与预处理', s: 'todo', p: 0, sub: '未开始' },
+        { t: '核心方法 / 模型实现', s: 'todo', p: 0, sub: '未开始' },
+        { t: '分析与验证', s: 'todo', p: 0, sub: '未开始' },
+        { t: '系统集成与结题报告', s: 'todo', p: 0, sub: '未开始' },
+      ],
+      doubts: ['项目的具体范围和技术路线还没有和指导老师确认'],
+      banner:
+        '项目刚启动。建议先把三件事定下来：研究目标的一句话描述、主流方法的文献调研、数据或工具的可获取性验证。上传实验手册后，我可以按手册要求进一步细化步骤。',
+      steps: [
+        {
+          t: '用一句话写清项目目标与预期产出',
+          owner: '成员A',
+          why: '目标不清是所有后续分歧的根源。一句话目标（为谁、解决什么、产出什么）能让全组对齐，也是 AI 追踪进度的基准。',
+          done: '一句话目标 + 预期产出清单，全组确认。',
+        },
+        {
+          t: '完成主流方法的文献调研',
+          owner: '成员B',
+          why: '不了解现有方法就动手，大概率走弯路。用「论文推荐」页的检索提示词查 5-8 篇相关文献。',
+          done: '调研笔记：2-3 类主流方法 + 各自优缺点 + 初步倾向。',
+        },
+        {
+          t: '验证数据 / 工具的可获取性',
+          owner: '成员C',
+          why: '大数据项目最常见的失败原因是数据拿不到或环境搭不起来，第一周必须验证。',
+          done: '确认数据来源或工具链可用，附验证记录。',
+        },
+      ],
+      papers: genericDirections(name),
+    }
+  }
+
   /** 把旧表单入参统一成契约入参。新旧入口都走这一条路径，不存在第二套逻辑 */
   function normalizeCreateInput(
     input: CreateProjectInput | LegacyCreateProjectInput,
@@ -319,18 +445,13 @@ export const useWorkbenchStore = defineStore('workbench', () => {
       members,
       manualName: modern.manualName ?? legacy.manual ?? null,
       dataName: modern.dataName ?? legacy.data ?? null,
+      profile: modern.profile,
     }
   }
 
   /**
    * 契约 3.2：createProject。
-   *
-   * **只设置项目名称，不注入任何项目内容**：新建出来的项目是空白的——没有任务、疑问、
-   * 里程碑、证据、聊天记录与论文方向。题目名称清单（TOPICS）继续保留，选中某个名称只
-   * 表示"这个项目的名字叫它"，不再把该题目的示例内容复制进来。
-   *
-   * `TEMPLATES`（src/data/topics.ts）因此只作为示例/测试数据保留，不参与创建流程；
-   * 任务与建议等用户上传材料、写下项目目标或提交第一条进展后再由 AI 给出。
+   * 生成 projectId / projectRevision=1 / schemaVersion，并把模板步骤实例化成结构化任务。
    */
   function createProject(
     input: CreateProjectInput | LegacyCreateProjectInput,
@@ -343,6 +464,7 @@ export const useWorkbenchStore = defineStore('workbench', () => {
     }
 
     let name: string
+    let tpl: Template
 
     if (normalized.topicId === '__custom__') {
       name = (normalized.customName ?? '').trim()
@@ -350,42 +472,80 @@ export const useWorkbenchStore = defineStore('workbench', () => {
         toast('请填写自定义项目名称')
         return localFailure('INVALID_INPUT', '请填写自定义项目名称')
       }
+      tpl = customTemplate(name)
     } else {
-      // 只校验"名称存在"：项目内容不会因此被带入
-      if (!TOPICS.includes(normalized.topicId)) {
+      const found: Template | undefined = TEMPLATES[normalized.topicId]
+      if (found === undefined) {
         toast('没有找到这个题目，请重新选择')
         return localFailure('NOT_FOUND', '没有找到这个题目，请重新选择')
       }
       name = normalized.topicId
+      tpl = found
     }
 
     const projectId = createProjectId()
+    const timestamp = nowIso()
+    const milestone = tpl.ms.find((item) => item.s === 'cur')?.t ?? tpl.ms[0]?.t ?? null
+
+    const tasks: Task[] = tpl.steps.map((step) => ({
+      id: createTaskId(),
+      projectId,
+      title: step.t,
+      status: 'todo',
+      doneCriteria: normalizeNullable(step.done),
+      // 契约 2.2：MVP 无成员名单，线上 owner 恒为 null
+      owner: null,
+      // 模板里的「成员A / 成员B」只作为旧页面的展示内容
+      suggestedOwner: normalizeNullable(step.owner),
+      milestone,
+      why: normalizeNullable(step.why),
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    }))
+
+    const doubtRecords: Doubt[] = tpl.doubts.map((text) => ({
+      id: createDoubtId(),
+      projectId,
+      text,
+      status: 'open',
+      sourceEvidenceId: null,
+      createdAt: timestamp,
+      resolvedAt: null,
+    }))
+
     const memberCount = normalized.members > 0 ? normalized.members : 3
 
-    // 空白项目：除名称与基本元数据外，任务 / 疑问 / 里程碑 / 证据 / 聊天 / 论文方向都从零开始
     const project: Project = {
+      ...JSON.parse(JSON.stringify(tpl)),
+      // 覆盖模板里的 papers：论文方向的唯一来源，便于日后换成后端接口
+      papers: presetDirections({ topic: normalized.topicId, projectName: name }),
       projectId,
       projectRevision: 1,
       schemaVersion: PROJECT_SCHEMA_VERSION,
       name,
-      short: name.length > 8 ? `${name.slice(0, 8)}…` : name,
       group: `第 ${projects.value.length + 1} 组`,
       members: `${memberCount} 名成员`,
       updated: '项目创建于今天 · 等待第一条证据',
-      // 初始文案与空白态一致；之后由 syncProjectView 按真实数据重算
-      banner: BLANK_PROJECT_NOTE,
-      ms: [],
-      papers: [],
-      weekly: [0, 0, 0, 0],
-      materials: [],
-      chat: [],
-      aiPapers: [],
-      tasks: [],
+      tasks,
       evidenceRecords: [],
-      doubtRecords: [],
-      steps: [],
+      doubtRecords,
+      profile: normalizeProjectProfile(normalized.profile),
+      materialRecords: [],
+      materialSegments: [],
+      understandingBlocks: [],
       evidence: [],
       doubts: [],
+      steps: [],
+      weekly: [0, 0, 0, 0],
+      materials: [],
+      chat: [
+        {
+          who: 'AI 顾问',
+          me: false,
+          text: `你好，我是「${tpl.short}」项目的顾问。项目刚启动，我已为你们生成了最初的步骤（见上方推荐）。上传实验手册或数据集后，我会解析内容让步骤追踪更精准。有问题随时问我。`,
+        },
+      ],
+      aiPapers: [],
     }
 
     const manualName = normalizeNullable(normalized.manualName)
@@ -410,8 +570,8 @@ export const useWorkbenchStore = defineStore('workbench', () => {
     window.scrollTo(0, 0)
     toast(
       project.materials.length
-        ? `项目已创建，已登记 ${project.materials.length} 份材料；提交第一条进展后 AI 会给出建议`
-        : '项目已创建。项目内容为空，上传材料或写下项目目标后 AI 会给出建议',
+        ? `项目已创建，AI 已解析 ${project.materials.length} 份材料并开始追踪步骤`
+        : '项目已创建，AI 已生成启动步骤',
     )
 
     return { ok: true, data: { projectId, projectRevision: project.projectRevision } }
@@ -464,22 +624,787 @@ export const useWorkbenchStore = defineStore('workbench', () => {
     return false
   }
 
-  function uploadMaterial(type: MaterialType, fileName: string) {
+  function uploadMaterial(type: MaterialItemType, fileName: string) {
     const project = current.value
     if (project === undefined) return
-
-    // 材料名不影响建议，因此不递增 projectRevision；
-    // 但上传材料后项目就不再是空白项目，所以要重建视图（banner 随真实数据更新）
-    const saved = commit(project, () => {
-      project.materials.push({ name: fileName, type })
-    })
-    if (!saved.ok) {
+    project.materials.push({ name: fileName, type })
+    // 材料名不影响建议，因此不递增 projectRevision
+    if (!persistOrRollback(() => project.materials.pop())) {
       toast('本地存储不可用，材料没有保存')
       return
     }
-    if (type === '实验手册') toast('AI 已解析实验手册，将按手册要求校准里程碑与完成标准')
-    else if (type === '数据集') toast('AI 已登记数据集，「数据获取与预处理」阶段将按此追踪')
-    else toast('材料已上传，AI 已纳入项目状态')
+    // 这条是 v1 的「只记文件名」入口，没有内容也没有解析：
+    // 文案必须如实说明，不能声称"AI 已解析"（v2 的解析入口是 uploadMaterialFile）。
+    toast(
+      `已登记${type}「${fileName}」；目前只有 md / txt 会被解析，` +
+        '请在「材料与理解草稿」里上传以生成理解草稿',
+    )
+  }
+
+  /* ========================================================================
+   * v2：项目基本信息与材料登记（契约 13 / 14）
+   *
+   * 责任边界（契约 12.2）：
+   *   - 服务端无状态：材料、草稿、确认状态都存在 localStorage；
+   *   - 文件内容由前端读原始字节 → base64 再发给后端，后端负责解码、分段与解析；
+   *   - 解析失败只影响这一份材料，不阻塞项目，也不动已有数据；
+   *   - 未确认的草稿绝不进入建议 / 聊天请求。
+   * ====================================================================== */
+
+  /** 定位结果：材料 / 草稿条目在别的项目里时返回 `PROJECT_MISMATCH`（契约 3.3） */
+  type Located<T> =
+    | { ok: true; value: T }
+    | { ok: false; code: 'NOT_FOUND' | 'PROJECT_MISMATCH'; message: string }
+
+  function locateMaterial(materialId: string): Located<Material> {
+    const project = current.value
+    if (project === undefined) return { ok: false, code: 'NOT_FOUND', message: '还没有项目' }
+
+    const material = findMaterial(project, materialId)
+    if (material !== null) return { ok: true, value: material }
+    if (isMaterialInOtherProject(projects.value, project.projectId, materialId)) {
+      return { ok: false, code: 'PROJECT_MISMATCH', message: '该材料属于另一个项目' }
+    }
+    return { ok: false, code: 'NOT_FOUND', message: '材料不存在' }
+  }
+
+  /** 按**本地** blockId 定位草稿条目；条目不在此项目时返回 `PROJECT_MISMATCH` */
+  function locateUnderstandingBlock(blockId: string): Located<UnderstandingBlock> {
+    const project = current.value
+    if (project === undefined) return { ok: false, code: 'NOT_FOUND', message: '还没有项目' }
+
+    const block = understandingBlocksOf(project).find((entry) => entry.id === blockId)
+    if (block !== undefined) return { ok: true, value: block }
+
+    const elsewhere = projects.value.some(
+      (entry) =>
+        entry.projectId !== project.projectId &&
+        understandingBlocksOf(entry).some((candidate) => candidate.id === blockId),
+    )
+    return elsewhere
+      ? { ok: false, code: 'PROJECT_MISMATCH', message: '该理解草稿属于另一个项目' }
+      : { ok: false, code: 'NOT_FOUND', message: '理解草稿不存在' }
+  }
+
+  /** 归一化后的基本信息是否与已保存的一致（避免无变化时也递增 projectRevision） */
+  function sameProfile(a: ProjectProfile, b: ProjectProfile): boolean {
+    return JSON.stringify(a) === JSON.stringify(b)
+  }
+
+  /**
+   * 契约 13.1 / 2.6：保存项目基本信息。
+   * 校验在**归一化之前**做：超长要报错并高亮字段，不能静默截断。
+   */
+  function updateProjectProfile(
+    input: UpdateProjectProfileInput,
+  ): ActionResult<UpdateProjectProfileResult> {
+    const project = current.value
+    if (project === undefined) {
+      return localFailure('NOT_FOUND', '还没有项目，无法保存项目基本信息')
+    }
+
+    const invalid = validateProjectProfileInput(input)
+    if (invalid !== null) {
+      toast(invalid)
+      return localFailure('INVALID_INPUT', invalid)
+    }
+
+    const profile = normalizeProjectProfile(input)
+    if (sameProfile(project.profile, profile)) {
+      // 没有变化：不写盘、不递增版本（契约 2.6「何时不变」）
+      return { ok: true, data: { projectRevision: project.projectRevision } }
+    }
+
+    const saved = commit(project, () => {
+      project.profile = profile
+      project.projectRevision += 1
+      project.updated = '最近更新：补充了项目基本信息'
+    })
+    if (!saved.ok) return saved
+
+    toast('项目基本信息已保存')
+    return { ok: true, data: { projectRevision: project.projectRevision } }
+  }
+
+  /** 兼容别名：页面既可调 `updateProjectProfile` 也可调 `updateProjectBasicInfo` */
+  function updateProjectBasicInfo(
+    input: UpdateProjectProfileInput,
+  ): ActionResult<UpdateProjectProfileResult> {
+    return updateProjectProfile(input)
+  }
+
+  /**
+   * 契约 14.1 / 2.6：登记一份材料（本地写入，不访问网络）。
+   *
+   * - 传入已存在的 `materialId` → 视为重新上传，`version + 1`，旧版本草稿作废；
+   * - 只有 `.md` / `.txt` 在白名单内（契约 15.1），其它类型直接返回 `INVALID_INPUT`；
+   * - 登记成功后 `projectRevision + 1`。
+   */
+  function registerMaterial(input: RegisterMaterialInput): ActionResult<RegisterMaterialResult> {
+    const project = current.value
+    if (project === undefined) {
+      return localFailure('NOT_FOUND', '还没有项目，无法登记材料')
+    }
+
+    const name = typeof input.name === 'string' ? input.name.trim() : ''
+    if (name === '') return localFailure('INVALID_INPUT', '材料名称不能为空')
+    if (name.length > MAX_MATERIAL_NAME_LENGTH) {
+      return localFailure('INVALID_INPUT', `材料名称最多 ${MAX_MATERIAL_NAME_LENGTH} 字`)
+    }
+
+    const type = materialTypeFromFileName(name)
+    if (type === null) {
+      return localFailure('INVALID_INPUT', '当前只支持 md、txt 文件')
+    }
+
+    const explicitId = typeof input.materialId === 'string' && input.materialId !== ''
+      ? input.materialId
+      : null
+    const existing =
+      explicitId !== null
+        ? findMaterial(project, explicitId)
+        : (project.materialRecords.find((material) => material.name === name) ?? null)
+
+    if (explicitId !== null && existing === null) {
+      if (isMaterialInOtherProject(projects.value, project.projectId, explicitId)) {
+        return localFailure('PROJECT_MISMATCH', '该材料属于另一个项目')
+      }
+    }
+
+    const materialId = explicitId ?? existing?.materialId ?? createMaterialId()
+    const requestedVersion = input.version
+    const version =
+      typeof requestedVersion === 'number' && Number.isInteger(requestedVersion) && requestedVersion >= 1
+        ? requestedVersion
+        : (existing?.version ?? 0) + 1
+
+    // 线格式分段 → 本地形态：补上归属字段，index 以响应顺序为准（契约 14.2）
+    const segments: MaterialSegment[] = (input.segments ?? []).map((segment, index) => ({
+      segmentId: segment.segmentId,
+      materialId,
+      materialVersion: version,
+      index,
+      startLine: segment.startLine,
+      endLine: segment.endLine,
+      text: segment.text,
+    }))
+
+    const timestamp = nowIso()
+    const state = input.state ?? 'parsed'
+    const record: Material = {
+      materialId,
+      projectId: project.projectId,
+      name,
+      type,
+      size: typeof input.size === 'number' && input.size >= 1 ? Math.floor(input.size) : 1,
+      encoding: input.encoding ?? 'utf-8',
+      state,
+      version,
+      // 同一版本重复登记时保留原创建时间，便于材料按创建顺序稳定排序
+      createdAt: existing !== null && existing.version === version ? existing.createdAt : timestamp,
+      updatedAt: timestamp,
+      failureReason: input.failureReason ?? null,
+      needsReupload: state !== 'parsed' || segments.length === 0,
+    }
+
+    const updated = existing !== null && existing.version !== version
+
+    const saved = commit(project, () => {
+      const index = project.materialRecords.findIndex((material) => material.materialId === materialId)
+      project.materialRecords =
+        index === -1
+          ? [...project.materialRecords, record]
+          : project.materialRecords.map((material, position) =>
+              position === index ? record : material,
+            )
+
+      // 片段整体替换：旧版本片段一律丢弃（契约 14.5 第 4 条）
+      project.materialSegments = [
+        ...project.materialSegments.filter((segment) => segment.materialId !== materialId),
+        ...(state === 'parsed' ? segments : []),
+      ]
+
+      // 契约 14.5 第 4 条：旧版本的草稿引用视为过期，重新上传后作废
+      project.understandingBlocks = project.understandingBlocks.filter(
+        (block) => block.materialId !== materialId || block.materialVersion === version,
+      )
+
+      project.projectRevision += 1
+      project.updated = `最近更新：${updated ? '更新了' : '登记了'}材料「${name}」`
+    })
+    if (!saved.ok) return saved
+
+    if (record.state === 'parsed') {
+      toast(`${updated ? '已更新' : '已登记'}「${name}」，共 ${segments.length} 段，可生成理解草稿`)
+    } else {
+      toast(`「${name}」解析失败：${record.failureReason ?? '请检查文件内容'}`)
+    }
+
+    return {
+      ok: true,
+      data: {
+        materialId,
+        version,
+        segmentCount: segments.length,
+        projectRevision: project.projectRevision,
+        updated,
+      },
+    }
+  }
+
+  /**
+   * 契约 15.1：上传并解析材料（读原始字节 → base64 → `POST /api/materials`）。
+   *
+   * 上传失败不产生材料记录，也不动已有数据；失败原因按契约第 16 节映射成中文提示。
+   * 若已有同名材料，视为重新上传：`version + 1`（契约 14.5 第 4 条）。
+   */
+  async function uploadMaterialFile(
+    input: UploadMaterialFileInput,
+  ): Promise<ActionResult<UploadMaterialFileResult>> {
+    const project = current.value
+    if (project === undefined) {
+      return localFailure('NOT_FOUND', '还没有项目，无法上传材料')
+    }
+
+    const file = input.file
+    const fileName = input.name ?? (typeof File !== 'undefined' && file instanceof File ? file.name : '')
+    const name = typeof fileName === 'string' ? fileName.trim() : ''
+    if (name === '') return localFailure('INVALID_INPUT', '请先选择要上传的文件')
+    if (name.length > MAX_MATERIAL_NAME_LENGTH) {
+      return localFailure('INVALID_INPUT', `材料名称最多 ${MAX_MATERIAL_NAME_LENGTH} 字`)
+    }
+    if (file === undefined) return localFailure('INVALID_INPUT', '没有读到文件内容')
+
+    // 与契约 16 的码一致：本地先挡住明显不合法的文件，省一次必然失败的请求
+    if (materialTypeFromFileName(name) === null) {
+      const message = MATERIAL_ERROR_MESSAGES.UNSUPPORTED_MATERIAL_TYPE
+      toast(message)
+      return { ok: false, code: 'UNSUPPORTED_MATERIAL_TYPE', message }
+    }
+
+    let bytes: Uint8Array
+    try {
+      bytes = new Uint8Array(await file.arrayBuffer())
+    } catch {
+      return localFailure('INVALID_INPUT', '读取文件内容失败，请重试')
+    }
+
+    if (bytes.byteLength > MATERIAL_MAX_BYTES) {
+      const message = MATERIAL_ERROR_MESSAGES.MATERIAL_TOO_LARGE
+      toast(message)
+      return { ok: false, code: 'MATERIAL_TOO_LARGE', message }
+    }
+    if (bytes.byteLength === 0) {
+      const message = MATERIAL_ERROR_MESSAGES.EMPTY_MATERIAL
+      toast(message)
+      return { ok: false, code: 'EMPTY_MATERIAL', message }
+    }
+
+    const explicitId = typeof input.materialId === 'string' && input.materialId !== ''
+      ? input.materialId
+      : null
+    const existing =
+      explicitId !== null
+        ? findMaterial(project, explicitId)
+        : (project.materialRecords.find((material) => material.name === name) ?? null)
+    const materialId = explicitId ?? existing?.materialId ?? createMaterialId()
+    const version = (existing?.version ?? 0) + 1
+
+    const requestRevision = computeProjectRevision(project)
+    const request = buildMaterialUploadRequest({
+      projectId: project.projectId,
+      projectRevision: requestRevision,
+      materialId,
+      version,
+      name,
+      contentBase64: bytesToBase64(bytes),
+    })
+
+    const result = await requestMaterialUpload(request, { signal: input.signal })
+    if (!result.ok) {
+      // 过期响应：静默丢弃，不改任何状态，也不提示用户
+      if (!isStaleMaterialResponse(result.error)) toast(describeAdvisorFailure(result.error))
+      return { ok: false, code: result.error.code, message: describeAdvisorFailure(result.error) }
+    }
+
+    // 契约 4.7：项目已切换或版本已变化 → 丢弃响应，不写入 store
+    if (
+      currentProjectId.value !== project.projectId ||
+      computeProjectRevision(project) !== requestRevision
+    ) {
+      return { ok: false, code: 'STALE_RESPONSE', message: '该上传响应已过期，已丢弃' }
+    }
+
+    const registered = registerMaterial({
+      materialId: result.data.material.materialId,
+      name: result.data.material.name,
+      version: result.data.material.version,
+      size: result.data.material.size,
+      encoding: result.data.material.encoding,
+      state: result.data.material.state,
+      failureReason: result.data.material.failureReason,
+      segments: result.data.segments,
+    })
+    if (!registered.ok) return registered
+
+    const material = findMaterial(project, registered.data.materialId)
+    if (material === null) {
+      return localFailure('NOT_FOUND', '材料登记后没有找到，请刷新页面')
+    }
+
+    return {
+      ok: true,
+      data: {
+        material,
+        version: material.version,
+        segmentCount: result.data.segmentCount,
+        segments: result.data.segments,
+        projectRevision: project.projectRevision,
+      },
+    }
+  }
+
+  /* ------------------------------------------------ v2：理解草稿（契约 14.3） */
+
+  /** 草稿内容的稳定摘要：用于判断"重复写入同一份草稿"（幂等，不递增版本） */
+  function understandingSummary(blocks: UnderstandingBlock[]): string {
+    return blocks
+      .map((block) => `${block.id}|${block.status}|${block.content}`)
+      .sort()
+      .join('\n')
+  }
+
+  /**
+   * 契约 15.2：请求材料理解草稿（`POST /api/materials/understanding`）。
+   *
+   * 后端不可用 / 返回错误时**不做本地兜底**：理解草稿必须来自材料，本地编造候选会变成
+   * "把猜测写成事实"（契约 15.2 第 2 条明确禁止）。失败就如实报错，材料本身不受影响。
+   */
+  async function requestUnderstanding(
+    input: RequestUnderstandingInput,
+  ): Promise<ActionResult<RequestUnderstandingResult>> {
+    const project = current.value
+    if (project === undefined) {
+      return localFailure('NOT_FOUND', '还没有项目，无法生成理解草稿')
+    }
+
+    const located = locateMaterial(input.materialId)
+    if (!located.ok) return localFailure(located.code, located.message)
+
+    const material = located.value
+    if (material.state !== 'parsed') {
+      return localFailure('INVALID_INPUT', '这份材料没有解析成功，无法生成理解草稿')
+    }
+
+    const all = segmentsOfMaterial(project, material.materialId)
+    const picked =
+      input.segmentIds === undefined
+        ? all
+        : all.filter((segment) => (input.segmentIds as string[]).includes(segment.segmentId))
+    // 契约 15.2：默认从第 1 段开始累计，直到片段数或字数达到上限
+    const selected = selectUnderstandingSegments(picked)
+    if (selected.length === 0) {
+      return localFailure('INVALID_INPUT', '这份材料没有可发送的片段')
+    }
+    if (material.type === null) {
+      return localFailure('INVALID_INPUT', '这份材料缺少文件类型，请重新上传后再试')
+    }
+
+    const requestRevision = computeProjectRevision(project)
+    const request = buildUnderstandingRequest({
+      projectId: project.projectId,
+      projectRevision: requestRevision,
+      projectName: project.name,
+      material: {
+        materialId: material.materialId,
+        name: material.name,
+        type: material.type,
+        version: material.version,
+        segments: selected,
+      },
+    })
+
+    const result = await fetchMaterialUnderstanding(request, { signal: input.signal })
+    if (!result.ok) {
+      if (!isStaleMaterialResponse(result.error)) toast(describeAdvisorFailure(result.error))
+      return { ok: false, code: result.error.code, message: describeAdvisorFailure(result.error) }
+    }
+
+    if (
+      currentProjectId.value !== project.projectId ||
+      computeProjectRevision(project) !== requestRevision
+    ) {
+      return { ok: false, code: 'STALE_RESPONSE', message: '该理解响应已过期，已丢弃' }
+    }
+
+    const recorded = recordUnderstanding({
+      materialId: result.data.materialId,
+      materialVersion: result.data.materialVersion,
+      draft: result.data.draft,
+      notice: result.data.notice,
+    })
+    if (!recorded.ok) return recorded
+
+    return {
+      ok: true,
+      data: {
+        materialId: result.data.materialId,
+        materialVersion: result.data.materialVersion,
+        source: result.data.source,
+        fallbackReason: result.data.fallbackReason,
+        notice: result.data.notice,
+        blockCount: recorded.data.blockCount,
+        draft: result.data.draft,
+        projectRevision: project.projectRevision,
+      },
+    }
+  }
+
+  /**
+   * 契约 14.3 / 15.3：把服务端草稿写入本地（不访问网络）。
+   *
+   * 三条清理规则与 15.3 一致：`text` 为空丢该条；来源剔除后为空丢该条（无来源不可用）；
+   * 同一材料当前版本的草稿**整体替换**，并保留学生已经确认过的条目结论。
+   *
+   * 版本语义：草稿生成本身**不递增** `projectRevision`（契约 2.6 / 14.5 的递增事件列表里
+   * 只有材料登记与「确认 / 修改 / 删除 / 整份确认」）；重复写入同一份草稿也不递增。
+   */
+  function recordUnderstanding(
+    input: RecordUnderstandingInput,
+  ): ActionResult<RecordUnderstandingResult> {
+    const project = current.value
+    if (project === undefined) {
+      return localFailure('NOT_FOUND', '还没有项目，无法保存理解草稿')
+    }
+
+    const located = locateMaterial(input.materialId)
+    if (!located.ok) return localFailure(located.code, located.message)
+
+    const material = located.value
+    if (material.version !== input.materialVersion) {
+      return localFailure('STALE_RESPONSE', '材料版本已更新，请重新生成理解草稿')
+    }
+
+    const timestamp = nowIso()
+    const previousById = new Map(understandingBlocksOf(project).map((block) => [block.id, block]))
+    const next: UnderstandingBlock[] = []
+
+    for (const kind of UNDERSTANDING_BLOCK_ORDER) {
+      const candidates = input.draft[kind] ?? []
+      for (const candidate of candidates) {
+        const content = normalizeBlockContent(candidate.text)
+        if (content === '') continue
+
+        // 契约 15.3：来源必须在本次材料内且属于当前版本，剔除后为空则整条丢弃
+        const sources = (candidate.sources ?? [])
+          .filter(
+            (source) =>
+              source.materialId === material.materialId &&
+              source.materialVersion === material.version,
+          )
+          .slice(0, 3)
+        if (sources.length === 0) continue
+
+        const id = understandingBlockKey(material.materialId, kind, candidate.itemId)
+        const before = previousById.get(id)
+
+        next.push({
+          id,
+          itemId: candidate.itemId,
+          kind,
+          materialId: material.materialId,
+          materialVersion: material.version,
+          content,
+          sources,
+          /**
+           * 重新生成时的状态继承（契约 17.2：只有学生**实际确认过**的内容才发出去）。
+           *
+           * 服务端的 `itemId` 只在**本次响应内**唯一（按块内序号生成），两次理解请求的
+           * 同名 `itemId` 不代表是同一个候选。所以"已确认"的继承必须**内容一致**：
+           *   - 新文案与学生确认过的文案逐字相同 → 保持 `confirmed`；
+           *   - 新文案变了 → 回到 `pending`，避免把学生没看过的新文案当成已确认发出去。
+           */
+          status: before?.status === 'confirmed' && before.content === content ? 'confirmed' : 'pending',
+          originalContent: content,
+          createdAt: before?.createdAt ?? timestamp,
+          updatedAt: timestamp,
+        })
+      }
+    }
+
+    const existingBlocks = understandingBlocksOf(project).filter(
+      (block) => block.materialId === material.materialId && block.materialVersion === material.version,
+    )
+    // 契约 15.2：fallback 时服务端必须给出 notice，界面无论是否写入都要能看到
+    const noticeText = typeof input.notice === 'string' ? input.notice.trim() : ''
+
+    if (understandingSummary(existingBlocks) === understandingSummary(next)) {
+      // 幂等：同一份草稿重复写入不递增 projectRevision
+      if (noticeText !== '') toast(noticeText)
+      return {
+        ok: true,
+        data: {
+          materialId: material.materialId,
+          blockCount: next.length,
+          projectRevision: project.projectRevision,
+        },
+      }
+    }
+
+    const saved = commit(project, () => {
+      const others = project.understandingBlocks.filter(
+        (block) => block.materialId !== material.materialId || block.materialVersion !== material.version,
+      )
+      project.understandingBlocks = [...others, ...next]
+      // 契约 2.6 / 14.5：递增版本的事件只列了「材料登记」与「草稿条目确认 / 修改 / 删除、
+      // 整份确认」，**不含草稿生成**——草稿写入不递增 projectRevision。
+      project.updated =
+        next.length > 0
+          ? `最近更新：生成了 ${next.length} 条理解草稿`
+          : '最近更新：这份材料没有生成新的理解草稿'
+    })
+    if (!saved.ok) return saved
+
+    if (noticeText !== '') {
+      toast(noticeText)
+    } else if (next.length > 0) {
+      toast(`已生成 ${next.length} 条理解草稿，确认后才会用于后续建议`)
+    }
+
+    return {
+      ok: true,
+      data: {
+        materialId: material.materialId,
+        blockCount: next.length,
+        projectRevision: project.projectRevision,
+      },
+    }
+  }
+
+  /**
+   * 把一条草稿的状态改成目标值（契约 14.3 / 2.6：确认、撤销确认都按状态变更递增版本）。
+   * `commit` 失败时整体回滚，返回值里带失败码。
+   */
+  function applyBlockStatus(
+    block: UnderstandingBlock,
+    status: UnderstandingBlockStatus,
+    updatedText: string,
+  ): ActionResult<UnderstandingBlockResult> {
+    const project = current.value
+    if (project === undefined) {
+      return localFailure('NOT_FOUND', '还没有项目')
+    }
+
+    const timestamp = nowIso()
+    const saved = commit(project, () => {
+      project.understandingBlocks = project.understandingBlocks.map((entry) =>
+        entry.id === block.id ? { ...entry, status, updatedAt: timestamp } : entry,
+      )
+      project.projectRevision += 1
+      project.updated = updatedText
+    })
+    if (!saved.ok) return saved
+
+    return {
+      ok: true,
+      data: { blockId: block.id, status, projectRevision: project.projectRevision },
+    }
+  }
+
+  /** 契约 14.3 / 2.6：确认单条草稿。重复确认是幂等的（不报错、不改状态、不递增版本） */
+  function confirmUnderstandingBlock(
+    input: UnderstandingBlockIdInput,
+  ): ActionResult<UnderstandingBlockResult> {
+    const project = current.value
+    if (project === undefined) {
+      return localFailure('NOT_FOUND', '还没有项目，无法确认理解草稿')
+    }
+
+    const located = locateUnderstandingBlock(input.blockId)
+    if (!located.ok) return localFailure(located.code, located.message)
+
+    const block = located.value
+    if (block.status === 'confirmed') {
+      return {
+        ok: true,
+        data: { blockId: block.id, status: 'confirmed', projectRevision: project.projectRevision },
+      }
+    }
+
+    const applied = applyBlockStatus(block, 'confirmed', '最近更新：确认了一条理解草稿')
+    if (!applied.ok) return applied
+
+    toast('已确认，后续建议会参考这条理解')
+    return applied
+  }
+
+  /**
+   * 撤销确认：把 `confirmed` 退回未确认状态，学生不必先删除再重新生成。
+   *
+   * 退回到哪个状态按内容判断（契约 14.3 的三种 status 语义）：
+   *   - 内容与服务端原文一致 → `pending`（等于还没确认过的候选）；
+   *   - 内容被学生改过 → `modified`（保住「这条被改过」的信息）。
+   * 未确认的条目调用它是幂等的：不改状态、不递增版本。
+   */
+  function unconfirmUnderstandingBlock(
+    input: UnderstandingBlockIdInput,
+  ): ActionResult<UnderstandingBlockResult> {
+    const project = current.value
+    if (project === undefined) {
+      return localFailure('NOT_FOUND', '还没有项目，无法撤销确认')
+    }
+
+    const located = locateUnderstandingBlock(input.blockId)
+    if (!located.ok) return localFailure(located.code, located.message)
+
+    const block = located.value
+    if (block.status !== 'confirmed') {
+      return {
+        ok: true,
+        data: { blockId: block.id, status: block.status, projectRevision: project.projectRevision },
+      }
+    }
+
+    const target = statusAfterUnconfirm(block)
+    const applied = applyBlockStatus(
+      block,
+      target,
+      target === 'modified'
+        ? '最近更新：撤销确认（这条内容被改过，仍待确认）'
+        : '最近更新：撤销确认了一条理解草稿',
+    )
+    if (!applied.ok) return applied
+
+    toast('已撤销确认，这条理解不会再用于建议，直到你再次确认')
+    return applied
+  }
+
+  /**
+   * 契约 14.3 / 2.6：修改单条草稿正文。
+   * 修改后状态是 `modified`——学生要先确认，它才会进入建议与聊天请求（契约 17.2）；
+   * 已经确认过的条目被改后同样退回 `modified`，不会"带着旧确认继续下发"。
+   */
+  function modifyUnderstandingBlock(
+    input: ModifyUnderstandingBlockInput,
+  ): ActionResult<UnderstandingBlockResult> {
+    const project = current.value
+    if (project === undefined) {
+      return localFailure('NOT_FOUND', '还没有项目，无法修改理解草稿')
+    }
+
+    const located = locateUnderstandingBlock(input.blockId)
+    if (!located.ok) return localFailure(located.code, located.message)
+
+    const content = normalizeBlockContent(input.content)
+    if (content === '') {
+      return localFailure('INVALID_INPUT', '理解草稿内容不能为空')
+    }
+
+    const block = located.value
+    if (block.content === content && block.status === 'modified') {
+      return {
+        ok: true,
+        data: { blockId: block.id, status: 'modified', projectRevision: project.projectRevision },
+      }
+    }
+
+    const timestamp = nowIso()
+    const saved = commit(project, () => {
+      project.understandingBlocks = project.understandingBlocks.map((entry) =>
+        entry.id === block.id
+          ? { ...entry, content, status: 'modified', updatedAt: timestamp }
+          : entry,
+      )
+      project.projectRevision += 1
+      project.updated = '最近更新：修改了一条理解草稿'
+    })
+    if (!saved.ok) return saved
+
+    toast('已修改，确认后才会用于后续建议')
+    return {
+      ok: true,
+      data: { blockId: block.id, status: 'modified', projectRevision: project.projectRevision },
+    }
+  }
+
+  /** 契约 14.3 / 2.6：删除单条草稿 */
+  function deleteUnderstandingBlock(
+    input: UnderstandingBlockIdInput,
+  ): ActionResult<DeleteUnderstandingBlockResult> {
+    const project = current.value
+    if (project === undefined) {
+      return localFailure('NOT_FOUND', '还没有项目，无法删除理解草稿')
+    }
+
+    const located = locateUnderstandingBlock(input.blockId)
+    if (!located.ok) return localFailure(located.code, located.message)
+
+    const block = located.value
+    const saved = commit(project, () => {
+      project.understandingBlocks = project.understandingBlocks.filter(
+        (entry) => entry.id !== block.id,
+      )
+      project.projectRevision += 1
+      project.updated = '最近更新：删除了一条理解草稿'
+    })
+    if (!saved.ok) return saved
+
+    toast('已删除这条理解草稿')
+    return { ok: true, data: { blockId: block.id, projectRevision: project.projectRevision } }
+  }
+
+  /** 契约 14.3 / 2.6：整份草稿确认（按材料，只覆盖当前版本） */
+  function confirmAllUnderstanding(
+    input: ConfirmAllUnderstandingInput,
+  ): ActionResult<ConfirmAllUnderstandingResult> {
+    const project = current.value
+    if (project === undefined) {
+      return localFailure('NOT_FOUND', '还没有项目，无法确认理解草稿')
+    }
+
+    const located = locateMaterial(input.materialId)
+    if (!located.ok) return localFailure(located.code, located.message)
+
+    const material = located.value
+    const targets = understandingBlocksOf(project).filter(
+      (block) =>
+        block.materialId === material.materialId &&
+        block.materialVersion === material.version &&
+        block.status !== 'confirmed',
+    )
+
+    if (targets.length === 0) {
+      // 幂等：没有待确认条目时不改写、不递增版本
+      return {
+        ok: true,
+        data: {
+          materialId: material.materialId,
+          confirmedCount: 0,
+          projectRevision: project.projectRevision,
+        },
+      }
+    }
+
+    const targetIds = new Set(targets.map((block) => block.id))
+    const timestamp = nowIso()
+    const saved = commit(project, () => {
+      project.understandingBlocks = project.understandingBlocks.map((entry) =>
+        targetIds.has(entry.id) ? { ...entry, status: 'confirmed', updatedAt: timestamp } : entry,
+      )
+      project.projectRevision += 1
+      project.updated = `最近更新：确认了「${material.name}」的 ${targets.length} 条理解`
+    })
+    if (!saved.ok) return saved
+
+    toast(`已确认 ${targets.length} 条理解，后续建议会参考它们`)
+    return {
+      ok: true,
+      data: {
+        materialId: material.materialId,
+        confirmedCount: targets.length,
+        projectRevision: project.projectRevision,
+      },
+    }
   }
 
   /* -------------------------------------------------------- 认领任务 */
@@ -522,22 +1447,6 @@ export const useWorkbenchStore = defineStore('workbench', () => {
         return localFailure('INVALID_INPUT', '任务标题不能为空')
       }
 
-      // 契约 3.2 约束 4：同一项目内字段完全相同的 draft 幂等。
-      // 命中时直接返回已有任务：不新增任务、不重复持久化、不递增 projectRevision。
-      // 去重范围限定在当前项目内，跨项目互不影响。
-      const draftKey = draftKeyOf(draft)
-      const existing = (project.tasks ?? []).find((item) => item.draftKey === draftKey)
-      if (existing !== undefined) {
-        return {
-          ok: true,
-          data: {
-            taskId: existing.id,
-            status: 'doing',
-            projectRevision: project.projectRevision,
-          },
-        }
-      }
-
       const timestamp = nowIso()
       const taskId = createTaskId()
       const task: Task = {
@@ -550,7 +1459,6 @@ export const useWorkbenchStore = defineStore('workbench', () => {
         suggestedOwner: null,
         milestone: currentMilestoneName(project),
         why: null,
-        draftKey,
         createdAt: timestamp,
         updatedAt: timestamp,
       }
@@ -587,10 +1495,8 @@ export const useWorkbenchStore = defineStore('workbench', () => {
       return localFailure('TASK_NOT_CLAIMABLE', '该任务已完成')
     }
 
-    // 已经是 doing：幂等——不改变状态、不递增 revision、不重复写盘，
-    // 但仍然给用户一个明确反馈（重复点击「认领」时要能看到「已认领」这句话）
+    // 已经是 doing：幂等，不改变状态、不递增 revision
     if (task.status === 'doing') {
-      toast('该任务已认领（进行中），无需重复操作')
       return {
         ok: true,
         data: { taskId, status: 'doing', projectRevision: project.projectRevision },
@@ -611,45 +1517,33 @@ export const useWorkbenchStore = defineStore('workbench', () => {
     return { ok: true, data: { taskId, status: 'doing', projectRevision: project.projectRevision } }
   }
 
-  /**
-   * 旧页面兼容 wrapper：把步骤转成 taskId，业务逻辑只在 claimTask 里。
-   * 传 taskId（字符串）走稳定 ID；传下标（数字）只为旧调用兜底，页面不再使用。
-   */
-  function claimStep(target: number | string): ActionResult<ClaimTaskResult> {
+  /** 旧页面兼容 wrapper：把步骤下标翻译成 taskId，业务逻辑只在 claimTask 里 */
+  function claimStep(stepIndex: number): ActionResult<ClaimTaskResult> {
     const project = current.value
     if (project === undefined) {
       return localFailure('NOT_FOUND', '还没有项目，无法认领任务')
     }
-
-    const task: Task | undefined =
-      typeof target === 'string'
-        ? (project.tasks ?? []).find((item) => item.id === target)
-        : (project.tasks ?? [])[target]
-
+    const task: Task | undefined = (project.tasks ?? [])[stepIndex]
     if (task === undefined) {
       return localFailure('NOT_FOUND', '任务不存在')
     }
     return claimTask({ taskId: task.id })
   }
 
-  /** 就某条真实任务提问，复用聊天接口。 */
-  function askAboutStep(target: number | string) {
+  /**
+   * 旧页面兼容 wrapper：把「步骤 N」翻成一句提问，**走真实聊天接口**。
+   *
+   * 这里不能直接塞一条预写好的回答：那会让接口故障看起来像"顾问答过了"
+   * （契约 6.4 的问答必须真的调用 `POST /api/advisor/chat`）。
+   */
+  function askAboutStep(stepIndex: number): void {
     const project = current.value
     if (project === undefined) return
-
-    const task: Task | undefined =
-      typeof target === 'string'
-        ? (project.tasks ?? []).find((item) => item.id === target)
-        : (project.tasks ?? [])[target]
-
-    if (task === undefined) {
-      toast('这条任务已经不在当前项目里，请重新获取建议')
-      return
-    }
-
-    const why = normalizeNullable(task.why)
-    const lead = why === null ? '这一步该怎么开始？' : `${why.slice(0, 40)}…该怎么开始？`
-    return sendChat(`关于「${task.title}」，我想先了解：${lead}`)
+    const step = project.steps[stepIndex]
+    if (step === undefined) return
+    void sendChat(
+      `关于步骤 ${stepIndex + 1}「${step.t}」，我想先了解：${step.why.slice(0, 40)}…该怎么开始？`,
+    )
   }
 
   /* -------------------------------------------------------- 解决疑问 */
@@ -708,76 +1602,152 @@ export const useWorkbenchStore = defineStore('workbench', () => {
 
   /* ---------------------------------------------------------------- 问答 */
 
-  /** 向后端 AI 顾问提问；请求身份与项目版本不匹配时静默丢弃回答。 */
-  async function sendChat(text: string): Promise<void> {
+  /** 聊天状态：与建议状态分开，页面可以独立显示"正在回答"。 */
+  const chatLoading = ref(false)
+  const chatError = ref<AdvisorApiError | null>(null)
+  let chatAbort: AbortController | null = null
+  /** 在途聊天序号：只有最后一次请求的响应才允许写入 */
+  let chatToken = 0
+
+  /** 取消在途聊天（切换项目、卸载面板时调用），避免旧回答跑到新项目里 */
+  function cancelChat(): void {
+    chatAbort?.abort()
+    chatAbort = null
+    chatToken += 1
+    chatLoading.value = false
+  }
+
+  /** 把顾问回答追加到聊天记录；写盘失败只撤销这一条，不影响已经发出的提问 */
+  function appendAssistant(
+    text: string,
+    source: 'model' | 'fallback' | 'error',
+    fallbackReason: string | null,
+  ): void {
     const project = current.value
-    const question = text.trim()
-    if (project === undefined || question === '' || chatLoading.value) return
-    if (question.length > MAX_ADVISOR_CHAT_QUESTION_LENGTH) {
-      chatErrorByProject.value = { ...chatErrorByProject.value, [project.projectId]: `问题不能超过 ${MAX_ADVISOR_CHAT_QUESTION_LENGTH} 个字符` }
-      return
+    if (project === undefined) return
+    project.chat.push({ who: 'AI 顾问', me: false, text, source, fallbackReason })
+    if (!persistOrRollback(() => project.chat.pop())) {
+      toast('本地存储不可用，回答没有保存')
     }
-    const projectId = project.projectId
-    const projectRevision = computeProjectRevision(project)
-    const requestId = createRequestId()
+  }
+
+  /**
+   * 契约 6.4：向顾问提问。
+   *
+   * 聊天与建议共用同一份项目快照与 v2 字段：
+   *   - `projectProfile`（项目基本信息）与 `confirmedMaterials`（**已确认**材料片段）
+   *     只在非空时出现，未确认草稿绝不进入请求体（契约 17.2）；
+   *   - `promptVersion` 固定 `advisor-chat-v2`（`ADVISOR_CHAT_PROMPT_VERSION`）；
+   *   - 响应按 `requestId` / `projectId` / `projectRevision` 三项校验，过期则丢弃；
+   *   - 失败时给出可读的中文兜底回答，并保留失败原因供页面展示。
+   *
+   * 返回 `ActionResult`：页面可以 `void store.sendChat(text)`（只用 toast 与聊天记录），
+   * 也可以 `await` 拿到失败码自行处理。
+   */
+  async function sendChat(
+    text: string,
+  ): Promise<ActionResult<{ answer: string; source: RecommendationSource }>> {
+    const project = current.value
+    if (project === undefined) {
+      return localFailure('NOT_FOUND', '还没有项目，无法提问')
+    }
+
+    const question = text.trim()
+    if (question === '') {
+      return localFailure('INVALID_INPUT', '请先输入问题')
+    }
+
+    const message = { who: '我', me: true, text: question }
+    project.chat.push(message)
+    // 提问是展示性写入：不递增 projectRevision，写盘失败就撤销这一条
+    if (!persistOrRollback(() => project.chat.pop())) {
+      toast('本地存储不可用，消息没有保存')
+      return localFailure('STORAGE_FULL', '本地存储不可用，消息没有保存')
+    }
+
+    // 契约 6.4：历史最多 20 条，按时间正序（当前提问不算历史）
+    const chatHistory: AdvisorChatMessage[] = project.chat
+      .slice(0, -1)
+      .map((entry) => ({
+        role: entry.me ? ('user' as const) : ('assistant' as const),
+        text: entry.text,
+      }))
+
     const reference = new Date()
+    const requestId = createRequestId()
+    const requestRevision = computeProjectRevision(project)
     const request = buildAdvisorChatRequest({
-      projectId,
-      projectRevision,
+      projectId: project.projectId,
+      projectRevision: requestRevision,
       projectName: project.name,
       currentMilestone: currentMilestoneName(project),
       tasks: deriveTaskSnapshots(project, reference),
       evidence: deriveEvidenceSnapshots(project, reference),
       doubts: deriveDoubtSnapshots(project, reference),
-      chatHistory: project.chat
-        .filter((message) => message.me || message.source === 'model' || message.source === 'fallback')
-        .slice(-20)
-        .map((message) => ({ role: message.me ? 'user' : 'assistant', text: message.text.slice(0, 2000) })),
       question,
+      chatHistory,
+      // 契约 13.2 / 17.1：只发已确认内容；为空时请求体里不出现这两个字段
+      projectProfile: buildProjectProfile(project.profile),
+      confirmedMaterials: buildConfirmedMaterials(project),
       requestId,
     })
-    project.chat.push({ who: '我', me: true, text: question })
-    if (!persistOrRollback(() => project.chat.pop())) {
-      toast('本地存储不可用，消息没有保存')
-      return
-    }
+
+    // 新提问作废上一次在途请求
     chatAbort?.abort()
     const controller = new AbortController()
     chatAbort = controller
-    const identity = { projectId, projectRevision, requestId }
-    chatRequest = identity
-    chatLoadingByProject.value = { ...chatLoadingByProject.value, [projectId]: true }
-    chatErrorByProject.value = { ...chatErrorByProject.value, [projectId]: null }
-    try {
-      const result = await fetchAdvisorChat(request, { signal: controller.signal })
-      const isCurrent = chatRequest === identity && currentProjectId.value === projectId && computeProjectRevision(project) === projectRevision
-      if (!isCurrent) return
-      if (result.ok) {
-        project.chat.push({ who: result.data.source === 'fallback' ? '服务端兜底' : 'AI 模型', me: false, text: result.data.answer, source: result.data.source, fallbackReason: result.data.fallbackReason })
-        if (!persistOrRollback(() => project.chat.pop())) {
-          chatErrorByProject.value = { ...chatErrorByProject.value, [projectId]: '本地存储不可用，回答没有保存，请稍后重试' }
-        }
-      } else if (result.error.code !== 'STALE_RESPONSE' && result.error.cause !== 'aborted') {
-        // 只展示人话原因：错误码、请求字段与服务端原始 message 一律不进界面
-        chatErrorByProject.value = {
-          ...chatErrorByProject.value,
-          [projectId]: describeAdvisorFailure(result.error),
-        }
-      }
-    } catch {
-      if (chatRequest === identity) {
-        chatErrorByProject.value = {
-          ...chatErrorByProject.value,
-          [projectId]: describeAdvisorFailure({ code: 'NETWORK_ERROR', cause: 'network' }),
-        }
-      }
-    } finally {
-      if (chatRequest === identity) {
-        chatRequest = null
-        chatLoadingByProject.value = { ...chatLoadingByProject.value, [projectId]: false }
-        if (chatAbort === controller) chatAbort = null
-      }
+    chatToken += 1
+    const token = chatToken
+    chatLoading.value = true
+    chatError.value = null
+
+    const result = await fetchAdvisorChat(request, { signal: controller.signal })
+
+    // 已经有更新的提问（或项目已切换）时，这次结果一律丢弃
+    if (token !== chatToken) {
+      return { ok: false, code: 'STALE_RESPONSE', message: '该聊天响应已过期，已丢弃' }
     }
+
+    chatAbort = null
+    chatLoading.value = false
+
+    if (!result.ok) {
+      chatError.value = result.error
+      // 过期响应：静默丢弃，不写聊天记录、不提示用户
+      if (isStaleResponseError(result.error)) {
+        return { ok: false, code: result.error.code, message: result.error.message }
+      }
+      // 契约 4.5 / 5.2：失败就如实说失败。
+      // 这里**不做**本地假回答——聊天必须真的调用后端，假回复会把接口故障藏起来。
+      const reason = describeAdvisorFailure(result.error)
+      appendAssistant(
+        `顾问暂时回答不了：${reason}你的问题已经保存，稍后可以再问一次。`,
+        'error',
+        result.error.code,
+      )
+      toast(reason)
+      return { ok: false, code: result.error.code, message: reason }
+    }
+
+    // 契约 4.7：项目已切换或状态已变化 → 丢弃响应，不写入聊天记录
+    if (
+      currentProjectId.value !== project.projectId ||
+      computeProjectRevision(project) !== requestRevision
+    ) {
+      const stale: AdvisorApiError = {
+        code: 'STALE_RESPONSE',
+        message: '该聊天响应已过期，已丢弃',
+        retryable: false,
+        retryAfterSeconds: null,
+        requestId: result.data.requestId,
+        cause: 'stale-response',
+      }
+      chatError.value = stale
+      return { ok: false, code: stale.code, message: stale.message }
+    }
+
+    appendAssistant(result.data.answer, result.data.source, result.data.fallbackReason)
+    return { ok: true, data: { answer: result.data.answer, source: result.data.source } }
   }
 
   /* -------------------------------------------------------- 提交证据 */
@@ -1061,6 +2031,11 @@ export const useWorkbenchStore = defineStore('workbench', () => {
       tasks,
       evidence,
       doubts,
+      // 契约 13.2 / 17.1：只发学生已确认的内容；未确认草稿绝不进入请求体。
+      // 全部为空时这两个字段不会出现在请求体里，行为与 v1.3 完全一致。
+      confirmedContext: buildConfirmedContext(project),
+      projectProfile: buildProjectProfile(project.profile),
+      confirmedMaterials: buildConfirmedMaterials(project),
       forceRefresh: options.forceRefresh ?? false,
     })
 
@@ -1073,7 +2048,6 @@ export const useWorkbenchStore = defineStore('workbench', () => {
     inFlightAbort = controller
     inFlightToken += 1
     const token = inFlightToken
-    inFlightRequest = { token, projectId, projectRevision }
 
     patchAdvisor(projectId, {
       status: 'loading',
@@ -1085,53 +2059,15 @@ export const useWorkbenchStore = defineStore('workbench', () => {
       fallbackReason: null,
     })
 
-    /** 响应只有仍属于「最新请求」且仍匹配当前项目与版本时才允许写入（契约 4.7 第 1~4 条） */
-    const isStillCurrent = (): boolean =>
-      token === inFlightToken &&
-      currentProjectId.value === projectId &&
-      computeProjectRevision(project) === projectRevision
-
-    /**
-     * 丢弃过期响应。
-     *
-     * 契约 4.7 补充约定 1～3：
-     *   - 过期响应不得覆盖当前项目的 suggestions / aiError / 任务 / 证据 / 疑问 / projectRevision；
-     *   - 已有更新的请求在途时，由那个请求负责 loading 与最终状态，旧请求静默结束；
-     *   - 没有更新的请求接管时，旧请求必须自己收尾，不允许留下「没有在途请求却永久 loading」。
-     */
+    /** 丢弃过期响应：当前项目的状态一律不动（契约 4.7 补充约定 1） */
     const discard = (): ActionResult<AdvisorOutcome> => {
-      const latest = inFlightRequest
-      const isLatestRequest = latest !== null && latest.token === token
-
-      // 期间又发起过新的 refreshRecommendations：状态归新请求管，这里什么都不动
-      if (!isLatestRequest) {
-        return localFailure('STALE_RESPONSE', '该建议响应已过期，已丢弃')
+      // 契约 4.7 补充约定 3：旧请求必须结束，不能留下"没有在途请求却永久 loading"。
+      // 用 requestId 认领自己那一次 loading：如果已经有更新的请求接管（requestId 不同），
+      // 这里就不动它，由新请求负责最终状态。
+      const state = advisorByProject.value[projectId]
+      if (state?.status === 'loading' && state.requestId === request.requestId) {
+        patchAdvisor(projectId, { status: 'idle', requestId: null })
       }
-
-      // 用户已经切走项目：把该项目自己残留的 loading 收成 idle，避免切回来看到永远转圈
-      if (currentProjectId.value !== projectId) {
-        const state = advisorByProject.value[projectId]
-        if (state?.status === 'loading' && state.requestId === request.requestId) {
-          patchAdvisor(projectId, { status: 'idle', requestId: null })
-        }
-        return localFailure('STALE_RESPONSE', '该建议响应已过期，已丢弃')
-      }
-
-      const latestRevision = computeProjectRevision(project)
-      if (latestRevision !== projectRevision) {
-        // 同一项目但状态已变化（例如认领任务后 projectRevision + 1），且没有更新的请求接管：
-        // 用一次针对当前 revision 的替代请求接管状态，让 loading 最终收敛到实际结果状态
-        void refreshRecommendations({ forceRefresh: options.forceRefresh })
-        return localFailure('STALE_RESPONSE', '该建议响应已过期，已丢弃')
-      }
-
-      // 版本没变（例如服务端回显与本次请求不符）：回到可重试的 idle，不得停在 loading
-      patchAdvisor(projectId, {
-        status: 'idle',
-        requestId: null,
-        suggestions: [],
-        error: null,
-      })
       return localFailure('STALE_RESPONSE', '该建议响应已过期，已丢弃')
     }
 
@@ -1179,7 +2115,9 @@ export const useWorkbenchStore = defineStore('workbench', () => {
       const result = await fetchRecommendations(request, { signal: controller.signal })
 
       // 过期判断（契约 4.7 第 1~4 条）
-      if (!isStillCurrent()) return discard()
+      if (token !== inFlightToken) return discard()
+      if (currentProjectId.value !== projectId) return discard()
+      if (computeProjectRevision(project) !== projectRevision) return discard()
 
       if (result.ok) {
         const parsed = toRecommendations(result.data)
@@ -1254,13 +2192,9 @@ export const useWorkbenchStore = defineStore('workbench', () => {
 
       return fallbackToLocalRule(result.error)
     } catch (unexpected) {
-      // 契约 4.7 补充约定 2、3：catch / abort 回调同样不能让旧请求覆盖更新的请求状态
-      if (!isStillCurrent()) return discard()
       return fallbackToLocalRule(toUnexpectedError(unexpected))
     } finally {
       if (inFlightAbort === controller) inFlightAbort = null
-      // 只有自己仍是最新请求时才清空身份，避免清掉替代请求的记录
-      if (inFlightRequest !== null && inFlightRequest.token === token) inFlightRequest = null
     }
   }
 
@@ -1288,12 +2222,37 @@ export const useWorkbenchStore = defineStore('workbench', () => {
     askAboutStep,
     sendChat,
     askPaperAi,
+    // v2：项目基本信息与材料（契约 13 / 14）
+    updateProjectProfile,
+    updateProjectBasicInfo,
+    registerMaterial,
+    uploadMaterialFile,
+    requestUnderstanding,
+    recordUnderstanding,
+    confirmUnderstandingBlock,
+    unconfirmUnderstandingBlock,
+    modifyUnderstandingBlock,
+    deleteUnderstandingBlock,
+    confirmAllUnderstanding,
     // 建议请求（契约 3.2）：状态 + 读取器 + action
     advisor,
     aiStatus,
     recommendations,
     aiError,
+    // 聊天（契约 6.4）：状态 + 取消
     chatLoading,
     chatError,
+    cancelChat,
+    // v2 读取器：页面直接读这些，不自己拼状态
+    basicInfo,
+    projectProfile,
+    materials,
+    materialSegments,
+    materialReadStateMap,
+    pendingUnderstandingBlocks,
+    modifiedUnderstandingBlocks,
+    confirmedUnderstandingBlocks,
+    confirmedContext,
+    confirmedMaterials,
   }
 })

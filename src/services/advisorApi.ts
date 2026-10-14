@@ -1,20 +1,27 @@
 import { requestJson, type HttpFailureCause } from './http'
 import {
-  CONTRACT_VERSION,
   ADVISOR_CHAT_PROMPT_VERSION,
+  CONTRACT_VERSION,
   DEFAULT_PROMPT_VERSION,
+  MAX_ADVISOR_CHAT_HISTORY,
+  MAX_ADVISOR_CHAT_QUESTION_LENGTH,
+  MAX_ADVISOR_CHAT_TEXT_LENGTH,
+  clampCurrentMilestone,
+  clampProjectName,
   RETRYABLE_BY_CODE,
   isAdvisorErrorCode,
   type AdvisorApiError,
+  type AdvisorApiResult,
+  type AdvisorChatMessage,
   type AdvisorChatRequest,
   type AdvisorChatResult,
   type AdvisorChatSuccess,
-  type AdvisorApiResult,
   type AdvisorErrorCause,
   type AdvisorFallbackReason,
   type AdvisorRecommendationsFailure,
   type AdvisorRecommendationsRequest,
   type AdvisorRecommendationsSuccess,
+  type ConfirmedMaterial,
   type DoubtSnapshot,
   type EvidenceSnapshot,
   type Recommendation,
@@ -22,6 +29,7 @@ import {
   type Suggestion,
   type TaskSnapshot,
 } from '@/domain/recommendation'
+import type { ProjectProfile } from '@/types/platform'
 
 /**
  * 建议接口适配层
@@ -39,6 +47,7 @@ import {
 
 /** 契约 4.0：VITE_API_BASE_URL 不含 /api，由适配层补全 */
 export const ADVISOR_RECOMMENDATIONS_PATH = '/api/advisor/recommendations'
+/** 契约 6.4：聊天接口 */
 export const ADVISOR_CHAT_PATH = '/api/advisor/chat'
 
 /** 契约 4.6：建议最多 3 条。服务端已校验，前端再兜一次，避免异常响应污染列表 */
@@ -103,7 +112,14 @@ export interface BuildAdvisorRequestInput {
   doubts: DoubtSnapshot[]
   /** 已确认的项目事实，没有就留空 */
   confirmedContext?: string[]
-  /** 默认取契约约定的当前版本 */
+  /** 契约 13.2：项目基本信息。全部为空时传 `null` 或不传，请求体里不出现该字段 */
+  projectProfile?: ProjectProfile | null
+  /** 契约 17.1：已确认的材料片段。为空数组或不传时请求体里不出现该字段 */
+  confirmedMaterials?: ConfirmedMaterial[]
+  /**
+   * 提示词版本。不传时按内容自动选择：
+   * 带 `projectProfile` 或非空 `confirmedMaterials` → v2，否则保持 v1（契约 17.4 第 2 条）。
+   */
   promptVersion?: string
   /** 对应页面「重新判断下一步」 */
   forceRefresh?: boolean
@@ -114,15 +130,29 @@ export interface BuildAdvisorRequestInput {
 /**
  * 由 store 把项目状态映射成快照后调用它组装请求体。
  * 这里只做字段装配与默认值，不做校验——校验在请求发出后由契约约束。
+ *
+ * v2 字段的取舍（契约 13.2 / 17.1 / 17.4）：
+ *   - `projectProfile` 全为空 → 整个字段不出现（与 v1.3 完全一致）；
+ *   - `confirmedMaterials` 为空 → 整个字段不出现（与 v1.3 完全一致）；
+ *   - `promptVersion` 默认取**当前版本**（`DEFAULT_PROMPT_VERSION` = `mvp-prompt-v2`）；
+ *     调用方显式传入的值原样保留，**不静默改写**——「带 v2 字段却发 v1」属接线错误，
+ *     应当由服务端按契约 17.4 规则 2 返回 400 暴露出来。
  */
 export function buildAdvisorRequest(input: BuildAdvisorRequestInput): AdvisorRecommendationsRequest {
-  return {
+  const projectProfile = input.projectProfile ?? null
+  const confirmedMaterials =
+    input.confirmedMaterials !== undefined && input.confirmedMaterials.length > 0
+      ? input.confirmedMaterials
+      : null
+
+  const request: AdvisorRecommendationsRequest = {
     contractVersion: CONTRACT_VERSION,
     requestId: input.requestId ?? createRequestId(),
     projectId: input.projectId,
     projectRevision: input.projectRevision,
-    projectName: input.projectName,
-    currentMilestone: input.currentMilestone,
+    // 契约 4.1：projectName ≤ 120、currentMilestone ≤ 60；超长只截断，不让整个请求 400
+    projectName: clampProjectName(input.projectName) ?? '',
+    currentMilestone: clampCurrentMilestone(input.currentMilestone),
     confirmedContext: input.confirmedContext ?? [],
     tasks: input.tasks,
     evidence: input.evidence,
@@ -130,7 +160,14 @@ export function buildAdvisorRequest(input: BuildAdvisorRequestInput): AdvisorRec
     promptVersion: input.promptVersion ?? DEFAULT_PROMPT_VERSION,
     forceRefresh: input.forceRefresh ?? false,
   }
+
+  if (projectProfile !== null) request.projectProfile = projectProfile
+  if (confirmedMaterials !== null) request.confirmedMaterials = confirmedMaterials
+
+  return request
 }
+
+/* ------------------------------------------------------------ 聊天请求（契约 6.4） */
 
 export interface BuildAdvisorChatRequestInput {
   projectId: string
@@ -140,26 +177,77 @@ export interface BuildAdvisorChatRequestInput {
   tasks: TaskSnapshot[]
   evidence: EvidenceSnapshot[]
   doubts: DoubtSnapshot[]
-  chatHistory: AdvisorChatRequest['chatHistory']
+  /** 本次提问，1～2,000 字 */
   question: string
+  /** 之前的对话，最多 20 条；调用方按时间正序传入 */
+  chatHistory?: AdvisorChatMessage[]
+  /** 契约 13.2：项目基本信息。全部为空时传 `null` 或不传，请求体里不出现该字段 */
+  projectProfile?: ProjectProfile | null
+  /** 契约 17.1：已确认的材料片段。为空数组或不传时请求体里不出现该字段 */
+  confirmedMaterials?: ConfirmedMaterial[]
+  /**
+   * 提示词版本。不传时用 `ADVISOR_CHAT_PROMPT_VERSION`（`advisor-chat-v2`）；
+   * 显式传入的值原样保留，由服务端按契约 17.4 校验。
+   */
+  promptVersion?: string
+  /** 不传则自动生成 */
   requestId?: string
 }
 
+/**
+ * 契约 6.4：把聊天历史裁剪到契约允许的范围。
+ *
+ * 规则：丢掉空文本、逐条截断到 2,000 字、只保留最近 20 条、顺序保持不变。
+ * 聊天**不发** `confirmedContext`：服务端聊天解析器会自己补空数组（契约 6.4 字段表）。
+ */
+export function normalizeChatHistory(history: AdvisorChatMessage[] | undefined): AdvisorChatMessage[] {
+  if (history === undefined || !Array.isArray(history)) return []
+
+  const cleaned: AdvisorChatMessage[] = []
+  for (const message of history) {
+    const text = typeof message.text === 'string' ? message.text.trim() : ''
+    if (text === '') continue
+    cleaned.push({
+      role: message.role === 'assistant' ? 'assistant' : 'user',
+      text: text.length > MAX_ADVISOR_CHAT_TEXT_LENGTH ? text.slice(0, MAX_ADVISOR_CHAT_TEXT_LENGTH) : text,
+    })
+  }
+
+  return cleaned.slice(-MAX_ADVISOR_CHAT_HISTORY)
+}
+
+/** 契约 6.4：装配聊天请求体。字段与契约一致，未确认草稿不得从这里进来 */
 export function buildAdvisorChatRequest(input: BuildAdvisorChatRequestInput): AdvisorChatRequest {
-  return {
+  const projectProfile = input.projectProfile ?? null
+  const confirmedMaterials =
+    input.confirmedMaterials !== undefined && input.confirmedMaterials.length > 0
+      ? input.confirmedMaterials
+      : null
+
+  const question = (input.question ?? '').trim()
+  const request: AdvisorChatRequest = {
     contractVersion: CONTRACT_VERSION,
-    promptVersion: ADVISOR_CHAT_PROMPT_VERSION,
+    promptVersion: input.promptVersion ?? ADVISOR_CHAT_PROMPT_VERSION,
     requestId: input.requestId ?? createRequestId(),
     projectId: input.projectId,
     projectRevision: input.projectRevision,
-    projectName: input.projectName,
-    currentMilestone: input.currentMilestone,
+    // 契约 4.1：projectName ≤ 120、currentMilestone ≤ 60；超长只截断，不让整个请求 400
+    projectName: clampProjectName(input.projectName) ?? '',
+    currentMilestone: clampCurrentMilestone(input.currentMilestone),
     tasks: input.tasks,
     evidence: input.evidence,
     doubts: input.doubts,
-    chatHistory: input.chatHistory,
-    question: input.question,
+    chatHistory: normalizeChatHistory(input.chatHistory),
+    question:
+      question.length > MAX_ADVISOR_CHAT_QUESTION_LENGTH
+        ? question.slice(0, MAX_ADVISOR_CHAT_QUESTION_LENGTH)
+        : question,
   }
+
+  if (projectProfile !== null) request.projectProfile = projectProfile
+  if (confirmedMaterials !== null) request.confirmedMaterials = confirmedMaterials
+
+  return request
 }
 
 /* ---------------------------------------------------------- 响应校验 */
@@ -302,81 +390,6 @@ function staleResponseError(success: AdvisorRecommendationsSuccess): AdvisorApiE
   }
 }
 
-function asChatSuccess(value: unknown): AdvisorChatSuccess | null {
-  if (!isPlainObject(value)) return null
-  const { contractVersion, requestId, projectId, projectRevision, source, answer } = value
-  if (contractVersion !== CONTRACT_VERSION || typeof requestId !== 'string' || typeof projectId !== 'string') return null
-  if (typeof projectRevision !== 'number' || !Number.isInteger(projectRevision)) return null
-  if (source !== 'model' && source !== 'fallback') return null
-  if (typeof answer !== 'string' || answer.trim() === '') return null
-  const fallbackReason = value.fallbackReason
-  const allowedFallbackReasons = ['MODEL_TIMEOUT', 'MODEL_UNAVAILABLE', 'MODEL_NOT_CONFIGURED', 'INVALID_MODEL_OUTPUT', 'RATE_LIMITED']
-  if (fallbackReason !== null && (typeof fallbackReason !== 'string' || !allowedFallbackReasons.includes(fallbackReason))) return null
-  return {
-    contractVersion,
-    requestId,
-    projectId,
-    projectRevision,
-    source,
-    fallbackReason: fallbackReason as AdvisorFallbackReason | null,
-    answer,
-  }
-}
-
-function chatRequestFailure(cause: HttpFailureCause): AdvisorApiError {
-  return httpFailureToError(cause)
-}
-
-function chatStaleResponseError(success: AdvisorChatSuccess): AdvisorApiError {
-  console.warn('[advisor-chat] 丢弃过期响应：requestId / projectId / projectRevision 与本次请求不一致')
-  return {
-    code: 'STALE_RESPONSE',
-    message: '该聊天响应已过期，已丢弃',
-    retryable: false,
-    retryAfterSeconds: null,
-    requestId: success.requestId,
-    cause: 'stale-response',
-  }
-}
-
-export interface FetchAdvisorChatOptions {
-  timeoutMs?: number
-  signal?: AbortSignal
-  fetchImpl?: typeof fetch
-}
-
-export async function fetchAdvisorChat(
-  request: AdvisorChatRequest,
-  options: FetchAdvisorChatOptions = {},
-): Promise<AdvisorChatResult> {
-  const result = await requestJson(ADVISOR_CHAT_PATH, {
-    method: 'POST',
-    body: request,
-    timeoutMs: options.timeoutMs,
-    signal: options.signal,
-    fetchImpl: options.fetchImpl,
-  })
-  if (!result.ok) {
-    if (result.cause === 'http') {
-      const failure = asContractFailure(result.data)
-      if (failure !== null) return { ok: false, error: contractFailureToError(failure) }
-    }
-    return { ok: false, error: chatRequestFailure(result.cause) }
-  }
-  const success = asChatSuccess(result.data)
-  if (success === null) {
-    return { ok: false, error: { ...httpFailureToError('invalid-json'), cause: 'invalid-response' } }
-  }
-  if (
-    success.requestId !== request.requestId ||
-    success.projectId !== request.projectId ||
-    success.projectRevision !== request.projectRevision
-  ) {
-    return { ok: false, error: chatStaleResponseError(success) }
-  }
-  return { ok: true, data: success }
-}
-
 /* -------------------------------------------------------------- 主流程 */
 
 export interface FetchRecommendationsOptions {
@@ -443,7 +456,12 @@ async function requestOnce(
     console.warn('[advisor] 响应不符合契约（缺少必需字段或字段类型不对）')
     return {
       ok: false,
-      error: { ...httpFailureToError('invalid-json'), cause: 'invalid-response' },
+      error: {
+        ...httpFailureToError('invalid-json'),
+        // JSON 本身是合法的，是**结构**不符合契约（契约 4.6 / 8.4）：文案要说清楚
+        message: '后端响应不符合契约，已丢弃',
+        cause: 'invalid-response',
+      },
     }
   }
 
@@ -491,4 +509,132 @@ export function isStaleResponseError(error: AdvisorApiError): boolean {
  */
 export function shouldFallbackToLocalRule(error: AdvisorApiError): boolean {
   return error.code !== 'STALE_RESPONSE'
+}
+
+/* ------------------------------------------------------------ 聊天主流程 */
+
+/**
+ * 契约 6.4：成功响应必需字段齐全，`answer` 必须非空。
+ *
+ * `promptVersion` **不是**响应必需字段（契约 6.4 的响应只约定
+ * `source` / `fallbackReason` / `answer`；服务端聊天接口不回显它）。
+ * 这里不回显时用本次请求的版本，绝不能因为"少一个非必需字段"就把正常回答判成非法响应
+ * ——那会导致自动重试一次、并把可用的回答丢掉。
+ */
+function asChatSuccess(value: unknown, requestPromptVersion: string): AdvisorChatSuccess | null {
+  if (!isPlainObject(value)) return null
+
+  const { contractVersion, requestId, projectId, projectRevision, source, promptVersion, answer } = value
+  if (typeof contractVersion !== 'string' || typeof requestId !== 'string') return null
+  if (typeof projectId !== 'string' || typeof projectRevision !== 'number') return null
+  if (source !== 'model' && source !== 'fallback') return null
+  if (answer !== undefined && answer !== null && typeof answer !== 'string') return null
+  if (typeof answer !== 'string' || answer.trim() === '') return null
+
+  const fallbackReason = value.fallbackReason
+  if (fallbackReason !== null && typeof fallbackReason !== 'string') return null
+
+  return {
+    contractVersion,
+    requestId,
+    projectId,
+    projectRevision,
+    source,
+    fallbackReason: fallbackReason as AdvisorFallbackReason | null,
+    promptVersion: typeof promptVersion === 'string' ? promptVersion : requestPromptVersion,
+    answer,
+  }
+}
+
+export interface FetchAdvisorChatOptions {
+  /** 覆盖默认超时（默认 20 秒，见 http.ts） */
+  timeoutMs?: number
+  /** 切换项目 / 关闭面板时取消上一次请求 */
+  signal?: AbortSignal
+  /** 注入 fetch，便于测试 */
+  fetchImpl?: typeof fetch
+  /** 是否允许自动重试 1 次，默认 true（契约 4.0） */
+  retry?: boolean
+}
+
+/**
+ * 契约 6.4：请求后端回答一次提问。
+ *
+ * 与建议接口同一套约定：不抛异常；`retryable: true` 的失败在适配层最多重试 1 次
+ * （退避 1 秒）；`requestId` / `projectId` / `projectRevision` 三项对不上就整份丢弃。
+ */
+export async function fetchAdvisorChat(
+  request: AdvisorChatRequest,
+  options: FetchAdvisorChatOptions = {},
+): Promise<AdvisorChatResult> {
+  const retry = options.retry ?? true
+  let result = await requestChatOnce(request, options)
+
+  if (!result.ok && retry && result.error.retryable && !isAborted(options.signal)) {
+    await delay(RETRY_DELAY_MS)
+    if (!isAborted(options.signal)) {
+      result = await requestChatOnce(request, options)
+    }
+  }
+
+  return result
+}
+
+async function requestChatOnce(
+  request: AdvisorChatRequest,
+  options: FetchAdvisorChatOptions = {},
+): Promise<AdvisorChatResult> {
+  const result = await requestJson(ADVISOR_CHAT_PATH, {
+    method: 'POST',
+    body: request,
+    timeoutMs: options.timeoutMs,
+    signal: options.signal,
+    fetchImpl: options.fetchImpl,
+  })
+
+  if (!result.ok) {
+    if (result.cause === 'http') {
+      const failure = asContractFailure(result.data)
+      if (failure !== null) {
+        console.warn(`[advisor-chat] 后端返回契约错误：${failure.code}`)
+        return { ok: false, error: contractFailureToError(failure) }
+      }
+    }
+    return { ok: false, error: httpFailureToError(result.cause) }
+  }
+
+  const success = asChatSuccess(result.data, request.promptVersion)
+  if (success === null) {
+    console.warn('[advisor-chat] 响应不符合契约（缺少必需字段或字段类型不对）')
+    return {
+      ok: false,
+      error: {
+        ...httpFailureToError('invalid-json'),
+        // JSON 本身是合法的，是**结构**不符合契约（契约 4.6 / 8.4）：文案要说清楚
+        message: '后端响应不符合契约，已丢弃',
+        cause: 'invalid-response',
+      },
+    }
+  }
+
+  if (
+    success.requestId !== request.requestId ||
+    success.projectId !== request.projectId ||
+    success.projectRevision !== request.projectRevision
+  ) {
+    console.warn('[advisor-chat] 丢弃过期响应：requestId / projectId / projectRevision 与本次请求不一致')
+    return {
+      ok: false,
+      error: {
+        code: 'STALE_RESPONSE',
+        message: '该聊天响应已过期，已丢弃',
+        retryable: false,
+        retryAfterSeconds: null,
+        requestId: success.requestId,
+        cause: 'stale-response',
+      },
+    }
+  }
+
+  return { ok: true, data: success }
 }

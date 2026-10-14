@@ -1,36 +1,32 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import AiStatus from '@/components/AiStatus.vue'
-import EvidenceForm from '@/components/EvidenceForm.vue'
-import MaterialUploader from '@/components/MaterialUploader.vue'
 import ProjectCreate from '@/components/ProjectCreate.vue'
+import ProjectMindMap from '@/components/ProjectMindMap.vue'
+import SuggestionCard from '@/components/SuggestionCard.vue'
+// v2（M1 / M2-A）：项目基本信息、材料上传与理解草稿三个面板（页面组件由雍蕾维护）
+import MaterialPanel from '@/components/MaterialPanel.vue'
 import ProjectProfileForm from '@/components/ProjectProfileForm.vue'
-import RecommendationList from '@/components/RecommendationList.vue'
-import UnderstandingDraftCard from '@/components/UnderstandingDraftCard.vue'
-import type { MaterialFileType } from '@/components/materialTypes'
+import UnderstandingDraft from '@/components/UnderstandingDraft.vue'
 import { CHINESE_NUM, WEEK_LABELS, useWorkbenchStore } from '@/stores/workbench'
-import { deriveDoubtSnapshots, deriveEvidenceSnapshots } from '@/domain/activity'
-import { findClaimedTaskFor, taskStatusText } from '@/domain/progress'
-import { BLANK_PROJECT_NOTE, summarizeProjectStatus } from '@/domain/projectStatus'
-import { MAX_ADVISOR_CHAT_QUESTION_LENGTH } from '@/domain/recommendation'
-import type { AdvisorFallbackReason, Recommendation, SubmitEvidenceInput } from '@/domain/recommendation'
-import type { Milestone, SuggestedStep, TaskStatus } from '@/types/platform'
+import { deriveDoubtSnapshots, deriveEvidenceSnapshots, toDisplayTime } from '@/domain/activity'
+import { deriveTaskSnapshots } from '@/domain/progress'
+import type {
+  ActionResult,
+  AdvisorFallbackReason,
+  ClaimTaskInput,
+  Recommendation,
+} from '@/domain/recommendation'
+import type { Milestone } from '@/types/platform'
 
 /**
  * 工作台
  * ----------------------------------------------------------------------------
  * 没有项目时是创建页；有项目时是三栏工作台：
- *   左栏  我的项目 / 项目基本信息 / 项目资料（材料）/ 里程碑进度 / 近 4 周活跃度 / 未解决的疑问
- *   中栏  AI 下一步建议 / AI 项目顾问（真实任务）/ 材料理解草稿 / 项目地图入口 / 向顾问提问
+ *   左栏  我的项目 / 项目资料 / 里程碑进度 / 近 4 周活跃度 / 未解决的疑问
+ *   中栏  AI 项目顾问（步骤建议）/ 项目地图 / 向顾问提问
  *   右栏  提交步骤证据 / 最近证据
- *
- * 完整项目地图已经挪到独立的「项目地图」页面（/map），
- * 工作台只留一个入口，避免同一张图在两个地方各画一遍。
- *
- * M2-A：项目基本信息、材料上传、材料理解草稿三张卡片已经就位；
- * 数据层（store action / API 适配）尚未接入，页面只做真实存在的事（登记文件名），
- * 不展示任何"已保存 / 已解析 / 已确认"的假状态。
+ * 布局与内容与 platform-ui-mockup(3).html 一致。
  */
 const store = useWorkbenchStore()
 const router = useRouter()
@@ -77,43 +73,55 @@ const weekBars = computed(() => {
  * 六种状态的文案见 docs/contracts.md 5.3；错误一律映射成人话（5.2 要求不显示英文码）。
  */
 
-/**
- * 服务端规则兜底的原因 → 人话（只保留一句短原因，不出现错误码与字段名）。
- * 完整提示语写在下方的 statusLine 里。
- */
+/** 服务端规则兜底的原因 → 人话 */
 const FALLBACK_REASON_TEXT: Record<AdvisorFallbackReason, string> = {
-  MODEL_TIMEOUT: '模型这次响应超时',
+  MODEL_TIMEOUT: '模型响应超时',
   MODEL_UNAVAILABLE: '模型服务暂时不可用',
   MODEL_NOT_CONFIGURED: '服务端还没接入模型',
   INVALID_MODEL_OUTPUT: '模型返回的内容不符合要求',
-  RATE_LIMITED: '请求有点频繁',
+  RATE_LIMITED: '请求太频繁',
 }
 
-/** 内部错误码 → 一句人话；用户永远看不到错误码本身 */
+/** 错误码 → 人话（含适配层的前端内部码；保留码也先留文案） */
 const ERROR_TEXT: Record<string, string> = {
-  INVALID_INPUT: '当前项目内容还不够',
-  RATE_LIMITED: '请求有点频繁',
+  INVALID_INPUT: '当前项目数据不符合接口要求',
+  RATE_LIMITED: '请求太频繁，稍等再试',
   MODEL_TIMEOUT: '模型响应超时',
   INVALID_MODEL_OUTPUT: '模型返回的内容不符合要求',
   MODEL_UNAVAILABLE: '模型服务暂时不可用',
   MODEL_NOT_CONFIGURED: '服务端还没接入模型',
   NETWORK_ERROR: '连不上后端服务',
-  INTERNAL: '服务端暂时不可用',
-  STALE_REVISION: '项目状态刚更新过',
+  INTERNAL: '服务端内部错误',
+  STALE_REVISION: '项目版本和服务端对不上',
   UNAUTHORIZED: '没有通过服务端校验',
+}
+
+/**
+ * store action 失败码 → 人话（契约 3.3 / 5.2：不把英文错误码直接给用户）。
+ * 页面只看 `ok` 和 `code`，不通过 toast 文案判断是否成功。
+ */
+const ACTION_ERROR_TEXT: Record<string, string> = {
+  INVALID_INPUT: '请补充必填信息或检查输入长度',
+  NOT_FOUND: '该任务或疑问已经不存在',
+  PROJECT_MISMATCH: '当前项目已变化，请重新加载',
+  TASK_NOT_CLAIMABLE: '该任务已经完成',
+  STORAGE_FULL: '本地存储空间不足，当前表单内容已保留',
+  NETWORK_ERROR: '后端暂时不可用',
+  STALE_RESPONSE: '这条建议已经过期，请重新获取',
+  INTERNAL: '服务端内部错误',
+  STALE_REVISION: '项目版本和服务端对不上',
+  UNAUTHORIZED: '没有通过服务端校验',
+}
+
+/** `ALREADY_RESOLVED` 是静默成功语义：不报错、不弹提示 */
+function notifyFailure(result: ActionResult<unknown>): void {
+  if (result.ok) return
+  if (result.code === 'ALREADY_RESOLVED') return
+  store.toast(ACTION_ERROR_TEXT[result.code] ?? '操作没有完成，请稍后再试')
 }
 
 const aiStatus = computed(() => store.aiStatus)
 const isRequesting = computed(() => store.aiStatus === 'loading')
-
-/**
- * 空白项目：没有任务、证据、疑问与材料时才是空白——判断只看**真实数据**，不看项目名称。
- *
- * 用户提交第一条进展、上传材料、提出疑问或认领任务之后，`isBlank` 立刻变成 false，
- * 空白提示随之消失（同一份摘要也用于「AI 项目顾问」区的说明文字与刷新后的恢复）。
- */
-const projectStatus = computed(() => (project.value ? summarizeProjectStatus(project.value) : null))
-const isBlankProject = computed(() => projectStatus.value?.isBlank ?? false)
 
 /** 兜底/失败原因：优先用响应里的 fallbackReason，其次用适配层保留的错误码 */
 const reasonText = computed(() => {
@@ -128,31 +136,36 @@ const reasonText = computed(() => {
   return '原因未知'
 })
 
-/** 六种状态各自一句提示。失败时只说明"发生了什么 + 下一步怎么办"，不给技术细节 */
 const statusLine = computed(() => {
   switch (store.aiStatus) {
     case 'idle':
-      return isBlankProject.value
-        ? `${BLANK_PROJECT_NOTE}先补上内容，再点「获取建议」。`
-        : '还没有建议。点一下「获取建议」，AI 会结合当前项目的任务、证据和未解决的疑问，给出 1～3 条下一步建议。'
+      return '还没有建议。点一下「获取建议」，AI 会结合项目当前状态、最近证据和未解决的疑问，给出 1～3 条下一步建议。'
     case 'loading':
-      return '正在结合项目当前状态分析，请稍等…'
+      return '正在分析项目状态…'
     case 'model':
-      return '下面的建议由 AI 结合项目当前状态生成。展开「依据」可以看到它引用了哪条证据或疑问。'
+      return '以下建议由 AI 模型生成。展开「依据」可以看到它引用的是哪条证据或疑问。'
     case 'fallback':
-      return `模型暂时没有生成可用建议，正在使用系统规则生成参考建议（原因：${reasonText.value}）。可以点击「重新获取」。`
+      return `模型这次没能给出结果，下面是服务端规则生成的建议（原因：${reasonText.value}）。`
     case 'local-rule':
-      return `暂时连不上后端 AI，正在使用本地规则生成参考建议（原因：${reasonText.value}）。可以点击「重新获取」。`
+      return `后端这次不可用，下面是本地规则生成的建议（原因：${reasonText.value}）。`
     case 'error':
-      return `模型暂时没有生成可用建议（原因：${reasonText.value}）。可以点击「重新获取」，也可以先按自己的判断推进。`
+      return `建议没有生成出来：${reasonText.value}。可以重试，也可以先按自己的判断推进。`
     default:
       return ''
   }
 })
 
-const statusTone = computed(() => {
-  if (store.aiStatus === 'idle') return 'neutral'
-  return store.aiStatus
+const statusStyle = computed(() => {
+  switch (store.aiStatus) {
+    case 'fallback':
+      return 'background:#FAEEDA;border-color:#FAC775;color:#854F0B;'
+    case 'local-rule':
+      return 'background:#f1efe8;border-color:#d3d1c7;color:#5f5e5a;'
+    case 'error':
+      return 'background:#FCEBEB;border-color:#F7C1C1;color:#A32D2D;'
+    default:
+      return ''
+  }
 })
 
 const statusTag = computed(() => {
@@ -162,13 +175,13 @@ const statusTag = computed(() => {
     case 'loading':
       return '分析中'
     case 'model':
-      return 'AI 生成'
+      return 'AI 模型'
     case 'fallback':
-      return '系统规则参考'
+      return '服务端规则'
     case 'local-rule':
-      return '本地规则参考'
+      return '本地规则'
     case 'error':
-      return '未生成'
+      return '生成失败'
     default:
       return ''
   }
@@ -176,21 +189,29 @@ const statusTag = computed(() => {
 
 const requestLabel = computed(() => {
   if (isRequesting.value) return '分析中…'
-  if (isBlankProject.value) return '等待项目内容'
   if (store.aiStatus === 'idle') return '获取建议'
   if (store.aiStatus === 'error' || store.aiStatus === 'local-rule') return '重试'
   return '重新获取'
 })
 
-/** 契约 5.3：loading 期间禁止重复点击触发并发请求 */
-function requestSuggestions() {
-  if (isRequesting.value || isBlankProject.value) return
+/** 契约 6.1：只有 RATE_LIMITED 会给具体秒数，这里只做一句静态提示，不做倒计时 */
+const retryAfterText = computed(() => {
+  const seconds = store.aiError?.retryAfterSeconds
+  return typeof seconds === 'number' && seconds > 0 ? `建议等待 ${seconds} 秒后再试` : ''
+})
 
-  void store.refreshRecommendations({ forceRefresh: store.aiStatus !== 'idle' }).catch((error: unknown) => {
-    // store 内部已处理大多数失败，这里只兜住"请求还没发出去就出错"的异常
+/** 契约 5.3：loading 期间禁止重复点击触发并发请求 */
+async function requestSuggestions() {
+  if (isRequesting.value) return
+
+  try {
+    const result = await store.refreshRecommendations({ forceRefresh: store.aiStatus !== 'idle' })
+    if (!result.ok) notifyFailure(result)
+  } catch (error: unknown) {
+    // store 内部已处理绝大多数失败，这里只兜住"请求还没发出去就出错"的异常
     console.warn('[建议] 请求未能完成', error instanceof Error ? error.name : 'unknown')
     store.toast('建议请求没能完成，请稍后再试')
-  })
+  }
 }
 
 /**
@@ -203,49 +224,45 @@ const derived = computed(() => {
   if (!p) return null
 
   const reference = new Date()
+  const tasks = deriveTaskSnapshots(p, reference)
   const evidence = deriveEvidenceSnapshots(p, reference)
   const doubts = deriveDoubtSnapshots(p, reference)
 
   return {
+    /** 任务快照：认领与「确认完成」都用它提供的真实 taskId */
+    tasks,
+    /** 未解决疑问：列表与依据反查共用同一份（只含 open） */
+    doubts,
+    /** evidenceId → 可读内容。展示时间由 domain 格式化，页面不自己拼时间 */
     evidenceById: new Map(
-      evidence.map((item, index) => [
+      evidence.map((item) => [
         item.evidenceId,
-        { id: item.evidenceId, time: p.evidence[index]?.time ?? '', text: item.didWhat },
+        { id: item.evidenceId, time: toDisplayTime(item.createdAt), text: item.didWhat },
       ]),
     ),
     doubtById: new Map(doubts.map((item) => [item.doubtId, { id: item.doubtId, text: item.text }])),
   }
 })
 
+/** 左栏「未解决的疑问」：用结构化疑问的真实 ID（只含 open） */
+const openDoubts = computed(() => derived.value?.doubts ?? [])
+
+/** 切换项目用稳定 projectId，不用数组下标 */
+function onSelectProject(projectId: string) {
+  const result = store.selectProject(projectId)
+  if (!result.ok) notifyFailure(result)
+}
+
+/** 契约 5.4 第 4 条：同一条建议重复点击只认领一次 */
+const claimedIds = ref<string[]>([])
+
 type ClaimState = 'claimable' | 'claimed' | 'draft'
 
-/**
- * 「是否已认领」只看**真实任务**（建议自带的 taskId / draft 幂等键），
- * 不用数组下标，也不靠页面内存里的标记：
- * 认领之后、刷新之后、重新获取建议之后，同一条建议都会稳定显示成「已认领」。
- */
 function claimStateOf(suggestion: Recommendation): ClaimState {
-  const current = project.value
-  if (current !== undefined && findClaimedTaskFor(current, suggestion) !== null) return 'claimed'
-  return suggestion.existingTaskId === null ? 'draft' : 'claimable'
-}
-
-/** 顾问区步骤状态徽标配色 */
-const STEP_STATUS_STYLE: Record<TaskStatus, string> = {
-  todo: 'background:#f1efe8;color:#5f5e5a;border:1px solid #d3d1c7;',
-  doing: 'background:#E6F1FB;color:#185FA5;border:1px solid #B5D4F4;',
-  done: 'background:#E1F5EE;color:#0F6E56;border:1px solid #9FE1CB;',
-}
-
-function stepStatusStyle(status: TaskStatus | undefined): string {
-  return STEP_STATUS_STYLE[status ?? 'todo']
-}
-
-/** 顾问区按钮文案：未开始才可认领，进行中 / 已完成直接显示状态并禁用 */
-function stepClaimLabel(status: TaskStatus | undefined): string {
-  if (status === 'doing') return '进行中'
-  if (status === 'done') return '已完成'
-  return '认领这一步'
+  if (claimedIds.value.includes(suggestion.id)) return 'claimed'
+  // existingTaskId 为 null = 新任务候选（契约 5.4 第 2 条），走 claimTask({ draft })
+  if (suggestion.existingTaskId === null) return 'draft'
+  return 'claimable'
 }
 
 const suggestionViews = computed(() =>
@@ -272,115 +289,65 @@ const suggestionViews = computed(() =>
 )
 
 /**
- * 认领已有任务，或把新任务候选保存为进行中的正式任务。
- *
- * 重复点击直接返回（store 侧同样幂等）：不新建任务、不递增 projectRevision、不重复写盘。
- * 认领成功后按钮状态由真实任务推导，页面不需要自己记 id。
+ * 契约 5.4：建议 → 任务。
+ * - existingTaskId 非空 → claimTask({ taskId })
+ * - existingTaskId 为 null → 新任务候选，claimTask({ draft })，由 store 生成稳定 taskId 并直接置为 doing
+ * 页面不判断任务状态、不自己造任务、不碰进度。
  */
 function claimSuggestion(suggestion: Recommendation) {
-  const current = project.value
-  if (current === undefined) return
+  if (claimedIds.value.includes(suggestion.id)) return
 
-  if (claimStateOf(suggestion) === 'claimed') {
-    store.toast('这条建议已经认领过了，任务在「AI 项目顾问」里（进行中）')
-    return
-  }
-
-  // 建议引用的任务必须真的在当前项目里；找不到（例如服务端引用了别的项目）就按新任务候选处理
-  const existingTaskId =
-    suggestion.existingTaskId !== null &&
-    (current.tasks ?? []).some((task) => task.id === suggestion.existingTaskId)
-      ? suggestion.existingTaskId
-      : null
-
-  const result =
-    existingTaskId === null
-      ? store.claimTask({
+  const input: ClaimTaskInput =
+    suggestion.existingTaskId === null
+      ? {
           draft: {
             title: suggestion.title,
             doneCriteria: suggestion.doneCriteria,
             requestId: suggestion.requestId,
-            basisEvidenceIds: suggestion.basisEvidenceIds,
-            basisDoubtIds: suggestion.basisDoubtIds,
+            basisEvidenceIds: [...suggestion.basisEvidenceIds],
+            basisDoubtIds: [...suggestion.basisDoubtIds],
           },
-        })
-      : store.claimTask({ taskId: existingTaskId })
+        }
+      : { taskId: suggestion.existingTaskId }
 
-  if (!result.ok) store.toast(result.message)
-}
-
-/** 顾问区：按 taskId 认领（不用下标）；状态由真实任务驱动 */
-function claimStep(step: SuggestedStep) {
-  const taskId = step.taskId
-  if (taskId === undefined) {
-    store.toast('这条步骤没有对应的任务，请先获取建议')
+  const result = store.claimTask(input)
+  if (!result.ok) {
+    notifyFailure(result)
     return
   }
-  const result = store.claimTask({ taskId })
-  if (!result.ok) store.toast(result.message)
+  claimedIds.value = [...claimedIds.value, suggestion.id]
 }
 
-/** 顾问区：按 taskId 就这条任务提问（回复为本地演示文案） */
-function askStep(step: SuggestedStep) {
-  const taskId = step.taskId
-  if (taskId === undefined) {
-    store.toast('这条步骤没有对应的任务，请先获取建议')
+/** 中栏「AI 项目顾问」的步骤卡：同样走 claimTask，不用下标版 wrapper */
+function claimStepByIndex(index: number) {
+  const task = derived.value?.tasks[index]
+  if (task === undefined) {
+    store.toast('该任务已经不存在，请重新获取建议')
     return
   }
-  store.askAboutStep(taskId)
+  const result = store.claimTask({ taskId: task.taskId })
+  if (!result.ok) notifyFailure(result)
 }
 
-/* ------------------------------------------------- 项目基本信息（M2-A） */
-
-/**
- * 数据层（store action / 接口适配）尚未接入：表单已按契约 13.1 就位，
- * 但页面没有真实的保存动作，因此禁用保存并说明原因——不展示假成功。
- */
-const PROFILE_PENDING_NOTE =
-  '项目基本信息的数据接口尚未接入：可以先填着看，保存暂不可用；接入后会随项目一起保存。'
+/** 契约 3.2：resolveDoubt 用真实 doubtId。重复解决（ALREADY_RESOLVED）保持安静 */
+function resolveDoubtById(doubtId: string) {
+  const result = store.resolveDoubt(doubtId)
+  if (!result.ok) notifyFailure(result)
+}
 
 /* -------------------------------------------------------------- 材料 */
 
-/**
- * M2-A：材料登记 / 解析 / 理解草稿的 store action 尚未接入，
- * 因此上传入口当前只做真实存在的一件事：调用现有的 store.uploadMaterial 登记文件名。
- * 正文不会被读取，界面也不展示"已解析 / 已理解"这类没有发生过的状态。
- */
-const MATERIAL_PENDING_NOTE = '现在只登记文件名：正文不会被读取，解析与理解草稿将在数据层接入后开放。'
-const materialNotice = ref('')
-const materialBusy = ref(false)
-/** 真实阶段：只有动作真的成功才会前进（当前只可能到「文件名已登记」） */
-const materialStage = ref<'idle' | 'registered' | 'uploading' | 'parsed' | 'understanding' | 'error'>('idle')
+const manualInput = ref<HTMLInputElement | null>(null)
+const dataInput = ref<HTMLInputElement | null>(null)
+const otherInput = ref<HTMLInputElement | null>(null)
 
-/** 未登记过任何文件时显示通用说明；登记成功后换成具体结果（仍然是"只登记文件名"） */
-const materialsPendingNotice = computed(() =>
-  materialNotice.value !== '' ? materialNotice.value : MATERIAL_PENDING_NOTE,
-)
-
-// 切换项目时材料状态回到初始值，不把上一个项目的阶段带过来
-watch(
-  () => project.value?.projectId,
-  () => {
-    materialNotice.value = ''
-    materialStage.value = 'idle'
-  },
-)
-
-function registerMaterialName(payload: { file: File; type: MaterialFileType }) {
-  if (materialBusy.value) return
-  materialBusy.value = true
-  try {
-    store.uploadMaterial('材料', payload.file.name)
-    materialNotice.value = `已登记文件名「${payload.file.name}」；正文尚未读取。`
-    materialStage.value = 'registered'
-  } finally {
-    materialBusy.value = false
-  }
+function upload(type: '实验手册' | '数据集' | '材料', event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  store.uploadMaterial(type, file.name)
+  input.value = ''
 }
-
-/* -------------------------------------------------- 材料理解草稿（M2-A） */
-
-const DRAFT_PENDING_HINT = '材料接口接入后，上传 MD 或 TXT 就能在这里看到理解草稿，并逐条确认。'
 
 function materialStyle(type: string) {
   if (type === '实验手册') return 'background:#EEEDFE;color:#3C3489;border:1px solid #CECBF6;'
@@ -395,20 +362,10 @@ const chatLog = ref<HTMLElement | null>(null)
 
 async function send() {
   const text = chat.value
-  if (!text.trim() || store.chatLoading) return
+  if (!text.trim()) return
   chat.value = ''
-  await store.sendChat(text)
+  store.sendChat(text)
   await scrollChat()
-}
-
-/**
- * 聊天回答来自系统规则时，在署名后补一句人话原因。
- * 与建议区共用同一份文案表，聊天里也不会出现内部错误码。
- */
-function chatFallbackNote(reason: string | null | undefined): string {
-  if (reason === null || reason === undefined || reason === '') return ''
-  const text = FALLBACK_REASON_TEXT[reason as AdvisorFallbackReason] ?? '系统规则参考'
-  return ` · ${text}`
 }
 
 async function scrollChat() {
@@ -420,55 +377,141 @@ watch(() => project.value?.chat.length, scrollChat)
 
 /* -------------------------------------------------------- 提交证据 */
 
-const evidenceForm = ref<InstanceType<typeof EvidenceForm> | null>(null)
-const evidenceSubmitting = ref(false)
-const savedEvidenceAt = ref('')
-const savedEvidenceHint = ref('')
+/**
+ * 契约 3.2 / 2.3：证据表单直接用结构化字段。
+ * `taskId` 为空串表示「不关联任务」（对应快照里的 null）。
+ */
+const form = reactive({
+  taskId: '',
+  didWhat: '',
+  foundWhat: '',
+  stillUnsure: '',
+  attachmentName: null as string | null,
+})
+
+const evidenceInput = ref<HTMLInputElement | null>(null)
+const submitting = ref(false)
+/** 最近一次证据保存成功的展示时间（契约 5.2：证据已保存要可见） */
+const lastSavedAt = ref('')
+
+/**
+ * 幂等键：一次真正的提交只生成一次。
+ * 提交失败时保留它，重复点击会复用同一个 submissionId（store 侧命中即不重复写入）；
+ * 保存成功后作废，下一次提交重新生成。
+ */
+let pendingSubmissionId: string | null = null
+
+function newSubmissionId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+  return `sub-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+}
+
+/** 任务下拉：结构化任务列表（真实 taskId），状态只用来做展示后缀 */
+const taskOptions = computed(() => {
+  const tasks = derived.value?.tasks ?? []
+  return [
+    ...tasks.map((task) => ({
+      value: task.taskId,
+      label: task.title + (task.status === 'done' ? '（已完成）' : task.status === 'doing' ? '（进行中）' : ''),
+    })),
+    { value: '', label: '其他进展（不关联任务）' },
+  ]
+})
+
+const selectedTask = computed(
+  () => (derived.value?.tasks ?? []).find((task) => task.taskId === form.taskId) ?? null,
+)
+
+/**
+ * 「确认完成」是否可用。
+ * 这里只做按钮可用性提示；真正的状态规则（只允许 doing → done）在 store 里。
+ */
+const canComplete = computed(() => selectedTask.value !== null && selectedTask.value.status === 'doing')
 
 watch(
   () => project.value?.projectId,
   () => {
-    savedEvidenceAt.value = ''
-    savedEvidenceHint.value = ''
+    // 切换项目：清掉上一次的认领记录、表单与幂等键
+    claimedIds.value = []
+    pendingSubmissionId = null
+    lastSavedAt.value = ''
+    form.taskId = taskOptions.value[0]?.value ?? ''
+    form.didWhat = ''
+    form.foundWhat = ''
+    form.stillUnsure = ''
+    form.attachmentName = null
   },
+  { immediate: true },
 )
 
-async function submitEvidence(input: SubmitEvidenceInput) {
-  if (evidenceSubmitting.value) return
-  evidenceSubmitting.value = true
+function pickEvidenceFile(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  // MVP 只记文件名，不上传文件本身
+  form.attachmentName = file.name
+}
+
+/**
+ * 契约 3.2：submitEvidence。
+ * - complete: false → 只保存证据，必要时生成未解决疑问，不把任务改成 done；
+ * - complete: true  → 校验通过后由 store 把进行中的任务置为 done。
+ * 失败一律保留表单内容。
+ */
+async function submitEvidence(complete: boolean) {
+  if (submitting.value) return
+  submitting.value = true
+
   try {
-    const result = await store.submitEvidence(input)
-    if (result.ok) {
-      evidenceForm.value?.reset()
-      savedEvidenceAt.value = new Date().toLocaleTimeString('zh-CN', {
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-      })
-      const usedRuleRecommendation = store.aiStatus === 'fallback' || store.aiStatus === 'local-rule'
-      savedEvidenceHint.value = usedRuleRecommendation
-        ? '建议暂时使用规则结果'
-        : store.aiStatus === 'error'
-          ? '建议生成失败，请查看建议区并重试'
-          : '建议由 AI 模型生成'
-      if (store.aiStatus !== 'model') {
-        store.toast(`证据已保存，${savedEvidenceHint.value}`)
-      }
-    } else {
-      // 失败时不重置组件，保留用户已经填写的内容以便修正后重试。
-      store.toast(result.message)
+    if (pendingSubmissionId === null) pendingSubmissionId = newSubmissionId()
+
+    const result = await store.submitEvidence({
+      submissionId: pendingSubmissionId,
+      taskId: form.taskId === '' ? null : form.taskId,
+      didWhat: form.didWhat,
+      foundWhat: form.foundWhat,
+      stillUnsure: form.stillUnsure,
+      attachmentName: form.attachmentName,
+      complete,
+    })
+
+    if (!result.ok) {
+      // 保留已填写内容（STORAGE_FULL / INVALID_INPUT 尤其重要）
+      notifyFailure(result)
+      return
     }
-  } catch (error: unknown) {
-    console.warn('[证据] 提交未能完成', error instanceof Error ? error.name : 'unknown')
-    store.toast('证据没有保存，请稍后重试')
+
+    // 保存成功：作废幂等键、清空输入（任务选择保留，方便连着记录下一条）
+    pendingSubmissionId = null
+    lastSavedAt.value = toDisplayTime(new Date().toISOString())
+    form.didWhat = ''
+    form.foundWhat = ''
+    form.stillUnsure = ''
+    form.attachmentName = null
   } finally {
-    evidenceSubmitting.value = false
+    submitting.value = false
   }
 }
 
-const openDoubts = computed(() =>
-  (project.value?.doubtRecords ?? []).filter((doubt) => doubt.status === 'open'),
-)
+/** 契约 5.2：证据保存结果与建议结果要同时可见 */
+const adviceNote = computed(() => {
+  switch (store.aiStatus) {
+    case 'loading':
+      return '正在重新判断下一步…'
+    case 'model':
+      return '下一步建议来自 AI 模型'
+    case 'fallback':
+      return `建议来自服务端规则（${reasonText.value}）`
+    case 'local-rule':
+      return `建议来自本地规则（${reasonText.value}）`
+    case 'error':
+      return `建议没有生成出来：${reasonText.value}`
+    default:
+      return ''
+  }
+})
 </script>
 
 <template>
@@ -479,7 +522,7 @@ const openDoubts = computed(() =>
   <div v-else>
     <!-- 穿插可视化①：流程条 -->
     <div class="card">
-      <div class="card-b" style="padding: 10px 14px 4px">
+      <div class="card-b" style="padding:10px 14px 4px;">
         <div class="flow">
           <template v-for="(node, index) in flowNodes" :key="index">
             <div class="flow-node" :class="node.s">
@@ -495,46 +538,29 @@ const openDoubts = computed(() =>
     <div class="stu-grid">
       <!-- ---------------------------------------------------------- 左栏 -->
       <div>
-        <div class="card" style="margin-bottom: 14px">
+        <div class="card" style="margin-bottom:14px;">
           <div class="card-h">我的项目</div>
           <div class="card-b">
             <select
               class="proj-select"
               :value="project.projectId"
-              @change="store.selectProject(($event.target as HTMLSelectElement).value)"
+              @change="onSelectProject(($event.target as HTMLSelectElement).value)"
             >
               <option v-for="item in store.projects" :key="item.projectId" :value="item.projectId">
                 {{ item.name }}
               </option>
             </select>
-            <div style="font-size: 12px; color: #888780; line-height: 1.7; margin-bottom: 8px">
+            <div style="font-size:12px;color:#888780;line-height:1.7;margin-bottom:8px;">
               {{ project.group }} · {{ project.members }}<br />{{ project.updated }}
             </div>
-            <button class="btn" style="width: 100%" @click="store.showCreate()">＋ 新建项目</button>
+            <button class="btn" style="width:100%;" @click="store.showCreate()">＋ 新建项目</button>
           </div>
         </div>
 
-        <div class="card" style="margin-bottom: 14px">
-          <div class="card-h">
-            项目基本信息
-            <span class="tag" style="background: #f1efe8; color: #5f5e5a; border: 1px solid #d3d1c7">
-              即将开放
-            </span>
-          </div>
-          <div class="card-b">
-            <ProjectProfileForm
-              :profile="null"
-              :disabled="true"
-              :disabled-note="PROFILE_PENDING_NOTE"
-              :project-key="project.projectId"
-            />
-          </div>
-        </div>
-
-        <div class="card" style="margin-bottom: 14px">
+        <div class="card" style="margin-bottom:14px;">
           <div class="card-h">
             项目资料
-            <span class="tag" style="background: #eeedfe; color: #3c3489; border: 1px solid #cecbf6">
+            <span class="tag" style="background:#EEEDFE;color:#3C3489;border:1px solid #CECBF6;">
               AI 追踪依据
             </span>
           </div>
@@ -544,28 +570,43 @@ const openDoubts = computed(() =>
                 <span class="mat-name" :title="m.name">{{ m.name }}</span>
                 <span class="tag mat-tag" :style="materialStyle(m.type)">{{ m.type }}</span>
               </div>
-              <p class="mat-note">以上只登记了文件名，正文没有被读取。</p>
             </div>
-            <div v-else class="empty" style="padding: 4px 0 8px">
-              还没有材料。上传 MD 或 TXT 后会先登记文件名；正文解析与理解草稿将在数据层接入后开放。
+            <div v-else class="empty" style="padding:4px 0 8px;">
+              还没有上传材料。上传实验手册或数据集后，AI 会解析内容并更精准地追踪步骤。
             </div>
 
-            <MaterialUploader
-              :stage="materialStage"
-              :busy="materialBusy"
-              :register-only="true"
-              :notice="materialsPendingNotice"
-              @upload="registerMaterialName"
-            />
+            <div class="up-row">
+              <button class="btn" @click="manualInput?.click()">＋手册</button>
+              <button class="btn" @click="dataInput?.click()">＋数据</button>
+              <button class="btn" @click="otherInput?.click()">＋其他</button>
+            </div>
+            <input ref="manualInput" type="file" style="display:none" @change="upload('实验手册', $event)" />
+            <input ref="dataInput" type="file" style="display:none" @change="upload('数据集', $event)" />
+            <input ref="otherInput" type="file" style="display:none" @change="upload('材料', $event)" />
           </div>
         </div>
 
-        <div class="card" style="margin-bottom: 14px">
+        <div class="card" style="margin-bottom:14px;">
+          <div class="card-h">项目基本信息（目标 / 预期结果 / 成员 / 研究周期）</div>
+          <div class="card-b">
+            <ProjectProfileForm />
+          </div>
+        </div>
+
+        <div class="card" style="margin-bottom:14px;">
+          <div class="card-h">材料与理解草稿</div>
+          <div class="card-b">
+            <MaterialPanel />
+            <UnderstandingDraft />
+          </div>
+        </div>
+
+        <div class="card" style="margin-bottom:14px;">
           <div class="card-h">里程碑进度</div>
           <div class="card-b">
             <div v-for="(m, i) in project.ms" :key="i" class="milestone">
               <div :class="badge(m, i).cls">{{ badge(m, i).text }}</div>
-              <div style="flex: 1">
+              <div style="flex:1">
                 <div class="ms-name">{{ m.t }}</div>
                 <div class="ms-sub">{{ m.sub }}</div>
                 <div v-if="m.s === 'cur'" class="ms-bar"><i :style="`width:${m.p}%`"></i></div>
@@ -574,9 +615,9 @@ const openDoubts = computed(() =>
           </div>
         </div>
 
-        <div class="card" style="margin-bottom: 14px">
+        <div class="card" style="margin-bottom:14px;">
           <div class="card-h">近 4 周活跃度</div>
-          <div class="card-b" style="padding: 8px">
+          <div class="card-b" style="padding:8px;">
             <div class="week-bars">
               <div v-for="(bar, i) in weekBars" :key="i" class="wb" :class="{ hot: bar.hot }">
                 <b>{{ bar.value }}</b>
@@ -590,22 +631,25 @@ const openDoubts = computed(() =>
         <div class="card">
           <div class="card-h">
             未解决的疑问
-            <span class="tag" style="background: #faeeda; color: #854f0b; border: 1px solid #fac775">{{
-              openDoubts.length
-            }}</span>
+            <span
+              class="tag"
+              style="background:#FAEEDA;color:#854F0B;border:1px solid #FAC775;"
+            >{{ openDoubts.length }}</span>
           </div>
-          <div class="card-b" style="padding-top: 6px">
-            <div v-for="doubt in openDoubts" :key="doubt.id" class="doubt">
-              {{ doubt.text }}
+          <div class="card-b" style="padding-top:6px;">
+            <div v-for="d in openDoubts" :key="d.doubtId" class="doubt">
+              {{ d.text }}
               <button
                 class="btn"
-                style="margin-top: 6px; padding: 3px 10px; font-size: 11.5px"
-                @click="store.resolveDoubt(doubt.id)"
+                style="margin-top:6px;padding:3px 10px;font-size:11.5px;"
+                @click="resolveDoubtById(d.doubtId)"
               >
                 标记已解决
               </button>
             </div>
-            <div v-if="!openDoubts.length" class="empty">暂无疑问。推进中产生的不确定会记录在这里。</div>
+            <div v-if="!openDoubts.length" class="empty">
+              暂无疑问。推进中产生的不确定会记录在这里。
+            </div>
           </div>
         </div>
       </div>
@@ -613,169 +657,114 @@ const openDoubts = computed(() =>
       <!-- ---------------------------------------------------------- 中栏 -->
       <div>
         <!-- 建议区：六种状态与文案见 docs/contracts.md 5.3，请求只经过 store -->
-        <div class="card" style="margin-bottom: 14px">
+        <div class="card" style="margin-bottom:14px;">
           <div class="card-h">
             AI 下一步建议
-            <span class="tag" style="background: #eeedfe; color: #3c3489; border: 1px solid #cecbf6">
-              候选建议
+            <span class="tag" style="background:#E6F1FB;color:#185FA5;border:1px solid #B5D4F4;">
+              {{ statusTag }}
             </span>
           </div>
           <div class="card-b">
-            <div class="card-note">
-              这里是候选建议：认领之后才会变成项目里的任务，并出现在下方「AI 项目顾问」。
-            </div>
-            <AiStatus
-              :tone="statusTone"
-              :tag="statusTag"
-              :message="statusLine"
-              :action-label="requestLabel"
-              :busy="isRequesting || isBlankProject"
-              @retry="requestSuggestions"
-            />
+            <div class="ai-banner" :style="statusStyle">{{ statusLine }}</div>
 
-            <RecommendationList :items="suggestionViews" @claim="claimSuggestion" />
+            <div class="sc-actions" style="margin-top:0;margin-bottom:4px;">
+              <button class="btn primary" :disabled="isRequesting" @click="requestSuggestions">
+                {{ requestLabel }}
+              </button>
+              <span v-if="retryAfterText" class="hint">{{ retryAfterText }}</span>
+            </div>
+
+            <SuggestionCard
+              v-for="view in suggestionViews"
+              :key="view.suggestion.id"
+              :suggestion="view.suggestion"
+              :index="view.index"
+              :claim-state="view.claimState"
+              :evidence="view.evidence"
+              :doubts="view.doubts"
+              @claim="claimSuggestion(view.suggestion)"
+            />
 
             <div
               v-if="!suggestionViews.length && !isRequesting && aiStatus !== 'error'"
               class="empty"
-              style="padding: 4px 0 0"
+              style="padding:4px 0 0;"
             >
-              {{
-                aiStatus === 'idle'
-                  ? isBlankProject
-                    ? '空白项目还没有可分析的依据：先补充材料或项目目标。'
-                    : '点上方按钮开始。'
-                  : '这次没有生成建议，可以点上方按钮重新获取。'
-              }}
+              {{ aiStatus === 'idle' ? '点上方按钮开始。' : '这次没有生成建议，可以点上方按钮重新获取。' }}
             </div>
           </div>
         </div>
 
-        <div class="card" style="margin-bottom: 14px">
+        <div class="card" style="margin-bottom:14px;">
           <div class="card-h">
             AI 项目顾问
-            <span class="tag" style="background: #e6f1fb; color: #185fa5; border: 1px solid #b5d4f4">
-              项目真实任务
+            <span class="tag" style="background:#EEEDFE;color:#3C3489;border:1px solid #CECBF6;">
+              基于项目状态与上传材料
             </span>
           </div>
           <div class="card-b">
-            <div class="card-note">
-              这里只显示已经进入项目的任务与状态（未开始 / 进行中 / 已完成）； 候选建议请在「AI
-              下一步建议」里认领。
-            </div>
             <div class="ai-banner">{{ project.banner }}</div>
 
-            <div v-if="!project.steps.length" class="empty">
-              还没有任务。先在上方「AI 下一步建议」里认领一步，任务会出现在这里并显示进度。
-            </div>
-
-            <div class="advisor-steps">
-              <div
-                v-for="(step, index) in project.steps"
-                :key="step.taskId ?? `${step.t}-${index}`"
-                class="step-card"
-              >
-                <div class="sc-top">
-                  <div class="sc-no">{{ index + 1 }}</div>
-                  <div class="sc-title">{{ step.t }}</div>
-                  <span class="tag sc-owner" :style="stepStatusStyle(step.status)">
-                    {{ taskStatusText(step.status) }}
-                  </span>
-                </div>
-                <div v-if="step.why" class="sc-why"><b>为什么现在做：</b>{{ step.why }}</div>
-                <div v-if="step.done" class="sc-done">完成标准：{{ step.done }}</div>
-                <div class="sc-actions">
-                  <button class="btn primary" :disabled="step.status !== 'todo'" @click="claimStep(step)">
-                    {{ stepClaimLabel(step.status) }}
-                  </button>
-                  <button class="btn" @click="askStep(step)">就此提问</button>
-                  <button class="btn" @click="router.push('/papers')">相关论文</button>
-                </div>
+            <div v-for="(s, i) in project.steps" :key="i" class="step-card">
+              <div class="sc-top">
+                <div class="sc-no">{{ i + 1 }}</div>
+                <div class="sc-title">{{ s.t }}</div>
+                <span
+                  class="tag sc-owner"
+                  style="background:#E6F1FB;color:#185FA5;border:1px solid #B5D4F4;"
+                >建议：{{ s.owner }}</span>
+              </div>
+              <div class="sc-why"><b>为什么现在做：</b>{{ s.why }}</div>
+              <div class="sc-done">{{ s.done }}</div>
+              <div class="sc-actions">
+                <button class="btn primary" @click="claimStepByIndex(i)">认领这一步</button>
+                <button class="btn" @click="store.askAboutStep(i)">就此提问</button>
+                <button class="btn" @click="router.push('/papers')">相关论文</button>
               </div>
             </div>
           </div>
         </div>
 
-        <div class="card" style="margin-bottom: 14px">
-          <div class="card-h">
-            材料理解草稿
-            <span class="tag" style="background: #eeedfe; color: #3c3489; border: 1px solid #cecbf6">
-              需逐条确认
-            </span>
-          </div>
-          <div class="card-b">
-            <UnderstandingDraftCard
-              :draft="null"
-              :loading="false"
-              :has-material="project.materials.length > 0"
-              :can-generate="false"
-              :disabled="true"
-              :empty-hint="DRAFT_PENDING_HINT"
-              :current-material-version="null"
-            />
-          </div>
-        </div>
-
-        <!-- 项目地图已经独立成页面：工作台只留入口，不重复画同一张图 -->
-        <div class="card" style="margin-bottom: 14px">
+        <!-- 穿插可视化②：项目地图 -->
+        <div class="card" style="margin-bottom:14px;">
           <div class="card-h">
             项目地图
-            <span class="tag" style="background: #e6f1fb; color: #185fa5; border: 1px solid #b5d4f4"
-              >独立页面</span
-            >
+            <span
+              class="tag"
+              style="background:#E6F1FB;color:#185FA5;border:1px solid #B5D4F4;"
+            >{{ project.short }}</span>
           </div>
           <div class="card-b">
-            <div class="card-note">里程碑与任务状态已经挪到「项目地图」页面，避免和工作台重复展示。</div>
-            <button class="btn primary" @click="router.push('/map')">查看项目地图</button>
+            <ProjectMindMap :project="project" />
+            <div style="font-size:12px;color:#888780;text-align:center;margin-top:4px;">
+              左侧为里程碑，右侧为 AI 正在追踪的当前实际步骤 · 绿=已完成，蓝=进行中，灰=未开始
+            </div>
           </div>
         </div>
 
         <div class="card">
           <div class="card-h">
             向顾问提问
-            <span class="tag" style="background: #f1efe8; color: #5f5e5a; border: 1px solid #d3d1c7">
-              AI 项目顾问
+            <span class="tag" style="background:#f1efe8;color:#5f5e5a;border:1px solid #d3d1c7;">
+              答疑模式 · 给提示不给答案
             </span>
           </div>
           <div class="card-b">
-            <div class="chat-notice">
-              AI 会结合当前项目的任务、证据、疑问和历史对话回答；上传的文件正文不会自动参与回答。
-              对话按项目保存在本地。
-            </div>
             <div ref="chatLog" class="chat-log">
-              <div v-if="!project.chat.length" class="empty" style="padding: 4px 0">
-                还没有对话。把你卡住的地方写下来，AI 会结合当前项目的任务、证据和疑问回答。
-              </div>
               <div v-for="(msg, i) in project.chat" :key="i" class="msg" :class="{ me: msg.me }">
                 <div>
-                  <div class="who" :style="msg.me ? 'text-align:right;' : ''">
-                    {{ msg.who
-                    }}<span v-if="msg.source === 'fallback' && msg.fallbackReason">{{
-                      chatFallbackNote(msg.fallbackReason)
-                    }}</span>
-                  </div>
+                  <div class="who" :style="msg.me ? 'text-align:right;' : ''">{{ msg.who }}</div>
                   <div class="bubble">{{ msg.text }}</div>
                 </div>
               </div>
-              <div v-if="store.chatLoading" class="msg" aria-live="polite">
-                <div>
-                  <div class="who">AI 正在思考</div>
-                  <div class="bubble">正在结合当前项目状态生成回答…</div>
-                </div>
-              </div>
-              <div v-if="store.chatError" class="chat-error" role="alert">{{ store.chatError }}</div>
             </div>
             <div class="chat-input">
               <input
                 v-model="chat"
-                :disabled="store.chatLoading"
-                :maxlength="MAX_ADVISOR_CHAT_QUESTION_LENGTH"
-                placeholder="描述你卡住的问题…"
+                placeholder="描述你卡住的问题，AI 会结合项目状态回答…"
                 @keydown.enter="send"
               />
-              <button class="btn primary" :disabled="store.chatLoading || !chat.trim()" @click="send">
-                {{ store.chatLoading ? '思考中…' : '发送' }}
-              </button>
+              <button class="btn primary" @click="send">发送</button>
             </div>
           </div>
         </div>
@@ -783,33 +772,75 @@ const openDoubts = computed(() =>
 
       <!-- ---------------------------------------------------------- 右栏 -->
       <div>
-        <div class="card" style="margin-bottom: 14px">
+        <div class="card" style="margin-bottom:14px;">
           <div class="card-h">提交步骤证据</div>
-          <div class="card-b">
-            <div v-if="savedEvidenceAt" class="evidence-save-status" role="status" aria-live="polite">
-              <strong>证据已保存（{{ savedEvidenceAt }}）</strong>
-              <span> · {{ savedEvidenceHint }}</span>
+          <div class="card-b evi-form">
+            <label>对应任务</label>
+            <select v-model="form.taskId" class="proj-select" style="margin-bottom:0;">
+              <option v-for="opt in taskOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+            </select>
+
+            <label>完成了什么</label>
+            <textarea v-model="form.didWhat" placeholder="一句话说明产出"></textarea>
+
+            <label>发现了什么 <small>（意外收获、异常现象都算）</small></label>
+            <textarea v-model="form.foundWhat"></textarea>
+
+            <label>还有什么不确定</label>
+            <textarea
+              v-model="form.stillUnsure"
+              placeholder="写下来的会进入左侧「未解决的疑问」"
+            ></textarea>
+
+            <div
+              class="upbox"
+              style="margin-top:12px;"
+              :class="{ has: form.attachmentName }"
+              @click="evidenceInput?.click()"
+            >
+              <template v-if="form.attachmentName">✓ 附件：{{ form.attachmentName }}</template>
+              <template v-else>＋ 附加 notebook、截图或结果文件</template>
             </div>
-            <EvidenceForm
-              ref="evidenceForm"
-              :tasks="project.tasks"
-              :project-key="project.projectId"
-              :submitting="evidenceSubmitting"
-              @submit="submitEvidence"
-            />
+            <input ref="evidenceInput" type="file" style="display:none" @change="pickEvidenceFile" />
+
+            <!-- 契约 4.1：记录进展与确认完成是两个不同动作 -->
+            <button class="submit" :disabled="submitting" @click="submitEvidence(false)">
+              记录进展（不完成任务）
+            </button>
+            <button
+              class="submit"
+              style="margin-top:8px;background:#0F6E56;"
+              :disabled="submitting || !canComplete"
+              @click="submitEvidence(true)"
+            >
+              确认完成这一步
+            </button>
+            <div v-if="!canComplete" class="evi-hint">
+              确认完成需要先认领一个进行中的任务。只想留下记录就用上面的「记录进展」。
+            </div>
+
+            <!-- 契约 5.2：证据保存结果与建议结果同时可见 -->
+            <div v-if="lastSavedAt" class="evi-saved">
+              ✓ 证据已于 {{ lastSavedAt }} 保存（建议失败也不会丢失）
+              <template v-if="adviceNote"><br />{{ adviceNote }}</template>
+              <template v-if="store.aiStatus === 'error' || store.aiStatus === 'local-rule'">
+                <br />可以在「AI 下一步建议」处重试。
+              </template>
+              <template v-if="retryAfterText"><br />{{ retryAfterText }}</template>
+            </div>
           </div>
         </div>
 
         <div class="card">
           <div class="card-h">最近证据</div>
-          <div class="card-b" style="padding-top: 8px">
+          <div class="card-b" style="padding-top:8px;">
             <div class="tl">
               <div v-for="(item, i) in project.evidence" :key="i" class="tl-item">
                 <div class="tl-time">{{ item.time }}</div>
                 <div class="tl-text">{{ item.text }}</div>
                 <div class="tl-who">{{ item.who }}</div>
               </div>
-              <div v-if="!project.evidence.length" class="empty" style="padding-left: 0">
+              <div v-if="!project.evidence.length" class="empty" style="padding-left:0;">
                 还没有证据记录。完成第一步后，记得回来提交——AI 会根据你的证据更新项目状态，再给出下一步建议。
               </div>
             </div>
@@ -821,50 +852,33 @@ const openDoubts = computed(() =>
 </template>
 
 <style scoped>
-.card-note {
-  font-size: 11.5px;
-  color: #888780;
-  line-height: 1.6;
-  margin-bottom: 8px;
-}
-
-.chat-notice {
-  border: 1px solid #d3d1c7;
-  border-radius: 10px;
-  padding: 8px 10px;
-  margin-bottom: 10px;
-  background: #f8f7f4;
-  color: #5f5e5a;
-  font-size: 11.5px;
-  line-height: 1.6;
-}
-
-.chat-error {
+/* 只补两个新增区块的样式，其余沿用全局 platform.css 与设计稿配色 */
+.evi-hint {
   margin-top: 8px;
-  border: 1px solid #f2a7a0;
-  border-radius: 8px;
-  padding: 7px 9px;
-  color: #a32d2d;
-  background: #fff4f2;
-  font-size: 12px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: #888780;
 }
 
-.evidence-save-status {
-  border: 1px solid #9fe1cb;
-  border-radius: 10px;
-  padding: 8px 10px;
-  margin-bottom: 12px;
+.evi-saved {
+  margin-top: 10px;
+  padding: 8px 12px;
+  border-radius: 8px;
   background: #e1f5ee;
+  border: 1px solid #9fe1cb;
   color: #0f6e56;
   font-size: 12px;
-  line-height: 1.5;
+  line-height: 1.7;
 }
 
-/* 旧材料记录：只登记过文件名，正文没有被读取 */
-.mat-note {
-  margin: 6px 0 8px;
+.submit:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.hint {
   font-size: 11.5px;
   color: #888780;
-  line-height: 1.6;
+  align-self: center;
 }
 </style>
