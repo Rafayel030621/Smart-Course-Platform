@@ -1,11 +1,27 @@
 import type { Template } from '@/types/platform'
 
 /**
- * 课程题目模板库
+ * 课程题目模板库（owner：吴佳璐）
  * ----------------------------------------------------------------------------
- * 数据与 platform-ui-mockup(3).html 里的 TOPICS / TEMPLATES 完全一致。
- * 创建项目时按题目实例化：里程碑、启动时的疑问、AI 顾问的开场说明、
- * 最初的三步建议（含「为什么现在做」与完成标志）、以及三条论文检索方向。
+ * 原始数据与 platform-ui-mockup(3).html 里的 TOPICS / TEMPLATES 一致。
+ *
+ * **当前用途（2026-10-08 起；见《项目文档 v2.0》决策 1）**：
+ * 新项目一律**空白创建**，不再注入模板任务和里程碑。因此本文件的角色已分成两半：
+ *
+ *   1. `TOPICS`（9 个题目名称）——**仍在产品中使用**：创建项目时的题目名校验
+ *      （`src/stores/workbench.ts`）与论文推荐页的题目匹配都依赖它。
+ *   2. `TEMPLATES`（每套题的里程碑 / 启动疑问 / 开场说明 / 三步建议 / 论文方向）——
+ *      **不再参与项目创建流程**，当前只有两类消费者：
+ *        · `src/services/papers.ts` 读取 `papers`，论文推荐页仍用它拼检索提示词；
+ *        · 测试与样例数据（`tests/content/**`、`tests/fixtures/ai/**`、`scripts/validate-topics.mjs`）。
+ *
+ * 处置约定：
+ *   - 保留现有内容作为**示例数据**，不要为了让项目地图「看起来有内容」而恢复模板注入；
+ *   - `steps[].owner` 只是占位（`成员A/B/C`），**不得改写为真实姓名**——契约规定
+ *     `Task.owner` 在 MVP 阶段恒为 `null`，这个字段只用于生成 `suggestedOwner` 做展示；
+ *   - v2 的论文检索内容升级（吴-5）不再往 `TEMPLATES` 里堆，放到 `src/data/paperPrompts.ts`。
+ *
+ * 相关结论见 `docs/ai/prompt-spec.md` 第 11 节「附录 A：题目资产盘点」。
  */
 
 export const TOPICS: string[] = [
