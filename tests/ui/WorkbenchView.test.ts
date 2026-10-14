@@ -760,6 +760,45 @@ describe('WorkbenchView', () => {
 
   /* ----------------------------------------------------- M2-A：三张新卡片 */
 
+  /** 材料接口成功响应：一份 md 拆成两段（身份字段回显请求，否则会被判过期） */
+  function materialUploadSuccess(request: Record<string, unknown>): Response {
+    return new Response(
+      JSON.stringify({
+        contractVersion: '1.0',
+        requestId: request.requestId,
+        projectId: request.projectId,
+        projectRevision: request.projectRevision,
+        material: {
+          materialId: request.materialId,
+          projectId: request.projectId,
+          name: request.name,
+          type: 'md',
+          size: 128,
+          encoding: 'utf-8',
+          state: 'parsed',
+          version: request.version,
+          createdAt: '2026-10-14T10:00:00+08:00',
+          updatedAt: '2026-10-14T10:00:00+08:00',
+          failureReason: null,
+        },
+        segmentCount: 2,
+        segments: [
+          { segmentId: 'seg_0', index: 0, startLine: 1, endLine: 4, text: '# 实验手册\n第一段正文。' },
+          { segmentId: 'seg_1', index: 1, startLine: 6, endLine: 9, text: '第二段正文。' },
+        ],
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    )
+  }
+
+  /** 通过工作台的真实上传入口选一个文件 */
+  async function chooseMaterialFile(wrapper: ReturnType<typeof mount>, file: File): Promise<void> {
+    const input = wrapper.get('input.mu-input')
+    Object.defineProperty(input.element, 'files', { value: [file], configurable: true })
+    await input.trigger('change')
+    await flushPromises()
+  }
+
   it('M2-A：工作台出现项目基本信息、材料入口与材料理解草稿', () => {
     const store = freshStore()
     createProject(store, 'M2-A 界面项目')
@@ -768,10 +807,15 @@ describe('WorkbenchView', () => {
     const text = wrapper.text()
     expect(text).toContain('项目基本信息')
     expect(text).toContain('材料理解草稿')
+    // 材料入口是真实上传组件：只讲 MD / TXT 与大小上限，并把后续批次说清楚
     expect(text).toContain('选择 MD / TXT 文件')
-    // 数据层未接入必须说清楚，不能假装能保存 / 能解析
-    expect(text).toContain('保存暂不可用')
-    expect(text).toContain('材料接口接入后')
+    expect(text).toContain('CSV、XLSX 将在下一批支持')
+    // 数据层已接入：不再出现"保存暂不可用 / 材料接口接入后"这类占位说法
+    expect(text).not.toContain('保存暂不可用')
+    expect(text).not.toContain('材料接口接入后')
+    // 工作台不再内嵌完整地图
+    expect(text).toContain('查看项目地图')
+    expect(wrapper.find('svg').exists()).toBe(false)
   })
 
   it('M2-A：非法材料格式给中文提示，且不写入项目资料', async () => {
@@ -779,37 +823,269 @@ describe('WorkbenchView', () => {
     createProject(store, '非法文件项目')
     const wrapper = mount(WorkbenchView)
 
-    const input = wrapper.get('input.mu-input')
-    Object.defineProperty(input.element, 'files', {
-      value: [new File(['a,b'], '数据.csv')],
-      configurable: true,
-    })
-    await input.trigger('change')
+    await chooseMaterialFile(wrapper, new File(['a,b'], '数据.csv', { type: 'text/csv' }))
 
     expect(wrapper.get('.mu-error').text()).toContain('当前只支持 MD、TXT')
+    expect(store.materials).toHaveLength(0)
     expect(store.current?.materials).toHaveLength(0)
   })
 
-  it('M2-A：合法 md 只登记文件名，界面不宣称已经解析', async () => {
+  it('M2-A：合法 MD 走真实上传接口，展示解析状态与片段数，并提示可生成草稿', async () => {
     const store = freshStore()
-    createProject(store, '登记文件名项目')
+    createProject(store, '真实上传项目')
+    const bodies: Array<Record<string, unknown>> = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const request = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+        bodies.push(request)
+        return materialUploadSuccess(request)
+      }),
+    )
     const wrapper = mount(WorkbenchView)
 
-    const input = wrapper.get('input.mu-input')
-    Object.defineProperty(input.element, 'files', {
-      value: [new File(['# 实验手册'], '实验手册.md')],
-      configurable: true,
-    })
-    await input.trigger('change')
-    await wrapper.vm.$nextTick()
+    await chooseMaterialFile(wrapper, new File(['# 实验手册\n第一段正文。'], '实验手册.md'))
 
-    expect(store.current?.materials).toHaveLength(1)
-    expect(store.current?.materials[0]?.name).toBe('实验手册.md')
+    // 走的是真实材料接口：文件名与原始字节（base64）都在请求体里
+    expect(bodies).toHaveLength(1)
+    expect(bodies[0]?.name).toBe('实验手册.md')
+    expect(typeof bodies[0]?.contentBase64).toBe('string')
+    expect(String(bodies[0]?.contentBase64)).not.toBe('')
+
+    expect(store.materials).toHaveLength(1)
+    expect(store.materials[0]?.state).toBe('parsed')
+    expect(store.materials[0]?.version).toBe(1)
 
     const text = wrapper.text()
-    expect(text).toContain('已登记文件名「实验手册.md」')
-    expect(text).toContain('以上只登记了文件名')
-    expect(text).not.toContain('解析成功')
+    expect(text).toContain('实验手册.md')
+    expect(text).toContain('已解析')
+    expect(text).toContain('2 个片段')
+    expect(text).toContain('获取理解草稿')
+    expect(wrapper.get('.mu-notice').text()).toContain('解析成功')
+  })
+
+  it('M2-A：上传失败给中文提示，不写入材料，也不清空其它状态', async () => {
+    const store = freshStore()
+    createProject(store, '上传失败项目')
+    const wrapper = mount(WorkbenchView)
+
+    // describe 的默认替身：材料接口返回 400（提示必须是中文，不是报文原文）
+    await chooseMaterialFile(wrapper, new File(['# 实验手册'], '实验手册.md'))
+
+    expect(store.materials).toHaveLength(0)
+    // 上传组件展示中文失败原因与重试入口；页面不再提供"只登记文件名"的降级路径
+    const error = wrapper.get('.mu-error').text()
+    expect(error).toContain('请求内容不合法')
+    expect(error).not.toContain('UI test response')
+    expect(error).not.toContain('INVALID_INPUT')
+    expect(error).not.toContain('projectRevision')
+    expect(wrapper.text()).toContain('上一次没有成功，可以重试')
+    expect(wrapper.findAll('button').some((button) => button.text() === '重试')).toBe(true)
+  })
+
+  it('M2-A：历史只登记文件名的材料如实标注「正文未读取」，不宣称已解析', async () => {
+    const store = freshStore()
+    createProject(store, '登记文件名项目')
+    store.uploadMaterial('实验手册', '实验手册.pdf')
+    const wrapper = mount(WorkbenchView)
+
+    const text = wrapper.text()
+    expect(text).toContain('实验手册.pdf')
+    expect(text).toContain('仅登记，正文未读取')
+    expect(text).toContain('重新上传一份 MD / TXT')
     expect(text).not.toContain('已解析')
+    expect(text).not.toContain('解析成功')
+  })
+
+  /** 理解接口成功响应：回显身份，来源由服务端回填材料名与行号 */
+  function understandingSuccess(request: Record<string, unknown>): Response {
+    const material = request.material as Record<string, unknown>
+    return new Response(
+      JSON.stringify({
+        contractVersion: '1.0',
+        requestId: request.requestId,
+        projectId: request.projectId,
+        projectRevision: request.projectRevision,
+        materialId: material.materialId,
+        materialVersion: material.version,
+        promptVersion: request.promptVersion,
+        source: 'model',
+        fallbackReason: null,
+        notice: null,
+        draft: {
+          goalCandidates: [
+            {
+              itemId: 'cnd_goal_0',
+              text: '用 ERA5 重现极端风浪事件的识别流程',
+              sources: [
+                {
+                  materialId: material.materialId,
+                  materialName: '实验手册.md',
+                  materialVersion: material.version,
+                  segmentId: 'seg_0',
+                  startLine: 1,
+                  endLine: 4,
+                },
+              ],
+            },
+          ],
+          outcomeCandidates: [],
+          dataNotes: [],
+          methodNotes: [],
+          openQuestions: [],
+        },
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    )
+  }
+
+  it('M2-A：生成草稿 → 确认 → 撤销确认，只有已确认内容进入请求上下文', async () => {
+    const store = freshStore()
+    createProject(store, '草稿流程项目')
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+        if (String(input).includes('/api/materials/understanding')) return understandingSuccess(request)
+        if (String(input).includes('/api/materials')) return materialUploadSuccess(request)
+        return new Response(JSON.stringify({ contractVersion: '1.0', requestId: null, code: 'INVALID_INPUT', message: '测试替身', retryable: false, retryAfterSeconds: null }), {
+          status: 400,
+          headers: { 'content-type': 'application/json' },
+        })
+      }),
+    )
+    const wrapper = mount(WorkbenchView)
+
+    await chooseMaterialFile(wrapper, new File(['# 实验手册\n第一段正文。'], '实验手册.md'))
+    const generate = wrapper.findAll('button').find((button) => button.text() === '获取理解草稿')
+    expect(generate).toBeDefined()
+    await generate?.trigger('click')
+    await flushPromises()
+
+    // 草稿默认待确认；来源显示材料名与行号，不显示内部 ID
+    const card = wrapper.get('.dc')
+    expect(card.text()).toContain('用 ERA5 重现极端风浪事件的识别流程')
+    expect(card.text()).toContain('待确认')
+    expect(card.text()).toContain('实验手册.md')
+    expect(card.text()).toContain('第 1–4 行')
+    expect(card.text()).not.toContain('seg_0')
+    expect(card.text()).not.toContain('mat_ui')
+    // 未确认 → 两条请求字段都是空的
+    expect(store.confirmedContext).toEqual([])
+    expect(store.confirmedMaterials).toEqual([])
+
+    const confirm = card.findAll('button').find((button) => button.text() === '确认')
+    expect(confirm).toBeDefined()
+    await confirm?.trigger('click')
+    await flushPromises()
+
+    expect(store.confirmedUnderstandingBlocks).toHaveLength(1)
+    expect(store.confirmedContext).toEqual(['项目目标：用 ERA5 重现极端风浪事件的识别流程'])
+    expect(store.confirmedMaterials).toHaveLength(1)
+    expect(wrapper.get('.dc').text()).toContain('已确认')
+
+    const undo = wrapper.get('.dc').findAll('button').find((button) => button.text() === '撤销确认')
+    expect(undo).toBeDefined()
+    await undo?.trigger('click')
+    await flushPromises()
+
+    expect(store.confirmedUnderstandingBlocks).toHaveLength(0)
+    expect(store.confirmedMaterials).toEqual([])
+    expect(wrapper.get('.dc').text()).toContain('待确认')
+  })
+
+  it('聊天失败：后端报文里的字段名、路径与堆栈都不会出现在页面与提示里', async () => {
+    const store = freshStore()
+    createProject(store, '报文泄露项目')
+    const raw =
+      'Error: ENOENT /var/app/server/src/advisor/service.ts:418 projectRevision 必须是整数\n' +
+      '    at handleChat (/var/app/server/src/routes/chat.ts:27)'
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            contractVersion: '1.0',
+            requestId: null,
+            code: 'INVALID_INPUT',
+            message: raw,
+            retryable: false,
+            retryAfterSeconds: null,
+          }),
+          { status: 400, headers: { 'content-type': 'application/json' } },
+        ),
+      ),
+    )
+    const wrapper = mount(WorkbenchView)
+
+    await wrapper.get('.chat-input input').setValue('这条提问本身是合法的')
+    await wrapper.findAll('button').find((button) => button.text() === '发送')?.trigger('click')
+    await flushPromises()
+
+    const text = visibleTextOf(wrapper)
+    for (const token of ['/var/app', 'service.ts', 'projectRevision', 'INVALID_INPUT', 'at handleChat']) {
+      expect(text).not.toContain(token)
+      expect(store.toastText).not.toContain(token)
+    }
+    // 换成一句用户能看懂的中文
+    expect(wrapper.get('.chat-error').text()).toContain('项目')
+    expectNoInternalTokens(text)
+  })
+
+  it('聊天失败：显示中文原因、保留问题并可以重试', async () => {
+    const store = freshStore()
+    createProject(store, '聊天失败项目')
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new TypeError('Failed to fetch')
+      }),
+    )
+    const wrapper = mount(WorkbenchView)
+
+    await wrapper.get('.chat-input input').setValue('这个方法适合我们的数据吗？')
+    const send = wrapper.findAll('button').find((button) => button.text() === '发送')
+    await send?.trigger('click')
+    // 网络失败会在适配层自动重试 1 次（退避 1 秒），这里等结果出来
+    await vi.waitFor(() => expect(wrapper.find('.chat-error').exists()).toBe(true), {
+      timeout: 3_000,
+    })
+
+    // 中文原因（不暴露错误码与上游原文），问题保留在记录里，不写假回答
+    expect(wrapper.get('.chat-error').text()).toContain('连不上后端服务')
+    expect(wrapper.get('.chat-error').text()).not.toContain('NETWORK_ERROR')
+    expect(store.current?.chat).toHaveLength(1)
+    expect(store.current?.chat[0]?.text).toBe('这个方法适合我们的数据吗？')
+    expect(store.current?.chat.some((message) => message.source !== undefined)).toBe(false)
+
+    // 重试成功：只保留一条问题 + 一条回答，并标明来源
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const request = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+        return new Response(
+          JSON.stringify({
+            contractVersion: '1.0',
+            requestId: request.requestId,
+            projectId: request.projectId,
+            projectRevision: request.projectRevision,
+            source: 'model',
+            fallbackReason: null,
+            answer: '先核对数据的时空覆盖，再决定方法。',
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        )
+      }),
+    )
+    const retry = wrapper.get('.chat-error').findAll('button').find((button) => button.text() === '再问一次')
+    await retry?.trigger('click')
+    await vi.waitFor(() => expect(store.current?.chat.length).toBe(2), { timeout: 3_000 })
+
+    const chat = store.current?.chat ?? []
+    expect(chat).toHaveLength(2)
+    expect(chat[1]?.who).toBe('AI 模型')
+    expect(chat[1]?.source).toBe('model')
+    expect(wrapper.text()).toContain('AI 生成')
+    expect(wrapper.find('.chat-error').exists()).toBe(false)
   })
 })

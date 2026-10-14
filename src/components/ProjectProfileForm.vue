@@ -13,8 +13,10 @@ import type { ProjectProfile } from '@/types/platform'
  * （长度与人数上限由 store 按契约 13.1 校验并返回中文 message）。
  *
  * 表单内容与 store 的同步规则：
- *   - 切项目、或 `projectRevision` 变化（别处改了资料、刷新恢复）时，
- *     一律**以 store 为准**重建草稿，避免页面缓存把新状态盖回去。
+ *   - 切换项目时一律**以 store 为准**重建草稿（不同项目的资料互不相干）；
+ *   - 只有**资料本身**变化（别处改了资料、刷新恢复、自己刚保存成功）才重建草稿；
+ *   - 与资料无关的版本变化（例如认领任务、提交证据）**不动**表单，
+ *     避免把用户正在填、还没保存的内容悄悄清空。
  */
 
 const store = useWorkbenchStore()
@@ -32,12 +34,6 @@ const draft = reactive({
 const saving = ref(false)
 const savedHint = ref('')
 const errorHint = ref('')
-/**
- * 上一次「自己保存成功」时的项目版本。
- * 保存会让 `projectRevision` +1，watcher 随即重同步表单；如果不记下来，
- * 刚写好的「已保存」提示会被自己的 watcher 立刻清掉。
- */
-const savedRevision = ref<number | null>(null)
 
 function textOf(value: string | null | undefined): string {
   return value ?? ''
@@ -54,22 +50,28 @@ function syncFromStore(): void {
   draft.outOfScope = textOf(info?.outOfScope)
 }
 
-/**
- * 切项目、资料版本变化、刷新恢复都以 store 为准重建草稿
- * ——这样别处改了资料，页面不会拿旧缓存盖回去。
- *
- * 提示文案的处理：只有「版本不是刚刚自己保存出来的那个」才清空，
- * 否则刚保存完的成功提示会立刻被自己清掉。
- */
+/** store 里资料的稳定签名：只有它变化才说明"资料本身"变了 */
+const storeProfileSignature = computed(() => JSON.stringify(store.basicInfo))
+
+/** 切换项目：以 store 为准重建，并把上一个项目的提示清掉 */
 watch(
-  () => [store.current?.projectId, store.current?.projectRevision] as const,
-  ([, revision]) => {
+  () => store.current?.projectId,
+  () => {
     syncFromStore()
+    savedHint.value = ''
     errorHint.value = ''
-    if (revision !== savedRevision.value) savedHint.value = ''
   },
   { immediate: true },
 )
+
+/**
+ * 资料本身变化（别处改了 / 刷新恢复 / 自己刚保存成功）才重建草稿。
+ * 别的本地写入只会让 `projectRevision` 变化，不会触发这里——
+ * 用户未保存的输入因此不会被无关的版本变化清掉。
+ */
+watch(storeProfileSignature, () => {
+  syncFromStore()
+})
 
 function parseMembers(text: string): string[] {
   return text
@@ -119,7 +121,6 @@ async function save(): Promise<void> {
       return
     }
 
-    savedRevision.value = store.current?.projectRevision ?? null
     savedHint.value = hasAnyContent.value
       ? `项目资料已保存（已填写 ${filledCount.value} 项）`
       : '项目资料已保存（当前为空）'
@@ -131,7 +132,6 @@ async function save(): Promise<void> {
 /** 供外部（例如切换项目后）强制以 store 重建 */
 function resetFromStore(): void {
   syncFromStore()
-  savedRevision.value = null
   savedHint.value = ''
   errorHint.value = ''
 }

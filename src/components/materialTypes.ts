@@ -151,6 +151,61 @@ export const DRAFT_SOURCE_TEXT: Record<DraftSource, string> = {
   'local-rule': '本地规则',
 }
 
+/**
+ * store 里的理解草稿条目 → 卡片视图（结构兼容 `UnderstandingBlock`）。
+ * 页面的唯一职责是投影：状态、来源、文案都来自 store，组件不自己判断业务规则。
+ */
+export interface DraftBlockViewSource {
+  itemId: string
+  kind: DraftBlockKey
+  content: string
+  status: DraftItemStatus
+  sources: DraftSourceView[]
+}
+
+/** 一份材料的草稿视图；没有任何条目时返回 `null`（卡片显示空状态而不是"已理解"） */
+export function understandingDraftViewOf(
+  material: { materialId: string; name: string; version: number },
+  blocks: DraftBlockViewSource[],
+): UnderstandingDraftView | null {
+  if (blocks.length === 0) return null
+
+  return {
+    materialId: material.materialId,
+    materialName: material.name,
+    materialVersion: material.version,
+    blocks: DRAFT_BLOCK_ORDER.map((key) => ({
+      key,
+      items: blocks
+        .filter((block) => block.kind === key)
+        .map((block) => ({
+          itemId: block.itemId,
+          text: block.content,
+          status: block.status,
+          sources: block.sources.map((source) => ({ ...source })),
+        })),
+    })),
+  }
+}
+
+/** 材料的**解析**状态（与"已读口径"分开：解析成功不等于学生已经确认） */
+export function materialParseStateText(material: {
+  state: MaterialFileState | null
+  failureReason?: string | null
+  needsReupload?: boolean
+}): string {
+  if (material.state === 'parse_failed') return '解析失败'
+  if (material.state === 'parsed' && material.needsReupload !== true) return '已解析'
+  return '仅登记，正文未读取'
+}
+
+/** 材料的**读取口径**（契约 14.1 备注：仅登记文件名 / 待确认草稿 / 已确认） */
+export function materialReadStateText(state: 'registered' | 'pending' | 'confirmed'): string {
+  if (state === 'confirmed') return '已确认'
+  if (state === 'pending') return '待确认草稿'
+  return '仅登记文件名'
+}
+
 export function draftItemCount(draft: UnderstandingDraftView | null): number {
   if (draft === null) return 0
   return draft.blocks.reduce((sum, block) => sum + block.items.length, 0)

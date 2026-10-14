@@ -839,10 +839,79 @@ const ADVISOR_FAILURE_TEXT: Partial<Record<AdvisorErrorCode, string>> = {
 }
 
 /**
+ * 聊天失败 → 中文人话（契约 6.4 / 16：按**稳定错误码**映射）。
+ *
+ * 聊天不使用服务端 `message`：它属于面向开发者的排障信息，可能包含字段名、路径或
+ * 上游原文；一旦原样渲染就会泄漏内部细节。这里只按 code 出文案。
+ */
+const CHAT_FAILURE_TEXT: Partial<Record<AdvisorErrorCode, string>> = {
+  INVALID_INPUT: '这次提问没有被服务端接受，项目里的数据不受影响，可以改一下问法再试',
+  RATE_LIMITED: '提问有点频繁，稍等一会儿再问',
+  MODEL_TIMEOUT: '模型响应超时，问题已经保存，可以稍后重试',
+  INVALID_MODEL_OUTPUT: '模型这次没有给出可用回答，可以稍后重试',
+  MODEL_UNAVAILABLE: '模型服务暂时不可用，可以稍后重试',
+  MODEL_NOT_CONFIGURED: '服务端还没有接入模型，暂时回答不了，可以先按自己的判断推进',
+  INTERNAL: '服务端刚才没能处理这次提问，可以稍后重试',
+  STALE_REVISION: '项目状态已经变化，请重新提问',
+  UNAUTHORIZED: '这次请求没有通过服务端校验',
+  UNSUPPORTED_MATERIAL_TYPE: '这条问题里带上了当前不支持的材料类型，请先把材料改成 MD 或 TXT 再问',
+  MATERIAL_TOO_LARGE: '相关材料超过 1 MB 上限，处理不了，请压缩后再问',
+  EMPTY_MATERIAL: '相关材料内容为空，请检查材料后再问',
+  MATERIAL_ENCODING_UNREADABLE: '相关材料的编码无法识别，请另存为 UTF-8 后再问',
+  MATERIAL_PARSE_FAILED: '相关材料没有解析成功，请重新上传后再问',
+}
+
+/** 前端内部码 NETWORK_ERROR 也要有中文说明（后端不可达 / 超时 / 响应不是契约形状） */
+const CHAT_LOCAL_FAILURE_TEXT: Record<string, string> = {
+  NETWORK_ERROR: '连不上后端服务，请检查网络后重试',
+  STALE_RESPONSE: '这条回答已经过期，已丢弃',
+}
+
+/** 聊天失败的中文说明（不认识的原因也给一句可执行的话） */
+export function describeChatFailure(error: AdvisorApiError): string {
+  return (
+    CHAT_LOCAL_FAILURE_TEXT[error.code] ??
+    CHAT_FAILURE_TEXT[error.code as AdvisorErrorCode] ??
+    '提问没有成功，可以稍后重试'
+  )
+}
+
+/**
+ * 用户可见文本的安全检查（契约 12.2 / 16：不展示内部字段名、路径、堆栈或原始报文）。
+ * 命中任何一条就认为服务端 `message` 不适合直接展示。
+ */
+const UNSAFE_MESSAGE_TOKENS = [
+  'projectRevision',
+  'materialId',
+  'materialVersion',
+  'segmentId',
+  'doneCriteria',
+  'currentMilestone',
+  'confirmedContext',
+  'confirmedMaterials',
+  'goalCandidates',
+  'openQuestions',
+  'http://',
+  'https://',
+  '/api/',
+  'stack',
+  'Error:',
+] as const
+
+export function isSafeUserFacingMessage(text: string): boolean {
+  const trimmed = text.trim()
+  if (trimmed === '' || trimmed.length > 300) return false
+  // 面向用户的话必须是中文：整段没有汉字时宁可改用本地映射，也不把上游英文原文端给用户
+  if (!/[\u4e00-\u9fa5]/.test(trimmed)) return false
+  return !UNSAFE_MESSAGE_TOKENS.some((token) => trimmed.includes(token))
+}
+
+/**
  * 把适配层错误映射成给人看的中文说明（契约 18：界面不显示英文码）。
- * 服务端给了 `message` 时优先用它——它比本地映射更贴近当时的失败原因。
+ * 服务端给了**安全**的 `message` 时优先用它——它比本地映射更贴近当时的失败原因；
+ * 含内部字段名、路径或堆栈的报文一律丢弃，改用按 code 映射的中文。
  */
 export function describeAdvisorFailure(error: AdvisorApiError): string {
-  if (error.message.trim() !== '') return error.message
+  if (isSafeUserFacingMessage(error.message)) return error.message.trim()
   return ADVISOR_FAILURE_TEXT[error.code as AdvisorErrorCode] ?? '请求未能完成，请稍后重试'
 }

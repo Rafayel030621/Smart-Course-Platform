@@ -8,10 +8,14 @@ import { tasksOf } from '@/domain/progress'
  * 一旦用户上传材料、提交证据、提出疑问或认领任务，项目就不再空白，
  * 提示必须随之消失或更新为当前状态。
  *
- * 因此这里只根据**真实数据**（tasks / evidenceRecords / doubtRecords / materials）
+ * 因此这里只根据**真实数据**（tasks / evidenceRecords / doubtRecords / 材料）
  * 计算摘要与文案，作为「AI 项目顾问」区说明文字的唯一来源：
  *   - store 每次本地写入后调用它刷新 `Project.banner`（页面与刷新恢复共用同一份文案）；
  *   - 页面用它判断是否显示空白项目提示（约定：空白 = 没有任务、证据、疑问、材料）。
+ *
+ * 「材料」有两个来源，都要算：`materialRecords`（v2 真实上传并解析的材料）与
+ * `materials`（v1 只登记文件名的旧条目）。只统计其中一个会让上传过材料的项目
+ * 仍被当成空白项目，banner 也会谎报「0 份材料」。
  *
  * 不按项目名称判断，也不读任何展示字段（steps / evidence / doubts 都是派生物）。
  */
@@ -60,11 +64,25 @@ function buildNote(summary: Omit<ProjectStatusSummary, 'note'>): string {
   return `${head}，还没有任务；点「获取建议」让 AI 给出下一步。`
 }
 
+/**
+ * 材料份数：v2 真实材料（`materialRecords`）逐条计数；v1 只登记过文件名的旧条目
+ * 按名称与真实材料去重后补计，避免同一份材料被算两次。
+ */
+function countMaterials(project: Project): number {
+  const records = project.materialRecords ?? []
+  const registered = project.materials ?? []
+  if (records.length === 0) return registered.length
+
+  const recordedNames = new Set(records.map((material) => material.name))
+  const legacyOnly = registered.filter((item) => !recordedNames.has(item.name)).length
+  return records.length + legacyOnly
+}
+
 export function summarizeProjectStatus(project: Project): ProjectStatusSummary {
   const tasks = tasksOf(project)
   const evidenceCount = (project.evidenceRecords ?? []).length
   const doubtRecords = project.doubtRecords ?? []
-  const materialCount = (project.materials ?? []).length
+  const materialCount = countMaterials(project)
 
   const todoCount = tasks.filter((task) => task.status === 'todo').length
   const doingCount = tasks.filter((task) => task.status === 'doing').length

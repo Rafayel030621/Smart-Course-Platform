@@ -407,7 +407,10 @@ describe('createProject：创建与持久化', () => {
     expect(result.ok).toBe(true)
     expect(currentProject(store).name).toBe('旧表单项目')
     expect(currentProject(store).members).toBe('4 名成员')
-    expect(currentProject(store).materials).toEqual([{ name: '手册.pdf', type: '实验手册' }])
+    // 决策 1：新项目一律是空白项目。旧入参仍被接受（不报错），但不再注入任何
+    // 材料 / 任务：材料必须在工作台用真实上传流程登记，才有正文与解析状态。
+    expect(currentProject(store).materials).toEqual([])
+    expect(currentProject(store).tasks).toEqual([])
   })
 })
 
@@ -1186,19 +1189,11 @@ function requestBodyOf(init: RequestInit | undefined): AdvisorRecommendationsReq
   return JSON.parse(String(init?.body)) as AdvisorRecommendationsRequest
 }
 
-/** 有界等待建议状态离开 loading，不依赖真实网络，也不会长时间阻塞 */
-async function waitUntilNotLoading(store: Store): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    if (store.aiStatus !== 'loading') return
-    await new Promise((resolve) => setTimeout(resolve, 1))
-  }
-}
-
 /* -------------------------------------------------------------- F1 回归测试 */
 /* 契约 4.7 补充约定 2、3：过期响应不得覆盖当前状态，也不得留下没有在途请求却永久 loading */
 
 describe('F1 回归：状态变化后旧响应被丢弃，loading 不得永久停留', () => {
-  it('同一项目 revision 变化且无新请求时，替代请求接管并收敛到实际结果状态', async () => {
+  it('同一项目 revision 变化且无新请求时，旧请求结束并收敛到可重试的 idle', async () => {
     const store = freshStore()
     createProjectWithContentOrThrow(store)
     const project = currentProject(store)
@@ -1210,14 +1205,10 @@ describe('F1 回归：状态变化后旧响应被丢弃，loading 不得永久�
     const fetchImpl = vi.fn(async (_input: unknown, init?: RequestInit) => {
       const body = requestBodyOf(init)
       bodies.push(body)
-      if (bodies.length === 1) {
-        // 第一次请求挂起，由测试决定何时返回
-        return await new Promise<Response>((resolve) => {
-          releases[0] = resolve
-        })
-      }
-      // 替代请求：不可重试的契约错误 → 本地规则兜底
-      return advisorContractErrorResponse()
+      // 第一次请求挂起，由测试决定何时返回
+      return await new Promise<Response>((resolve) => {
+        releases[bodies.length - 1] = resolve
+      })
     })
     vi.stubGlobal('fetch', fetchImpl)
 
@@ -1236,16 +1227,17 @@ describe('F1 回归：状态变化后旧响应被丢弃，loading 不得永久�
 
     expect(await pending).toMatchObject({ ok: false, code: 'STALE_RESPONSE' })
 
-    // 替代请求接管状态：最终必须是实际结果状态，不能停在 loading，也不能只靠设 idle 蒙过去
-    await waitUntilNotLoading(store)
-    expect(store.aiStatus).toBe('local-rule')
-    expect(['model', 'fallback', 'local-rule', 'error']).toContain(store.aiStatus)
+    // 契约 4.7 补充约定 3：旧请求必须自己收尾，回到**可重试的 idle**，
+    // 不能停在 loading，也不能留下没有在途请求却转圈的状态；
+    // 也不在这里自动补发请求（由用户点「获取建议」或提交证据后的自动请求负责）。
+    expect(store.aiStatus).toBe('idle')
+    expect(['idle', 'model', 'fallback', 'local-rule', 'error']).toContain(store.aiStatus)
 
     // 契约 4.7 补充约定 1：过期响应不得写入建议，也不得改动项目数据
     expect(store.recommendations.some((item) => item.title === '这条建议来自过期响应')).toBe(false)
     expect(project.projectRevision).toBe(revisionAfterClaim)
-    // 替代请求确实发出过
-    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    // 没有新请求接管时，不得凭空多打一次后端
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
   })
 
   it('已有更新的请求在途时，旧请求静默结束且不改变新请求的状态', async () => {

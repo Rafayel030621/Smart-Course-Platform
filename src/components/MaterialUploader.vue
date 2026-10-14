@@ -40,13 +40,16 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  upload: [{ file: File; type: MaterialFileType }]
+  /** `materialId` 只在「重新上传某一份材料」时出现（换版时 version + 1，契约 14.5 第 4 条） */
+  upload: [{ file: File; type: MaterialFileType; materialId?: string }]
   retry: []
 }>()
 
 const input = ref<HTMLInputElement | null>(null)
 const localError = ref('')
 const selectedName = ref('')
+/** 正在换版的那份材料；新登记时为 null */
+const replaceTarget = ref<string | null>(null)
 
 const chooseDisabled = computed(() => props.disabled === true || props.busy === true)
 
@@ -118,8 +121,23 @@ function onSelect(event: Event): void {
   }
 
   localError.value = ''
-  emit('upload', { file, type })
+  emit('upload', { file, type, materialId: replaceTarget.value ?? undefined })
+  replaceTarget.value = null
 }
+
+/**
+ * 供父组件调用：为某一份材料选择新文件（重新上传 → 同一个材料 ID，版本 +1）。
+ * 组件本身不改变任何业务状态，只负责选文件与本地校验。
+ */
+function chooseReplace(materialId: string): void {
+  if (chooseDisabled.value) return
+  replaceTarget.value = materialId
+  choose()
+}
+
+// 供父组件（工作台）在材料列表里触发「重新上传某一份材料」——
+// 入口只有一个，材料 ID 只随事件带出去，组件本身不做业务判断
+defineExpose({ chooseReplace })
 </script>
 
 <template>
