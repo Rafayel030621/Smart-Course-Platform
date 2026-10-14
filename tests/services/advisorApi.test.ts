@@ -142,7 +142,8 @@ describe('buildAdvisorRequest：请求体组装（契约 4.1）', () => {
     expect(request.projectRevision).toBe(REVISION)
     expect(request.currentMilestone).toBeNull()
     expect(request.confirmedContext).toEqual([])
-    expect(request.promptVersion).toBe('mvp-prompt-v1')
+    // 决策记录（交接文档 §10.6/§11.2）：前端默认发送 mvp-prompt-v2
+    expect(request.promptVersion).toBe('mvp-prompt-v2')
     expect(request.forceRefresh).toBe(false)
     expect(typeof request.requestId).toBe('string')
     expect(request.requestId.length).toBeGreaterThan(0)

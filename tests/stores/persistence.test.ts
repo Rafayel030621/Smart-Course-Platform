@@ -53,8 +53,8 @@ describe('存储键与版本常量', () => {
   it('使用约定的 key 与当前 schemaVersion', () => {
     expect(STORAGE_KEY_PROJECTS).toBe('scp.mvp.projects')
     expect(STORAGE_KEY_CURRENT_PROJECT_ID).toBe('scp.mvp.currentProjectId')
-    // v2：任务新增 draftKey（契约 3.2 约束 4 的 draft 幂等键）
-    expect(CURRENT_SCHEMA_VERSION).toBe(2)
+    // 决策记录（交接文档 §10.3/§11.2）：v2 材料与理解草稿路线，schemaVersion 3
+    expect(CURRENT_SCHEMA_VERSION).toBe(3)
   })
 })
 
@@ -307,14 +307,13 @@ describe('v1 → v2 迁移：任务新增 draftKey', () => {
 
     expect(project?.schemaVersion).toBe(CURRENT_SCHEMA_VERSION)
     expect(project?.tasks.map((item) => item.id)).toEqual(['tsk_1', 'tsk_2'])
-    expect(project?.tasks.map((item) => item.draftKey)).toEqual([null, null])
-    // 迁移不能改坏旧数据的状态与版本
+    // 决策记录：schemaVersion 3 路线不使用任务 draftKey（材料与理解草稿见 §10.3）
     expect(project?.tasks[0]?.status).toBe('doing')
     expect(project?.tasks[1]?.status).toBe('done')
     expect(project?.projectRevision).toBe(3)
   })
 
-  it('migrateProject 对缺失 draftKey 的任务补 null，已有 draftKey 原样保留', () => {
+  it('migrateProject 容忍任务上的未知字段（旧数据的 draftKey 被忽略，任务原样保留）', () => {
     const migrated = migrateProject({
       projectId: 'prj_1',
       name: '项目',
@@ -325,8 +324,8 @@ describe('v1 → v2 迁移：任务新增 draftKey', () => {
       ],
     })
 
-    expect(migrated?.tasks[0]?.draftKey).toBeNull()
-    expect(migrated?.tasks[1]?.draftKey).toBe('["T",null,null,[],[]]')
+    expect(migrated?.tasks.map((item) => item.id)).toEqual(['tsk_old', 'tsk_new'])
+    expect(migrated?.tasks.map((item) => item.title)).toEqual(['旧任务', '新任务'])
   })
 
   it('迁移后再次保存时信封版本升为当前版本', () => {
