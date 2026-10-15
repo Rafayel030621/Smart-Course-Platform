@@ -19,6 +19,18 @@ import type { ProjectProfile } from '@/types/platform'
  *     避免把用户正在填、还没保存的内容悄悄清空。
  */
 
+const props = withDefaults(
+  defineProps<{
+    /**
+     * 展示布局：`stack` 是原来的单列表单；`wide` 用于「项目资料」标签页，
+     * 表单占主体宽度、输入区更宽松，不再挤在窄侧栏里。
+     * 两者字段、id、保存逻辑完全一致。
+     */
+    layout?: 'stack' | 'wide'
+  }>(),
+  { layout: 'stack' },
+)
+
 const store = useWorkbenchStore()
 
 /** 六个字段的本地草稿；`memberNames` 在输入框里是逗号分隔的一行文本 */
@@ -143,7 +155,7 @@ const inRequest = computed<ProjectProfile | null>(() => store.projectProfile)
 </script>
 
 <template>
-  <form class="profile-form" @submit.prevent="save">
+  <form class="profile-form" :class="{ wide: props.layout === 'wide' }" @submit.prevent="save">
     <label for="profile-goal">项目目标 <small>（一句话说明要解决什么）</small></label>
     <textarea
       id="profile-goal"
@@ -202,6 +214,26 @@ const inRequest = computed<ProjectProfile | null>(() => store.projectProfile)
 </template>
 
 <style scoped>
+/* 宽表单：「项目资料」标签页用主体宽度，输入区不缩在窄栏里 */
+.profile-form.wide {
+  max-width: 880px;
+}
+
+.profile-form.wide textarea {
+  min-height: 60px;
+  font-size: 13px;
+}
+
+.profile-form.wide input {
+  font-size: 13px;
+}
+
+.profile-form.wide button.submit {
+  width: auto;
+  min-width: 168px;
+  padding: 10px 22px;
+}
+
 .profile-form label {
   display: block;
   font-size: 12.5px;

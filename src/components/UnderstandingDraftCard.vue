@@ -42,6 +42,11 @@ const props = defineProps<{
   currentMaterialVersion?: number | null
   emptyHint?: string | null
   disabled?: boolean
+  /**
+   * 父级替这条材料保留的未提交编辑（切换材料返回时恢复）。
+   * 只在 `itemId` 仍存在于当前草稿时恢复，避免把文字挂到已删除的条目上。
+   */
+  pendingEdit?: { itemId: string; text: string } | null
 }>()
 
 const emit = defineEmits<{
@@ -52,6 +57,11 @@ const emit = defineEmits<{
   remove: [payload: { materialId: string; materialVersion: number; itemId: string }]
   undo: [payload: { materialId: string; materialVersion: number; itemId: string }]
   confirmAll: [payload: { materialId: string; materialVersion: number; itemIds: string[] }]
+  /**
+   * 草稿身份变化（切换材料或换版）时放弃的未提交编辑。
+   * 父级收到后负责保留这段文字，不能静默丢掉用户已经打好的内容。
+   */
+  editAbort: [payload: { materialId: string; materialVersion: number; itemId: string; text: string }]
 }>()
 
 const editingItemId = ref('')
@@ -133,11 +143,53 @@ function sourceTextOf(item: DraftItemView): string {
     .join('；')
 }
 
-// 材料 ID 或材料版本变化（切换材料、材料更新）：正在编辑的内容一律作废
+// 材料 ID 或材料版本变化（切换材料、材料更新）：这次编辑不能静默丢掉——
+// 先把未提交的文字交给父级保留，再看父级是否要求恢复一条编辑。
 watch(
   () => materialKeyOf(props.draft),
-  () => cancelEdit(),
+  () => {
+    abortEdit()
+    restorePendingEdit()
+  },
 )
+
+/** 未提交的编辑：把文字与它原本属于哪份材料一起交给父级（没有输入就不打扰） */
+function abortEdit(): void {
+  const text = editText.value
+  if (editingItemId.value === '' || text.trim() === '') return
+  const [materialId, versionText] = editMaterialKey.value.split('#')
+  if (materialId === undefined || materialId === '') return
+  emit('editAbort', {
+    materialId,
+    materialVersion: Number(versionText ?? ''),
+    itemId: editingItemId.value,
+    text,
+  })
+}
+
+/** 父级保留过这条材料的未提交编辑：条目还在就恢复编辑态，否则回到普通展示 */
+function restorePendingEdit(): void {
+  const pending = props.pendingEdit
+  const draft = props.draft
+
+  const restorable =
+    pending !== null &&
+    pending !== undefined &&
+    draft !== null &&
+    pending.text.trim() !== '' &&
+    blocks.value.some((block) => block.items.some((item) => item.itemId === pending.itemId))
+
+  if (!restorable || draft === null || pending === null || pending === undefined) {
+    // 新材料没有待恢复的编辑：一定要退出编辑态，否则编辑框会串到另一份材料上
+    cancelEdit()
+    return
+  }
+
+  editingItemId.value = pending.itemId
+  editText.value = pending.text
+  editMaterialKey.value = materialKeyOf(draft)
+  editError.value = ''
+}
 
 function startEdit(item: DraftItemView): void {
   const draft = props.draft
