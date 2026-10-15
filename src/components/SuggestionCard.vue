@@ -9,10 +9,11 @@ import type { Recommendation, RecommendationSource } from '@/domain/recommendati
  * 依据（证据 / 疑问）默认折叠（契约 5.3：「可展开看到依据的证据/疑问原文」），
  * 展开后显示的是可读内容，不是 ID。
  *
- * 任务按钮的三种状态（契约 5.4）：
+ * 任务按钮的四种状态（契约 5.4）：状态由页面按**真实任务状态**算出来，组件只负责显示。
  *   claimable          认领已有任务 → 「认领这一步」
- *   claimed            这条建议已经认领过 → 「已认领 · 进行中」并禁用
- *   draft              existingTaskId 为空，认领后创建新任务 → 同样显示「认领这一步」
+ *   claimed            这条建议对应的任务正在进行中 → 「已认领 · 进行中」并禁用
+ *   done               对应任务已完成 → 「已完成」并禁用
+ *   draft              existingTaskId 为空，认领后创建新任务 → 显示「认领这一步」
  *
  * 用户可见文案一律说人话：不出现 doneCriteria / existingTaskId 这类字段名。
  */
@@ -21,7 +22,7 @@ const props = defineProps<{
   suggestion: Recommendation
   /** 列表里的序号，从 0 开始 */
   index: number
-  claimState: 'claimable' | 'claimed' | 'draft'
+  claimState: 'claimable' | 'claimed' | 'done' | 'draft'
   /** 依据证据的可读内容（已由页面把 ID 解析成文字） */
   evidence: Array<{ id: string; time: string; text: string }>
   /** 依据疑问的可读内容 */
@@ -53,6 +54,7 @@ const sourceStyle = computed(() => SOURCE_STYLE[props.suggestion.source])
 const CLAIM_LABEL = {
   claimable: '认领这一步',
   claimed: '已认领 · 进行中',
+  done: '已完成',
   draft: '认领这一步',
 } as const
 
@@ -99,12 +101,19 @@ const basisCount = computed(() => props.evidence.length + props.doubts.length)
     </details>
 
     <div class="sc-actions">
-      <button class="btn primary" :disabled="claimState === 'claimed'" @click="emit('claim')">
+      <button
+        class="btn primary"
+        :disabled="claimState === 'claimed' || claimState === 'done'"
+        @click="emit('claim')"
+      >
         {{ claimLabel }}
       </button>
 
       <span v-if="claimState === 'claimed'" class="hint">
         已认领：任务已进入「AI 项目顾问」，状态为进行中。做完记得提交证据。
+      </span>
+      <span v-else-if="claimState === 'done'" class="hint">
+        这条建议对应的任务已经完成，不用再认领。
       </span>
       <span v-else-if="claimState === 'draft'" class="hint">
         点击后会把这条建议创建为当前项目的进行中任务。

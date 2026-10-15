@@ -5,7 +5,8 @@ import type { Recommendation } from '@/domain/recommendation'
 interface RecommendationView {
   suggestion: Recommendation
   index: number
-  claimState: 'claimable' | 'claimed' | 'draft'
+  /** 认领状态由页面按**真实任务状态**算出来：可认领 / 已认领进行中 / 已完成 / 新任务候选 */
+  claimState: 'claimable' | 'claimed' | 'done' | 'draft'
   evidence: Array<{ id: string; time: string; text: string }>
   doubts: Array<{ id: string; text: string }>
 }

@@ -425,6 +425,84 @@ describe('recordUnderstanding（契约 14.3 / 15.3）', () => {
     expect(store.pendingUnderstandingBlocks.map((block) => block.itemId)).toEqual(['cnd_goal_0'])
   })
 
+  it('同文案换来源：退回待确认，新来源片段不进入请求字段，且版本递增（确认集合变了）', () => {
+    const store = withProject()
+    const materialId = registerMd(store, '实验手册.md', 2)
+    store.recordUnderstanding({ materialId, materialVersion: 1, draft: draftFor(materialId) })
+    const blockId = store.pendingUnderstandingBlocks[0].id
+    expect(store.confirmUnderstandingBlock({ blockId }).ok).toBe(true)
+    expect(buildConfirmedMaterials(project(store))).toHaveLength(1)
+    const afterConfirm = revision(store)
+
+    // 同 itemId、同文案，但来源换成另一段：不是学生确认过的那一条
+    const regenerated = draftFor(materialId)
+    regenerated.goalCandidates[0].sources = [
+      {
+        materialId,
+        materialName: '实验手册.md',
+        materialVersion: 1,
+        segmentId: 'seg_1',
+        startLine: 2,
+        endLine: 2,
+      },
+    ]
+    expect(store.recordUnderstanding({ materialId, materialVersion: 1, draft: regenerated }).ok).toBe(true)
+
+    expect(store.confirmedUnderstandingBlocks).toHaveLength(0)
+    expect(store.pendingUnderstandingBlocks.map((block) => block.sources[0]?.segmentId)).toEqual(['seg_1'])
+    // 两条请求字段里都不能再出现这条内容
+    expect(buildConfirmedMaterials(project(store))).toEqual([])
+    expect(buildConfirmedContext(project(store))).toEqual([])
+    // 已确认集合变化 → projectRevision 必须递增（在途旧响应随之失效）
+    expect(revision(store)).toBe(afterConfirm + 1)
+  })
+
+  it('同文案、同来源重新生成：保持已确认，且不递增版本', () => {
+    const store = withProject()
+    const materialId = registerMd(store, '实验手册.md', 2)
+    store.recordUnderstanding({ materialId, materialVersion: 1, draft: draftFor(materialId) })
+    const blockId = store.pendingUnderstandingBlocks[0].id
+    store.confirmUnderstandingBlock({ blockId })
+    const afterConfirm = revision(store)
+
+    // 同一条候选（同 itemId / 同文案 / 同来源、材料版本一致）再次返回
+    store.recordUnderstanding({ materialId, materialVersion: 1, draft: draftFor(materialId) })
+
+    expect(store.confirmedUnderstandingBlocks.map((block) => block.id)).toEqual([blockId])
+    expect(revision(store)).toBe(afterConfirm)
+  })
+
+  it('空草稿（fallback）不覆盖已确认内容，也不递增版本', () => {
+    const store = withProject()
+    const materialId = registerMd(store)
+    store.recordUnderstanding({ materialId, materialVersion: 1, draft: draftFor(materialId) })
+    const blockId = store.pendingUnderstandingBlocks[0].id
+    store.confirmUnderstandingBlock({ blockId })
+    const before = revision(store)
+
+    const empty: UnderstandingDraft = {
+      goalCandidates: [],
+      outcomeCandidates: [],
+      dataNotes: [],
+      methodNotes: [],
+      openQuestions: [],
+    }
+    const result = store.recordUnderstanding({
+      materialId,
+      materialVersion: 1,
+      draft: empty,
+      notice: '模型调用超时，未生成理解草稿',
+    })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    // 没有结果就如实报 0 条：不伪装成功、也不动学生已经确认过的内容
+    expect(result.data.blockCount).toBe(0)
+    expect(store.confirmedUnderstandingBlocks).toHaveLength(1)
+    expect(store.toastText).toContain('模型调用超时')
+    expect(revision(store)).toBe(before)
+  })
+
   it('材料版本对不上时返回 STALE_RESPONSE，不写入', () => {
     const store = withProject()
     const materialId = registerMd(store)
@@ -715,13 +793,41 @@ describe('sendChat（契约 6.4 / 13.2 / 17.1 / 17.4）', () => {
 
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.code).toBe('NETWORK_ERROR')
-    expect(store.chatError?.code).toBe('NETWORK_ERROR')
+    // chatError 是给用户看的中文说明：按稳定错误码映射，不含错误码与内部字段名
+    expect(store.chatError).toContain('连不上后端服务')
+    expect(store.chatError).not.toContain('NETWORK_ERROR')
     expect(store.toastText).not.toBe('')
-    const last = project(store).chat.at(-1)
-    expect(last?.me).toBe(false)
-    expect(last?.source).toBe('error')
-    expect(last?.text).toContain('顾问暂时回答不了')
-    expect(last?.text).toContain('你的问题已经保存')
+    // 用户的问题保留在聊天记录里；不写任何假回答，也没有"顾问答过了"的气泡
+    const chat = project(store).chat
+    expect(chat).toHaveLength(1)
+    expect(chat[0]?.me).toBe(true)
+    expect(chat[0]?.text).toBe('断网时会怎样？')
+    expect(chat.some((entry) => entry.source !== undefined)).toBe(false)
+  })
+
+  it('失败后重试同一个问题：不重复记录，问题与回答各一条', async () => {
+    const { captured, fetchStub } = stubChatFetch()
+    const store = withProject()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new TypeError('Failed to fetch')
+      }),
+    )
+
+    await store.sendChat('同一个问题')
+    expect(project(store).chat).toHaveLength(1)
+
+    // 第二次成功：同一个问题只保留一条用户消息，历史里也不会出现两次
+    vi.stubGlobal('fetch', fetchStub)
+    const retried = await store.sendChat('同一个问题')
+
+    expect(retried.ok).toBe(true)
+    expect(project(store).chat).toHaveLength(2)
+    expect(project(store).chat[0]?.text).toBe('同一个问题')
+    expect(project(store).chat[1]?.source).toBe('model')
+    const history = captured[0]?.chatHistory as Array<{ text: string }>
+    expect(history.filter((entry) => entry.text === '同一个问题')).toHaveLength(0)
   })
 
   it('过期聊天响应整份丢弃：不写进聊天记录，也不改项目状态', async () => {

@@ -406,6 +406,63 @@ describe('过期响应与 loading 收尾（契约 4.7）', () => {
     expect(store.recommendations).toEqual([])
   })
 
+  it('确认集合变化：在途的旧建议响应整份丢弃，不覆盖新状态', async () => {
+    const { store, materialId } = setupWithMaterial()
+    const blockId = recordDraft(store, materialId)
+
+    let release: (() => void) | null = null
+    installFetch((_url, body) => {
+      return new Promise<Response>((resolve) => {
+        release = () => resolve(recommendationsSuccess(body))
+      })
+    })
+
+    const pending = store.refreshRecommendations({ forceRefresh: true })
+    expect(store.aiStatus).toBe('loading')
+
+    // 请求在途时学生确认了一条草稿：确认集合变化 → projectRevision + 1
+    expect(store.confirmUnderstandingBlock({ blockId }).ok).toBe(true)
+    if (release === null) throw new Error('fetch 没有被调用')
+    ;(release as () => void)()
+
+    const result = await pending
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.code).toBe('STALE_RESPONSE')
+    // 旧建议不能写回来，状态收敛到可重试的 idle
+    expect(store.recommendations).toEqual([])
+    expect(store.aiStatus).toBe('idle')
+  })
+
+  it('确认集合变化：在途的旧聊天响应整份丢弃，不写入聊天记录', async () => {
+    const { store, materialId } = setupWithMaterial()
+    const blockId = recordDraft(store, materialId)
+
+    let release: (() => void) | null = null
+    installFetch((_url, body) => {
+      return new Promise<Response>((resolve) => {
+        release = () => resolve(chatSuccess(body))
+      })
+    })
+
+    const pending = store.sendChat('确认之后这条还算数吗？')
+    expect(store.chatLoading).toBe(true)
+
+    // 请求在途时学生改了这条草稿并确认：发给 AI 的依据已经变了
+    store.modifyUnderstandingBlock({ blockId, content: `${MARKER}（学生改写）` })
+    expect(store.confirmUnderstandingBlock({ blockId }).ok).toBe(true)
+    if (release === null) throw new Error('fetch 没有被调用')
+    ;(release as () => void)()
+
+    const result = await pending
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.code).toBe('STALE_RESPONSE')
+    // 只留下用户自己的问题：过期回答不写入，也没有任何"看起来很像是顾问答的"内容
+    const chat = project(store).chat
+    expect(chat).toHaveLength(1)
+    expect(chat[0]?.me).toBe(true)
+    expect(store.chatLoading).toBe(false)
+  })
+
   it('请求在途时切换项目 → 旧响应丢弃，且旧项目不会卡在 loading', async () => {
     const { store, materialId } = setupWithMaterial()
     recordDraft(store, materialId)
@@ -490,14 +547,16 @@ describe('聊天链路（契约 6.4）', () => {
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.code).toBe('NETWORK_ERROR')
 
-    const last = project(store).chat.at(-1)
-    expect(last?.source).toBe('error')
-    expect(last?.text).toContain('顾问暂时回答不了')
-    expect(last?.text).toContain('你的问题已经保存')
-    // 不能再写"看起来很像是顾问答的"内容
-    expect(last?.text).not.toContain('建议先做其中的文献部分')
+    // 问题保留在聊天记录里，可以直接再问一次；不写任何假回答
+    const chat = project(store).chat
+    expect(chat).toHaveLength(1)
+    expect(chat[0]?.me).toBe(true)
+    expect(chat[0]?.text).toBe('这份材料说明了什么？')
+    expect(chat.some((entry) => entry.source !== undefined)).toBe(false)
     expect(store.chatLoading).toBe(false)
-    expect(store.chatError?.code).toBe('NETWORK_ERROR')
+    // chatError 是给用户看的中文（不暴露错误码与内部字段名）
+    expect(store.chatError).toContain('连不上后端服务')
+    expect(String(store.chatError)).not.toContain('NETWORK_ERROR')
   })
 
   it('非法响应：整份丢弃并给中文说明', async () => {
@@ -506,55 +565,83 @@ describe('聊天链路（契约 6.4）', () => {
 
     const result = await store.sendChat('这份材料说明了什么？')
     expect(result.ok).toBe(false)
-    expect(project(store).chat.at(-1)?.source).toBe('error')
+    // 残缺响应同样不产生任何"顾问回答"：只有用户自己的问题
+    expect(project(store).chat).toHaveLength(1)
+    expect(project(store).chat[0]?.me).toBe(true)
+    expect(store.chatError).not.toBeNull()
     expect(store.chatLoading).toBe(false)
   })
 
-  it('新提问取消上一次：旧请求静默结束，loading 由新请求收尾', async () => {
+  it('在途提问未结束前再次提问会被阻止，不会并发提交', async () => {
     const { store } = setupWithMaterial()
 
-    const pendingResolvers: Array<() => void> = []
-    installFetch((_url, body, init) => {
-      return new Promise<Response>((resolve, reject) => {
-        init?.signal?.addEventListener('abort', () =>
-          reject(new DOMException('Aborted', 'AbortError')),
-        )
-        pendingResolvers.push(() => resolve(chatSuccess(body)))
+    let release: (() => void) | null = null
+    installFetch((_url, body) => {
+      return new Promise<Response>((resolve) => {
+        release = () => resolve(chatSuccess(body))
       })
     })
 
     const first = store.sendChat('问题一')
-    const second = store.sendChat('问题二')
     expect(store.chatLoading).toBe(true)
 
-    // 第二次提问作废了第一次；只让第二次成功返回
-    expect(pendingResolvers).toHaveLength(2)
-    pendingResolvers[1]()
-    const secondResult = await second
-    expect(secondResult.ok).toBe(true)
+    const second = await store.sendChat('问题二')
+    expect(second.ok).toBe(false)
+    if (!second.ok) expect(second.code).toBe('INVALID_INPUT')
+    // 只发出一次请求，第二个问题也没有被悄悄写进聊天记录
+    expect(callsTo('/api/advisor/chat')).toHaveLength(1)
+    expect(project(store).chat.map((entry) => entry.text)).toEqual(['问题一'])
 
+    if (release === null) throw new Error('fetch 没有被调用')
+    ;(release as () => void)()
     const firstResult = await first
-    expect(firstResult.ok).toBe(false)
+    expect(firstResult.ok).toBe(true)
     expect(store.chatLoading).toBe(false)
-    // 聊天记录里只有一次顾问回答（第二次的），第一次既没有留下假回答也没有错误提示
+
+    // 聊天记录里只有一次顾问回答
     const answers = project(store).chat.filter((entry) => entry.source !== undefined)
     expect(answers).toHaveLength(1)
     expect(answers[0].source).toBe('model')
     expect(answers[0].text).toBe('材料里写的是 ERA5 海浪场数据。')
   })
 
-  it('「就此提问」走真实接口，而不是本地预写回答', async () => {
+  it('「就此提问」按稳定 taskId 走真实接口，而不是本地预写回答', async () => {
     const { store } = setupWithMaterial()
     installFetch((_url, body) => chatSuccess(body))
 
-    store.askAboutStep(0)
+    const claimed = store.claimTask({
+      draft: {
+        title: '写清项目目标与预期产出',
+        doneCriteria: '一页目标说明',
+        requestId: null,
+        basisEvidenceIds: [],
+        basisDoubtIds: [],
+      },
+    })
+    expect(claimed.ok).toBe(true)
+    if (!claimed.ok) return
+
+    store.askAboutStep(claimed.data.taskId)
     await vi.waitFor(() => {
       expect(callsTo('/api/advisor/chat')).toHaveLength(1)
     })
 
     expect(calls[0].url).toContain('/api/advisor/chat')
     const question = String(calls[0].body?.question ?? '')
+    expect(question).toContain('写清项目目标与预期产出')
     expect(question).toContain('我想先了解')
+  })
+
+  it('「就此提问」对不存在的任务只给提示，不发请求、不写聊天记录', async () => {
+    const { store } = setupWithMaterial()
+    installFetch((_url, body) => chatSuccess(body))
+
+    store.askAboutStep('tsk_missing')
+    await Promise.resolve()
+
+    expect(callsTo('/api/advisor/chat')).toHaveLength(0)
+    expect(project(store).chat).toHaveLength(0)
+    expect(store.toastText).toContain('已经不在当前项目')
   })
 })
 

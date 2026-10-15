@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { BLANK_PROJECT_NOTE, summarizeProjectStatus } from '@/domain/projectStatus'
-import { makeDoubt, makeEvidence, makeProject, makeTask } from './fixtures'
+import { FIXED_ISO, makeDoubt, makeEvidence, makeProject, makeTask } from './fixtures'
 
 /**
  * 项目状态摘要（空白项目提示的唯一来源）
@@ -30,6 +30,61 @@ describe('summarizeProjectStatus：空白项目判定', () => {
     expect(summary.materialCount).toBe(1)
     expect(summary.note).not.toContain('空白项目')
     expect(summary.note).toContain('1 份材料')
+  })
+
+  it('v2 真实上传的材料（materialRecords）计入材料数，项目不再空白', () => {
+    const summary = summarizeProjectStatus(
+      makeProject({
+        materialRecords: [
+          {
+            materialId: 'mat_1',
+            projectId: 'prj_1',
+            name: '实验手册.md',
+            type: 'md',
+            size: 120,
+            encoding: 'utf-8',
+            state: 'parsed',
+            version: 1,
+            createdAt: FIXED_ISO,
+            updatedAt: FIXED_ISO,
+            failureReason: null,
+            needsReupload: false,
+          },
+        ],
+      }),
+    )
+
+    // 上传了真实材料就必须离开空白状态，banner 也不能谎报「0 份材料」
+    expect(summary.isBlank).toBe(false)
+    expect(summary.materialCount).toBe(1)
+    expect(summary.note).not.toContain('空白项目')
+    expect(summary.note).toContain('1 份材料')
+  })
+
+  it('同名材料同时出现在两套字段里时只算一份', () => {
+    const summary = summarizeProjectStatus(
+      makeProject({
+        materials: [{ name: '实验手册.md', type: '实验手册' }],
+        materialRecords: [
+          {
+            materialId: 'mat_1',
+            projectId: 'prj_1',
+            name: '实验手册.md',
+            type: 'md',
+            size: 120,
+            encoding: 'utf-8',
+            state: 'parsed',
+            version: 1,
+            createdAt: FIXED_ISO,
+            updatedAt: FIXED_ISO,
+            failureReason: null,
+            needsReupload: false,
+          },
+        ],
+      }),
+    )
+
+    expect(summary.materialCount).toBe(1)
   })
 
   it('只有证据时不再是空白项目', () => {

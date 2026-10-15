@@ -7,6 +7,7 @@ import type {
   MaterialItemType,
   MaterialReadState,
   MaterialSegment,
+  MaterialSourceRef,
   NewTaskDraft,
   Project,
   ProjectProfile,
@@ -18,7 +19,7 @@ import type {
 import { PROJECT_SCHEMA_VERSION } from '@/types/platform'
 import { TEMPLATES, TOPICS } from '@/data/topics'
 // 论文方向只从这一个入口取：现在返回模板预置内容，接入后端后换实现即可，页面无需改动
-import { generateDirection, genericDirections, presetDirections } from '@/services/papers'
+import { generateDirection } from '@/services/papers'
 // 建议请求：适配层负责 HTTP 与契约校验，mvpFallbacks 负责后端不可用时的本地兜底
 import {
   buildAdvisorChatRequest,
@@ -122,12 +123,15 @@ import type {
 } from '@/domain/recommendation'
 import {
   MATERIAL_ERROR_MESSAGES,
+  MAX_ADVISOR_CHAT_QUESTION_LENGTH,
   MAX_EVIDENCE_DID_WHAT_LENGTH,
   MAX_EVIDENCE_FOUND_WHAT_LENGTH,
   MAX_EVIDENCE_UNSURE_LENGTH,
   describeAdvisorFailure,
+  describeChatFailure,
   localFailure,
 } from '@/domain/recommendation'
+import { summarizeProjectStatus } from '@/domain/projectStatus'
 import { loadPersistedState, savePersistedState } from '@/stores/persistence'
 
 /** 近 4 周的时间标签，与 mockup 一致 */
@@ -211,6 +215,10 @@ function syncProjectView(project: Project): void {
   project.steps = deriveStepViews(project)
   project.evidence = deriveEvidenceViews(project)
   project.doubts = deriveDoubtTexts(project)
+
+  // 「AI 项目顾问」区说明文字同样只由真实数据推导：空白项目只说空白，
+  // 有任务 / 证据 / 疑问 / 材料后立刻换成对应状态（不写死、不注入示例内容）。
+  project.banner = summarizeProjectStatus(project).note
 }
 
 /**
@@ -352,11 +360,22 @@ export const useWorkbenchStore = defineStore('workbench', () => {
   }
 
   /**
+   * 重新推导全部项目的展示文案（只由真实数据决定，失败也不会污染状态）。
+   * 展示性写入（旧材料登记、聊天、论文方向）不走 `commit`，因此在这里统一收口。
+   */
+  function refreshBanners(): void {
+    for (const project of projects.value) {
+      project.banner = summarizeProjectStatus(project).note
+    }
+  }
+
+  /**
    * 写入 localStorage。
    * 返回 false 表示存储不可用或已满（契约 3.3 的 `STORAGE_FULL`）。
    */
   function persist(): boolean {
     const result = savePersistedState(projects.value, persistedCurrentProjectId())
+    if (result.ok) refreshBanners()
     return result.ok
   }
 
@@ -388,42 +407,12 @@ export const useWorkbenchStore = defineStore('workbench', () => {
     window.scrollTo(0, 0)
   }
 
-  /** 自定义题目的通用模板，字段与 mockup 一致，名称按输入插值 */
-  function customTemplate(name: string): Template {
-    return {
-      short: name.length > 8 ? `${name.slice(0, 8)}…` : name,
-      ms: [
-        { t: '选题确认与文献调研', s: 'cur', p: 10, sub: '刚启动' },
-        { t: '数据获取与预处理', s: 'todo', p: 0, sub: '未开始' },
-        { t: '核心方法 / 模型实现', s: 'todo', p: 0, sub: '未开始' },
-        { t: '分析与验证', s: 'todo', p: 0, sub: '未开始' },
-        { t: '系统集成与结题报告', s: 'todo', p: 0, sub: '未开始' },
-      ],
-      doubts: ['项目的具体范围和技术路线还没有和指导老师确认'],
-      banner:
-        '项目刚启动。建议先把三件事定下来：研究目标的一句话描述、主流方法的文献调研、数据或工具的可获取性验证。上传实验手册后，我可以按手册要求进一步细化步骤。',
-      steps: [
-        {
-          t: '用一句话写清项目目标与预期产出',
-          owner: '成员A',
-          why: '目标不清是所有后续分歧的根源。一句话目标（为谁、解决什么、产出什么）能让全组对齐，也是 AI 追踪进度的基准。',
-          done: '一句话目标 + 预期产出清单，全组确认。',
-        },
-        {
-          t: '完成主流方法的文献调研',
-          owner: '成员B',
-          why: '不了解现有方法就动手，大概率走弯路。用「论文推荐」页的检索提示词查 5-8 篇相关文献。',
-          done: '调研笔记：2-3 类主流方法 + 各自优缺点 + 初步倾向。',
-        },
-        {
-          t: '验证数据 / 工具的可获取性',
-          owner: '成员C',
-          why: '大数据项目最常见的失败原因是数据拿不到或环境搭不起来，第一周必须验证。',
-          done: '确认数据来源或工具链可用，附验证记录。',
-        },
-      ],
-      papers: genericDirections(name),
-    }
+  /**
+   * 项目短名：只用于标签与地图中心，取名称前 12 个字。
+   * 空白项目也用同一套规则，不读取任何模板内容。
+   */
+  function shortNameOf(name: string): string {
+    return name.length > 12 ? `${name.slice(0, 12)}…` : name
   }
 
   /** 把旧表单入参统一成契约入参。新旧入口都走这一条路径，不存在第二套逻辑 */
@@ -452,7 +441,13 @@ export const useWorkbenchStore = defineStore('workbench', () => {
 
   /**
    * 契约 3.2：createProject。
-   * 生成 projectId / projectRevision=1 / schemaVersion，并把模板步骤实例化成结构化任务。
+   *
+   * **新项目一律是空白项目**（项目文档 v2 决策 1）：
+   * 题目只提供名称，不注入任务、里程碑、疑问、材料、论文、聊天或示例数据；
+   * 模板内容（`src/data/topics.ts`）保留为示例与测试资产，不参与真实初始化。
+   *
+   * 保留：入参校验、稳定 projectId、`projectRevision = 1`、schemaVersion、
+   * 基本信息写入，以及持久化失败时的整体回滚。
    */
   function createProject(
     input: CreateProjectInput | LegacyCreateProjectInput,
@@ -465,7 +460,6 @@ export const useWorkbenchStore = defineStore('workbench', () => {
     }
 
     let name: string
-    let tpl: Template
 
     if (normalized.topicId === '__custom__') {
       name = (normalized.customName ?? '').trim()
@@ -473,88 +467,47 @@ export const useWorkbenchStore = defineStore('workbench', () => {
         toast('请填写自定义项目名称')
         return localFailure('INVALID_INPUT', '请填写自定义项目名称')
       }
-      tpl = customTemplate(name)
     } else {
       const found: Template | undefined = TEMPLATES[normalized.topicId]
       if (found === undefined) {
         toast('没有找到这个题目，请重新选择')
         return localFailure('NOT_FOUND', '没有找到这个题目，请重新选择')
       }
+      // 只取题目名称；模板里的步骤、里程碑、疑问都是示例内容，不进新项目
       name = normalized.topicId
-      tpl = found
     }
 
     const projectId = createProjectId()
-    const timestamp = nowIso()
-    const milestone = tpl.ms.find((item) => item.s === 'cur')?.t ?? tpl.ms[0]?.t ?? null
-
-    const tasks: Task[] = tpl.steps.map((step) => ({
-      id: createTaskId(),
-      projectId,
-      title: step.t,
-      status: 'todo',
-      doneCriteria: normalizeNullable(step.done),
-      // 契约 2.2：MVP 无成员名单，线上 owner 恒为 null
-      owner: null,
-      // 模板里的「成员A / 成员B」只作为旧页面的展示内容
-      suggestedOwner: normalizeNullable(step.owner),
-      milestone,
-      why: normalizeNullable(step.why),
-      // 模板任务不是从 draft 认领的，没有幂等键
-      draftKey: null,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    }))
-
-    const doubtRecords: Doubt[] = tpl.doubts.map((text) => ({
-      id: createDoubtId(),
-      projectId,
-      text,
-      status: 'open',
-      sourceEvidenceId: null,
-      createdAt: timestamp,
-      resolvedAt: null,
-    }))
-
     const memberCount = normalized.members > 0 ? normalized.members : 3
 
     const project: Project = {
-      ...JSON.parse(JSON.stringify(tpl)),
-      // 覆盖模板里的 papers：论文方向的唯一来源，便于日后换成后端接口
-      papers: presetDirections({ topic: normalized.topicId, projectName: name }),
       projectId,
       projectRevision: 1,
       schemaVersion: PROJECT_SCHEMA_VERSION,
       name,
+      short: shortNameOf(name),
       group: `第 ${projects.value.length + 1} 组`,
       members: `${memberCount} 名成员`,
       updated: '项目创建于今天 · 等待第一条证据',
-      tasks,
+      // 空白项目：以下全部为空，等待用户自己填
+      ms: [],
+      banner: '',
+      papers: [],
+      weekly: [0, 0, 0, 0],
+      materials: [],
+      chat: [],
+      aiPapers: [],
+      tasks: [],
       evidenceRecords: [],
-      doubtRecords,
+      doubtRecords: [],
       profile: normalizeProjectProfile(normalized.profile),
       materialRecords: [],
       materialSegments: [],
       understandingBlocks: [],
+      steps: [],
       evidence: [],
       doubts: [],
-      steps: [],
-      weekly: [0, 0, 0, 0],
-      materials: [],
-      chat: [
-        {
-          who: 'AI 顾问',
-          me: false,
-          text: `你好，我是「${tpl.short}」项目的顾问。项目刚启动，我已为你们生成了最初的步骤（见上方推荐）。上传实验手册或数据集后，我会解析内容让步骤追踪更精准。有问题随时问我。`,
-        },
-      ],
-      aiPapers: [],
     }
-
-    const manualName = normalizeNullable(normalized.manualName)
-    const dataName = normalizeNullable(normalized.dataName)
-    if (manualName !== null) project.materials.push({ name: manualName, type: '实验手册' })
-    if (dataName !== null) project.materials.push({ name: dataName, type: '数据集' })
 
     syncProjectView(project)
     projects.value = [...projects.value, project]
@@ -571,11 +524,8 @@ export const useWorkbenchStore = defineStore('workbench', () => {
     }
 
     window.scrollTo(0, 0)
-    toast(
-      project.materials.length
-        ? `项目已创建，AI 已解析 ${project.materials.length} 份材料并开始追踪步骤`
-        : '项目已创建，AI 已生成启动步骤',
-    )
+    // 空白项目：没有任何东西被「解析」或「生成」，文案必须如实
+    toast('项目已创建（空白项目）。可以先填写项目基本信息，或上传 MD / TXT 材料。')
 
     return { ok: true, data: { projectId, projectRevision: project.projectRevision } }
   }
@@ -595,10 +545,12 @@ export const useWorkbenchStore = defineStore('workbench', () => {
       return localFailure('NOT_FOUND', '项目不存在')
     }
 
-    // 切换项目：取消上一次在途建议请求，避免旧响应写入新项目
+    // 切换项目：取消在途的建议与聊天请求，避免旧响应写入新项目；
+    // 聊天失败原因属于上一个项目，一并清掉，避免串到新项目
     inFlightAbort?.abort()
     inFlightAbort = null
     inFlightToken += 1
+    cancelChat()
 
     // 先改内存再落盘；落盘失败就回到原来的项目，避免「内存里选了 A，磁盘上记着 B」
     const previousIdx = curIdx.value
@@ -627,6 +579,12 @@ export const useWorkbenchStore = defineStore('workbench', () => {
     return false
   }
 
+  /**
+   * v1 遗留兼容入口：**只登记文件名，不读取正文**（工作台已经不再暴露它）。
+   *
+   * 保留它只是为了兼容旧数据与既有用例；页面上的真实材料入口是 `uploadMaterialFile`。
+   * 文案必须如实说明"只有文件名"，不能声称"AI 已解析"。
+   */
   function uploadMaterial(type: MaterialItemType, fileName: string) {
     const project = current.value
     if (project === undefined) return
@@ -636,11 +594,9 @@ export const useWorkbenchStore = defineStore('workbench', () => {
       toast('本地存储不可用，材料没有保存')
       return
     }
-    // 这条是 v1 的「只记文件名」入口，没有内容也没有解析：
-    // 文案必须如实说明，不能声称"AI 已解析"（v2 的解析入口是 uploadMaterialFile）。
     toast(
-      `已登记${type}「${fileName}」；目前只有 md / txt 会被解析，` +
-        '请在「材料与理解草稿」里上传以生成理解草稿',
+      `已登记文件名「${fileName}」；正文没有被读取。` +
+        '需要解析请在材料区上传 MD / TXT 文件。',
     )
   }
 
@@ -969,10 +925,42 @@ export const useWorkbenchStore = defineStore('workbench', () => {
 
   /* ------------------------------------------------ v2：理解草稿（契约 14.3） */
 
-  /** 草稿内容的稳定摘要：用于判断"重复写入同一份草稿"（幂等，不递增版本） */
+  /**
+   * 来源引用的规范化签名（材料 + 版本 + 片段 + 行号，排序后拼接）。
+   *
+   * 用途有两个：
+   *   1. 判断重新生成的候选是否与学生确认过的**同一条**（同文案换来源不算同一条）；
+   *   2. 判断「发给 AI 的已确认内容」是否变化（来源变了 → 请求体里的片段就变了）。
+   */
+  function sourceSignatureOf(sources: MaterialSourceRef[]): string {
+    return sources
+      .map(
+        (source) =>
+          `${source.materialId}@${source.materialVersion}#${source.segmentId}:${source.startLine}-${source.endLine}`,
+      )
+      .sort()
+      .join(',')
+  }
+
+  /** 已确认条目的签名：内容、来源、材料版本任一变化都算「发给 AI 的确认集合」变了 */
+  function confirmedSignatureOf(blocks: UnderstandingBlock[]): string {
+    return blocks
+      .filter((block) => block.status === 'confirmed')
+      .map(
+        (block) =>
+          `${block.id}|${block.materialVersion}|${block.content}|${sourceSignatureOf(block.sources)}`,
+      )
+      .sort()
+      .join('\n')
+  }
+
+  /**
+   * 草稿内容的稳定摘要：用于判断"重复写入同一份草稿"（幂等，不递增版本）。
+   * 来源也在摘要里——同文案换来源是另一份草稿，不能用幂等分支悄悄跳过。
+   */
   function understandingSummary(blocks: UnderstandingBlock[]): string {
     return blocks
-      .map((block) => `${block.id}|${block.status}|${block.content}`)
+      .map((block) => `${block.id}|${block.status}|${block.content}|${sourceSignatureOf(block.sources)}`)
       .sort()
       .join('\n')
   }
@@ -1067,10 +1055,18 @@ export const useWorkbenchStore = defineStore('workbench', () => {
    * 契约 14.3 / 15.3：把服务端草稿写入本地（不访问网络）。
    *
    * 三条清理规则与 15.3 一致：`text` 为空丢该条；来源剔除后为空丢该条（无来源不可用）；
-   * 同一材料当前版本的草稿**整体替换**，并保留学生已经确认过的条目结论。
+   * 同一材料当前版本的草稿**整体替换**（沿用已批准的重生成替换策略）。
    *
-   * 版本语义：草稿生成本身**不递增** `projectRevision`（契约 2.6 / 14.5 的递增事件列表里
-   * 只有材料登记与「确认 / 修改 / 删除 / 整份确认」）；重复写入同一份草稿也不递增。
+   * 状态继承（契约 17.2）：服务端的 `itemId` 只在**本次响应内**唯一，两次理解请求的同名
+   * `itemId` 不代表同一个候选。因此「已确认」只在**候选身份 + 文案 + 材料版本 + 规范化来源
+   * 全部一致**时才继承；只要有一项变了就回到 `pending`，绝不把学生没确认过的内容发出去。
+   *
+   * 版本语义（契约 2.6 / 14.5）：
+   *   - 普通待确认草稿变化（可信上下文没变）不递增 `projectRevision`；
+   *   - 只要**已确认内容、来源或发给 AI 的确认集合**发生变化就 +1，
+   *     使在途的旧建议 / 旧聊天响应按 4.7 失效，不会用旧依据覆盖新状态；
+   *   - 重复写入完全相同的草稿保持幂等（不写盘、不递增版本）；
+   *   - fallback / 空草稿不伪装成功，也不覆盖学生已确认的内容。
    */
   function recordUnderstanding(
     input: RecordUnderstandingInput,
@@ -1089,7 +1085,15 @@ export const useWorkbenchStore = defineStore('workbench', () => {
     }
 
     const timestamp = nowIso()
-    const previousById = new Map(understandingBlocksOf(project).map((block) => [block.id, block]))
+    // 只有**同一材料、同一版本**的条目才可能被继承：同 itemId 不等于同一候选
+    const previousById = new Map(
+      understandingBlocksOf(project)
+        .filter(
+          (block) =>
+            block.materialId === material.materialId && block.materialVersion === material.version,
+        )
+        .map((block) => [block.id, block]),
+    )
     const next: UnderstandingBlock[] = []
 
     for (const kind of UNDERSTANDING_BLOCK_ORDER) {
@@ -1110,6 +1114,14 @@ export const useWorkbenchStore = defineStore('workbench', () => {
 
         const id = understandingBlockKey(material.materialId, kind, candidate.itemId)
         const before = previousById.get(id)
+        // 重新生成时是否保持「已确认」：候选身份（id）、文案、材料版本、规范化来源
+        // 四项全部一致才算同一个候选；同文案换来源必须回到待确认。
+        const inheritedConfirmed =
+          before !== undefined &&
+          before.status === 'confirmed' &&
+          before.content === content &&
+          before.materialVersion === material.version &&
+          sourceSignatureOf(before.sources) === sourceSignatureOf(sources)
 
         next.push({
           id,
@@ -1119,15 +1131,7 @@ export const useWorkbenchStore = defineStore('workbench', () => {
           materialVersion: material.version,
           content,
           sources,
-          /**
-           * 重新生成时的状态继承（契约 17.2：只有学生**实际确认过**的内容才发出去）。
-           *
-           * 服务端的 `itemId` 只在**本次响应内**唯一（按块内序号生成），两次理解请求的
-           * 同名 `itemId` 不代表是同一个候选。所以"已确认"的继承必须**内容一致**：
-           *   - 新文案与学生确认过的文案逐字相同 → 保持 `confirmed`；
-           *   - 新文案变了 → 回到 `pending`，避免把学生没看过的新文案当成已确认发出去。
-           */
-          status: before?.status === 'confirmed' && before.content === content ? 'confirmed' : 'pending',
+          status: inheritedConfirmed ? 'confirmed' : 'pending',
           originalContent: content,
           createdAt: before?.createdAt ?? timestamp,
           updatedAt: timestamp,
@@ -1141,8 +1145,22 @@ export const useWorkbenchStore = defineStore('workbench', () => {
     // 契约 15.2：fallback 时服务端必须给出 notice，界面无论是否写入都要能看到
     const noticeText = typeof input.notice === 'string' ? input.notice.trim() : ''
 
+    // 契约 15.2 第 2 条：fallback 允许四块为空。空草稿（模型没给出结果）**不覆盖**已有条目
+    // ——尤其不能删掉学生已经确认过的内容，也不能把「没有结果」写成「已成功」。
+    if (next.length === 0 && existingBlocks.length > 0) {
+      if (noticeText !== '') toast(noticeText)
+      return {
+        ok: true,
+        data: {
+          materialId: material.materialId,
+          blockCount: 0,
+          projectRevision: project.projectRevision,
+        },
+      }
+    }
+
     if (understandingSummary(existingBlocks) === understandingSummary(next)) {
-      // 幂等：同一份草稿重复写入不递增 projectRevision
+      // 幂等：同一份草稿重复写入不写盘、不递增 projectRevision
       if (noticeText !== '') toast(noticeText)
       return {
         ok: true,
@@ -1154,17 +1172,27 @@ export const useWorkbenchStore = defineStore('workbench', () => {
       }
     }
 
+    // 发给 AI 的「确认集合」签名（已确认内容 + 来源 + 材料版本）：变了就必须递增版本，
+    // 让在途的旧建议 / 旧聊天响应按契约 4.7 失效。未确认草稿的变化不计入。
+    const confirmedBefore = confirmedSignatureOf(project.understandingBlocks)
+
     const saved = commit(project, () => {
       const others = project.understandingBlocks.filter(
         (block) => block.materialId !== material.materialId || block.materialVersion !== material.version,
       )
       project.understandingBlocks = [...others, ...next]
-      // 契约 2.6 / 14.5：递增版本的事件只列了「材料登记」与「草稿条目确认 / 修改 / 删除、
-      // 整份确认」，**不含草稿生成**——草稿写入不递增 projectRevision。
-      project.updated =
-        next.length > 0
-          ? `最近更新：生成了 ${next.length} 条理解草稿`
-          : '最近更新：这份材料没有生成新的理解草稿'
+
+      // 契约 2.6 / 14.5 的递增事件里不含「草稿生成」本身：只有确认集合变化才 +1，
+      // 普通待确认草稿刷新不无意义地递增版本。
+      if (confirmedSignatureOf(project.understandingBlocks) !== confirmedBefore) {
+        project.projectRevision += 1
+        project.updated = '最近更新：认可的项目依据有变化，已要求重新生成建议'
+      } else {
+        project.updated =
+          next.length > 0
+            ? `最近更新：生成了 ${next.length} 条理解草稿`
+            : '最近更新：这份材料没有生成新的理解草稿'
+      }
     })
     if (!saved.ok) return saved
 
@@ -1565,33 +1593,42 @@ export const useWorkbenchStore = defineStore('workbench', () => {
     return { ok: true, data: { taskId, status: 'doing', projectRevision: project.projectRevision } }
   }
 
-  /** 旧页面兼容 wrapper：把步骤下标翻译成 taskId，业务逻辑只在 claimTask 里 */
-  function claimStep(stepIndex: number): ActionResult<ClaimTaskResult> {
+  /**
+   * 页面「就此提问」入口：按**稳定 taskId** 定位任务，拼一句提问后**走真实聊天接口**。
+   *
+   * - 参数是 taskId（字符串），不是步骤下标——下标会随任务顺序漂移，且同一个位置
+   *   可能已经没有任务（契约 2.2 要求一切按稳定 ID 定位）；
+   * - 找不到任务（或任务属于别的项目）时只给提示，不写聊天记录、不发请求；
+   * - 这里不能直接塞一条预写好的回答：那会让接口故障看起来像"顾问答过了"
+   *   （契约 6.4 的问答必须真的调用 `POST /api/advisor/chat`）。
+   */
+  function askAboutStep(taskId: string): void {
     const project = current.value
     if (project === undefined) {
-      return localFailure('NOT_FOUND', '还没有项目，无法认领任务')
+      toast('请先创建项目')
+      return
     }
-    const task: Task | undefined = (project.tasks ?? [])[stepIndex]
-    if (task === undefined) {
-      return localFailure('NOT_FOUND', '任务不存在')
-    }
-    return claimTask({ taskId: task.id })
-  }
 
-  /**
-   * 旧页面兼容 wrapper：把「步骤 N」翻成一句提问，**走真实聊天接口**。
-   *
-   * 这里不能直接塞一条预写好的回答：那会让接口故障看起来像"顾问答过了"
-   * （契约 6.4 的问答必须真的调用 `POST /api/advisor/chat`）。
-   */
-  function askAboutStep(stepIndex: number): void {
-    const project = current.value
-    if (project === undefined) return
-    const step = project.steps[stepIndex]
-    if (step === undefined) return
-    void sendChat(
-      `关于步骤 ${stepIndex + 1}「${step.t}」，我想先了解：${step.why.slice(0, 40)}…该怎么开始？`,
-    )
+    const taskIdText = typeof taskId === 'string' ? taskId.trim() : ''
+    if (taskIdText === '') {
+      toast('该任务已经不在当前项目，请重新获取建议')
+      return
+    }
+
+    const hit = findTaskEverywhere(taskIdText)
+    if (hit === null || hit.project.projectId !== project.projectId) {
+      toast('该任务已经不在当前项目，请重新获取建议')
+      return
+    }
+
+    const task = hit.task
+    const hint = (task.why ?? task.doneCriteria ?? '').trim()
+    const question =
+      hint === ''
+        ? `关于「${task.title}」，我想先了解该怎么开始？`
+        : `关于「${task.title}」，我想先了解：${hint.slice(0, 40)}；该怎么开始？`
+
+    void sendChat(question)
   }
 
   /* -------------------------------------------------------- 解决疑问 */
@@ -1650,9 +1687,12 @@ export const useWorkbenchStore = defineStore('workbench', () => {
 
   /* ---------------------------------------------------------------- 问答 */
 
-  /** 聊天状态：与建议状态分开，页面可以独立显示"正在回答"。 */
+  /**
+   * 聊天状态：与建议状态分开，页面可以独立显示"正在回答"。
+   * `chatError` 是**已经映射成中文的人话**（不展示 error.message、错误码、路径或堆栈）。
+   */
   const chatLoading = ref(false)
-  const chatError = ref<AdvisorApiError | null>(null)
+  const chatError = ref<string | null>(null)
   let chatAbort: AbortController | null = null
   /** 在途聊天序号：只有最后一次请求的响应才允许写入 */
   let chatToken = 0
@@ -1663,17 +1703,29 @@ export const useWorkbenchStore = defineStore('workbench', () => {
     chatAbort = null
     chatToken += 1
     chatLoading.value = false
+    chatError.value = null
   }
 
-  /** 把顾问回答追加到聊天记录；写盘失败只撤销这一条，不影响已经发出的提问 */
+  /**
+   * 把顾问回答追加到聊天记录；写盘失败只撤销这一条，不影响已经发出的提问。
+   *
+   * `who` 如实标注来源：模型回答署「AI 模型」，服务端规则兜底署「服务端兜底」，
+   * 本地不编造任何回答（不用固定回复冒充模型）。
+   */
   function appendAssistant(
     text: string,
-    source: 'model' | 'fallback' | 'error',
+    source: 'model' | 'fallback',
     fallbackReason: string | null,
   ): void {
     const project = current.value
     if (project === undefined) return
-    project.chat.push({ who: 'AI 顾问', me: false, text, source, fallbackReason })
+    project.chat.push({
+      who: source === 'model' ? 'AI 模型' : '服务端兜底',
+      me: false,
+      text,
+      source,
+      fallbackReason,
+    })
     if (!persistOrRollback(() => project.chat.pop())) {
       toast('本地存储不可用，回答没有保存')
     }
@@ -1687,7 +1739,8 @@ export const useWorkbenchStore = defineStore('workbench', () => {
    *     只在非空时出现，未确认草稿绝不进入请求体（契约 17.2）；
    *   - `promptVersion` 固定 `advisor-chat-v2`（`ADVISOR_CHAT_PROMPT_VERSION`）；
    *   - 响应按 `requestId` / `projectId` / `projectRevision` 三项校验，过期则丢弃；
-   *   - 失败时给出可读的中文兜底回答，并保留失败原因供页面展示。
+   *   - 失败时保留用户的问题（不写任何假回答），把**按稳定错误码映射**的中文原因
+   *     放进 `chatError` 供页面展示与重试。
    *
    * 返回 `ActionResult`：页面可以 `void store.sendChat(text)`（只用 toast 与聊天记录），
    * 也可以 `await` 拿到失败码自行处理。
@@ -1700,20 +1753,40 @@ export const useWorkbenchStore = defineStore('workbench', () => {
       return localFailure('NOT_FOUND', '还没有项目，无法提问')
     }
 
+    // 在途回答未结束：阻止重复提交（契约 5.3 的 loading 规则同样适用于问答）
+    if (chatLoading.value) {
+      const busy = '上一条提问还在回答中，请等回答出来再问。'
+      toast(busy)
+      return localFailure('INVALID_INPUT', busy)
+    }
+
     const question = text.trim()
     if (question === '') {
       return localFailure('INVALID_INPUT', '请先输入问题')
     }
-
-    const message = { who: '我', me: true, text: question }
-    project.chat.push(message)
-    // 提问是展示性写入：不递增 projectRevision，写盘失败就撤销这一条
-    if (!persistOrRollback(() => project.chat.pop())) {
-      toast('本地存储不可用，消息没有保存')
-      return localFailure('STORAGE_FULL', '本地存储不可用，消息没有保存')
+    // 契约 6.4：问题 ≤ 2,000 字，store 侧同样有效（页面校验只是提前提示）
+    if (question.length > MAX_ADVISOR_CHAT_QUESTION_LENGTH) {
+      const tooLong = `问题不能超过 ${MAX_ADVISOR_CHAT_QUESTION_LENGTH} 字，请精简后再问。`
+      chatError.value = tooLong
+      toast(tooLong)
+      return localFailure('INVALID_INPUT', tooLong)
     }
 
-    // 契约 6.4：历史最多 20 条，按时间正序（当前提问不算历史）
+    chatError.value = null
+
+    // 重试同一个问题时不再重复写一条相同的用户消息（失败后直接再问不会刷屏）
+    const last = project.chat[project.chat.length - 1]
+    const repeated = last !== undefined && last.me && last.text === question
+    if (!repeated) {
+      project.chat.push({ who: '我', me: true, text: question })
+      // 提问是展示性写入：不递增 projectRevision，写盘失败就撤销这一条
+      if (!persistOrRollback(() => project.chat.pop())) {
+        toast('本地存储不可用，消息没有保存')
+        return localFailure('STORAGE_FULL', '本地存储不可用，消息没有保存')
+      }
+    }
+
+    // 契约 6.4：历史最多 20 条，按时间正序（当前提问不算历史，重试时也不会重复计入）
     const chatHistory: AdvisorChatMessage[] = project.chat
       .slice(0, -1)
       .map((entry) => ({
@@ -1760,19 +1833,15 @@ export const useWorkbenchStore = defineStore('workbench', () => {
     chatLoading.value = false
 
     if (!result.ok) {
-      chatError.value = result.error
-      // 过期响应：静默丢弃，不写聊天记录、不提示用户
+      // 过期响应：静默丢弃，不写聊天记录、不改任何状态、不提示用户
       if (isStaleResponseError(result.error)) {
         return { ok: false, code: result.error.code, message: result.error.message }
       }
-      // 契约 4.5 / 5.2：失败就如实说失败。
-      // 这里**不做**本地假回答——聊天必须真的调用后端，假回复会把接口故障藏起来。
-      const reason = describeAdvisorFailure(result.error)
-      appendAssistant(
-        `顾问暂时回答不了：${reason}你的问题已经保存，稍后可以再问一次。`,
-        'error',
-        result.error.code,
-      )
+      // 契约 4.5 / 5.2：失败就如实说失败，**不做**本地假回答（假回复会把接口故障藏起来）。
+      // 用户的问题已经留在聊天记录里，可以直接再问一次；原因按稳定错误码映射成中文，
+      // 不把 error.message（可能含字段名 / 路径 / 上游原文）展示给用户。
+      const reason = describeChatFailure(result.error)
+      chatError.value = reason
       toast(reason)
       return { ok: false, code: result.error.code, message: reason }
     }
@@ -1782,16 +1851,7 @@ export const useWorkbenchStore = defineStore('workbench', () => {
       currentProjectId.value !== project.projectId ||
       computeProjectRevision(project) !== requestRevision
     ) {
-      const stale: AdvisorApiError = {
-        code: 'STALE_RESPONSE',
-        message: '该聊天响应已过期，已丢弃',
-        retryable: false,
-        retryAfterSeconds: null,
-        requestId: result.data.requestId,
-        cause: 'stale-response',
-      }
-      chatError.value = stale
-      return { ok: false, code: stale.code, message: stale.message }
+      return { ok: false, code: 'STALE_RESPONSE', message: '该聊天响应已过期，已丢弃' }
     }
 
     appendAssistant(result.data.answer, result.data.source, result.data.fallbackReason)
@@ -2116,6 +2176,9 @@ export const useWorkbenchStore = defineStore('workbench', () => {
       if (state?.status === 'loading' && state.requestId === request.requestId) {
         patchAdvisor(projectId, { status: 'idle', requestId: null })
       }
+
+      // 契约 4.7 补充约定 3：旧请求必须结束，当前项目回到**可重试的 idle**，
+      // 不在这里补发请求（由用户点「获取建议」，或提交证据 / 确认内容后由页面自行请求）。
       return localFailure('STALE_RESPONSE', '该建议响应已过期，已丢弃')
     }
 
@@ -2264,9 +2327,10 @@ export const useWorkbenchStore = defineStore('workbench', () => {
     submitEvidence,
     resolveDoubt,
     refreshRecommendations,
-    // 旧页面兼容 wrapper：内部一律调用上面的新 action
-    claimStep,
+    // v1 遗留入口：只登记文件名，不读正文（工作台已不再暴露它）；
+    // 页面上的真实材料入口是下面的 uploadMaterialFile
     uploadMaterial,
+    // 按稳定 taskId 定位任务，内部复用 sendChat（页面不再使用步骤下标定位）
     askAboutStep,
     sendChat,
     askPaperAi,
