@@ -348,4 +348,64 @@ describe('UnderstandingDraftCard', () => {
     })
     expectNoInternalTokens(visibleTextOf(wrapper))
   })
+
+  /* -------------------------------------- 未提交编辑的保留与恢复（父级缓存） */
+
+  const ORIGINAL_GOAL = '用 ERA5 海浪场数据复现极端风浪事件的识别流程'
+
+  it('放弃编辑时把条目原文一起交给父级，父级才能判断条目有没有被替换', async () => {
+    const wrapper = mount(UnderstandingDraftCard, { props: { draft: draftView() } })
+
+    await buttonWithText(wrapper, '修改')?.trigger('click')
+    await wrapper.get('textarea').setValue('我改了一半的说法')
+    // 换到另一份材料：这次编辑被放弃，文字交给父级
+    await wrapper.setProps({
+      draft: draftView({ materialId: 'mat_other', materialName: '数据说明.txt' }),
+    })
+
+    const aborts = wrapper.emitted('editAbort') as
+      Array<Array<{ materialId: string; itemId: string; text: string; original: string }>> | undefined
+    expect(aborts?.[0]?.[0]?.materialId).toBe('mat_9b1e7c2f')
+    expect(aborts?.[0]?.[0]?.itemId).toBe('cnd_goal_0')
+    expect(aborts?.[0]?.[0]?.text).toBe('我改了一半的说法')
+    expect(aborts?.[0]?.[0]?.original).toBe(ORIGINAL_GOAL)
+  })
+
+  it('条目原文没变时恢复父级保留的编辑，可以直接接着改', async () => {
+    const wrapper = mount(UnderstandingDraftCard, { props: { draft: null } })
+
+    await wrapper.setProps({
+      draft: draftView(),
+      pendingEdit: { itemId: 'cnd_goal_0', text: '父级保留的半句话', original: ORIGINAL_GOAL },
+    })
+
+    expect(wrapper.find('textarea').exists()).toBe(true)
+    expect((wrapper.get('textarea').element as HTMLTextAreaElement).value).toBe('父级保留的半句话')
+  })
+
+  it('同 itemId 但条目原文已被替换：不恢复旧编辑，也不进入编辑态', async () => {
+    const wrapper = mount(UnderstandingDraftCard, { props: { draft: null } })
+
+    await wrapper.setProps({
+      draft: draftView({
+        blocks: [{ key: 'goalCandidates', items: [item({ text: '重新生成后换了一条完全不同的目标' })] }],
+      }),
+      pendingEdit: { itemId: 'cnd_goal_0', text: '针对旧内容的半句话', original: ORIGINAL_GOAL },
+    })
+
+    expect(wrapper.find('textarea').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('针对旧内容的半句话')
+  })
+
+  it('条目已经不在了：不恢复旧编辑', async () => {
+    const wrapper = mount(UnderstandingDraftCard, { props: { draft: null } })
+
+    await wrapper.setProps({
+      draft: draftView({ blocks: [{ key: 'goalCandidates', items: [] }] }),
+      pendingEdit: { itemId: 'cnd_goal_0', text: '针对已删除条目的半句话', original: ORIGINAL_GOAL },
+    })
+
+    expect(wrapper.find('textarea').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('针对已删除条目的半句话')
+  })
 })

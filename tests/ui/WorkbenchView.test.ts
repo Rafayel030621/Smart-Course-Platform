@@ -1394,4 +1394,154 @@ describe('WorkbenchView', () => {
     expect(wrapper.get('#wb-panel-progress').text()).toContain('材料 1 份 · 待确认 1 条')
     expect(wrapper.get('#wb-panel-data').text()).toContain('项目甲材料.md')
   })
+
+  /* --------------------------------- 未提交编辑缓存：隔离与失效（合并前复核） */
+
+  /** 两份材料 + 各自草稿的公共前置，返回已挂载的工作台 */
+  async function mountTwoMaterials(scenario: string) {
+    const store = freshStore()
+    createProject(store, scenario)
+    stubMaterialPipeline()
+    const wrapper = mount(WorkbenchView)
+    await goToDataTab(wrapper)
+
+    await chooseMaterialFile(wrapper, new File(['# 材料一\n正文。'], '材料一.md'))
+    await chooseMaterialFile(wrapper, new File(['# 材料二\n正文。'], '材料二.md'))
+    await pickMaterial(wrapper, '材料一.md')
+    await clickButton(wrapper, '生成理解草稿')
+    await pickMaterial(wrapper, '材料二.md')
+    await clickButton(wrapper, '生成理解草稿')
+
+    return { store, wrapper }
+  }
+
+  it('材料换版后，旧版本的未提交编辑不会复活（缓存按项目 + 材料 + 版本隔离）', async () => {
+    const { wrapper } = await mountTwoMaterials('换版缓存项目')
+
+    // 在材料一里改一半，切到材料二（父级保留这段文字）
+    await pickMaterial(wrapper, '材料一.md')
+    await clickButton(wrapper, '修改')
+    await wrapper.get('.dc-edit').setValue('材料一旧版本的半句话')
+    await pickMaterial(wrapper, '材料二.md')
+
+    // 切回来能接着改
+    await pickMaterial(wrapper, '材料一.md')
+    expect((wrapper.get('.dc-edit').element as HTMLTextAreaElement).value).toBe('材料一旧版本的半句话')
+
+    // 重新上传同一份材料：version + 1，旧草稿作废
+    await clickButton(wrapper, '重新上传')
+    await chooseMaterialFile(wrapper, new File(['# 材料一 第二版\n新的正文。'], '材料一.md'))
+    expect(wrapper.get('#wb-data-detail').text()).toContain('版本 2')
+
+    // 新版本重新生成草稿：同 itemId 的条目又出现了
+    await clickButton(wrapper, '生成理解草稿')
+    await pickMaterial(wrapper, '材料二.md')
+    await pickMaterial(wrapper, '材料一.md')
+
+    expect(wrapper.get('.dc').text()).toContain('材料一.md 的目标候选')
+    // 版本已经变了：旧版本的未提交文字不能落到新版本条目上
+    expect(wrapper.find('.dc-edit').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('材料一旧版本的半句话')
+  })
+
+  it('删除条目之后，被保留的旧编辑不会复活', async () => {
+    const { store, wrapper } = await mountTwoMaterials('删除缓存项目')
+
+    await pickMaterial(wrapper, '材料一.md')
+    await clickButton(wrapper, '修改')
+    await wrapper.get('.dc-edit').setValue('删掉这条之前写的话')
+    await pickMaterial(wrapper, '材料二.md')
+
+    await pickMaterial(wrapper, '材料一.md')
+    await clickButton(wrapper, '取消')
+    await clickButton(wrapper, '删除')
+    // 材料一这条已经删掉（材料二的草稿仍在，这里按材料断言）
+    expect(store.pendingUnderstandingBlocks.map((block) => block.materialId)).not.toContain(
+      store.materials[0]?.materialId,
+    )
+    expect(wrapper.get('.dc').text()).not.toContain('材料一.md 的目标候选')
+
+    await pickMaterial(wrapper, '材料二.md')
+    await pickMaterial(wrapper, '材料一.md')
+
+    expect(wrapper.find('.dc-edit').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('删掉这条之前写的话')
+  })
+
+  it('保存修改之后不再恢复旧文字，页面显示刚保存的内容', async () => {
+    const { store, wrapper } = await mountTwoMaterials('保存缓存项目')
+
+    await pickMaterial(wrapper, '材料一.md')
+    await clickButton(wrapper, '修改')
+    await wrapper.get('.dc-edit').setValue('已经保存的新说法')
+    await pickMaterial(wrapper, '材料二.md')
+
+    await pickMaterial(wrapper, '材料一.md')
+    await clickButton(wrapper, '保存修改')
+    expect(store.modifiedUnderstandingBlocks).toHaveLength(1)
+    expect(store.toastText).toContain('已修改')
+
+    await pickMaterial(wrapper, '材料二.md')
+    await pickMaterial(wrapper, '材料一.md')
+
+    expect(wrapper.find('.dc-edit').exists()).toBe(false)
+    expect(wrapper.get('.dc').text()).toContain('已经保存的新说法')
+  })
+
+  it('确认之后不再把旧编辑恢复成编辑态', async () => {
+    const { store, wrapper } = await mountTwoMaterials('确认缓存项目')
+
+    await pickMaterial(wrapper, '材料一.md')
+    await clickButton(wrapper, '修改')
+    await wrapper.get('.dc-edit').setValue('确认前写了一半的话')
+    await pickMaterial(wrapper, '材料二.md')
+
+    await pickMaterial(wrapper, '材料一.md')
+    await clickButton(wrapper, '取消')
+    await clickButton(wrapper, '确认')
+    expect(store.confirmedUnderstandingBlocks).toHaveLength(1)
+
+    await pickMaterial(wrapper, '材料二.md')
+    await pickMaterial(wrapper, '材料一.md')
+
+    expect(wrapper.find('.dc-edit').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('确认前写了一半的话')
+    expect(wrapper.get('.dc').text()).toContain('已确认')
+  })
+
+  it('已修改但未确认的条目计入「待确认」数量，并被「去确认」定位到', async () => {
+    const store = freshStore()
+    createProject(store, '已修改计数项目')
+    stubMaterialPipeline()
+    const wrapper = mount(WorkbenchView)
+    await goToDataTab(wrapper)
+
+    await chooseMaterialFile(wrapper, new File(['# 甲\n正文。'], '甲材料.md'))
+    await chooseMaterialFile(wrapper, new File(['# 乙\n正文。'], '乙材料.md'))
+
+    // 甲的草稿确认掉；乙的草稿改一半（modified，仍未确认）
+    await pickMaterial(wrapper, '甲材料.md')
+    await clickButton(wrapper, '生成理解草稿')
+    await clickButton(wrapper, '确认')
+    await pickMaterial(wrapper, '乙材料.md')
+    await clickButton(wrapper, '生成理解草稿')
+    await clickButton(wrapper, '修改')
+    await wrapper.get('.dc-edit').setValue('乙材料里改过但还没确认的内容')
+    await clickButton(wrapper, '保存修改')
+
+    expect(store.modifiedUnderstandingBlocks).toHaveLength(1)
+    expect(store.confirmedUnderstandingBlocks).toHaveLength(1)
+
+    await goToProgressTab(wrapper)
+    // 已确认的 1 条不计入；modified 计入
+    expect(wrapper.get('#wb-panel-progress').text()).toContain('材料 2 份 · 待确认 1 条')
+
+    const goConfirm = wrapper.findAll('button').find((button) => button.text().includes('去确认'))
+    await goConfirm?.trigger('click')
+    await flushPromises()
+
+    // 定位到还有未确认内容的乙材料，且显示的是改过的内容
+    expect(wrapper.get('#wb-data-detail').text()).toContain('乙材料里改过但还没确认的内容')
+    expect(wrapper.get('#wb-data-detail').text()).toContain('已修改')
+  })
 })

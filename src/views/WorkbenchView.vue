@@ -651,24 +651,61 @@ async function goConfirmMaterials(): Promise<void> {
 }
 
 /**
- * 未提交的草稿编辑按材料保留：切换材料时卡片会把没保存的文字交回来，
- * 切回该材料时再还给卡片，不静默丢弃用户已经打好的内容。
+ * 未提交的草稿编辑按 **项目 + 材料 + 材料版本** 隔离：
+ * 切换材料时卡片把没保存的文字交回来，切回**同一份材料同一版本**时才还给卡片，
+ * 不静默丢弃用户已经打好的内容。
+ *
+ * 两个边界：
+ *   - 材料重新上传（version + 1）后旧缓存失效：旧版本的文字不能落到新版本的条目上；
+ *   - 缓存里同时记住条目原文 `original`，条目被删除或被重新生成替换后不再恢复
+ *     （卡片会再比对一次原文，双保险）。
  */
-const pendingDraftEdits = ref<Record<string, { itemId: string; text: string }>>({})
+interface PendingDraftEdit {
+  itemId: string
+  text: string
+  /** 缓存时该条目的原文 */
+  original: string
+}
 
-function rememberAbortedEdit(payload: { materialId: string; itemId: string; text: string }): void {
+const pendingDraftEdits = ref<Record<string, PendingDraftEdit>>({})
+
+function pendingEditKey(materialId: string, materialVersion: number): string {
+  return `${project.value?.projectId ?? ''}::${materialId}::${materialVersion}`
+}
+
+function pendingEditOf(material: Material | null): PendingDraftEdit | null {
+  if (material === null) return null
+  return pendingDraftEdits.value[pendingEditKey(material.materialId, material.version)] ?? null
+}
+
+function rememberAbortedEdit(payload: {
+  materialId: string
+  materialVersion: number
+  itemId: string
+  text: string
+  original: string
+}): void {
   if (payload.text.trim() === '') return
   pendingDraftEdits.value = {
     ...pendingDraftEdits.value,
-    [payload.materialId]: { itemId: payload.itemId, text: payload.text },
+    [pendingEditKey(payload.materialId, payload.materialVersion)]: {
+      itemId: payload.itemId,
+      text: payload.text,
+      original: payload.original,
+    },
   }
   store.toast('这条修改还没有保存，已保留；切回这份材料可以继续改。')
 }
 
-function clearRememberedEdit(materialId: string): void {
-  if (pendingDraftEdits.value[materialId] === undefined) return
+/**
+ * 清掉某份材料当前版本的缓存：确认、撤销确认、删除、保存修改、重新生成之后，
+ * 那段未提交文字已经不再适用，留着会让旧内容复活。
+ */
+function clearRememberedEdit(materialId: string, materialVersion: number): void {
+  const key = pendingEditKey(materialId, materialVersion)
+  if (pendingDraftEdits.value[key] === undefined) return
   const next = { ...pendingDraftEdits.value }
-  delete next[materialId]
+  delete next[key]
   pendingDraftEdits.value = next
 }
 
@@ -679,7 +716,7 @@ function onDraftEdited(payload: {
   itemId: string
   text: string
 }): void {
-  clearRememberedEdit(payload.materialId)
+  // 缓存由 editDraftItem 在**写入成功之后**清理：失败时用户切回来还能接着改
   editDraftItem(payload)
 }
 
@@ -743,6 +780,9 @@ async function generateUnderstanding(material: Material): Promise<void> {
       notice: result.data.notice,
       errorText: null,
     })
+
+    // 重新生成是整体替换：上一版草稿的未提交文字不再适用，避免挂到被替换的条目上
+    clearRememberedEdit(material.materialId, material.version)
   } catch (error: unknown) {
     console.warn('[材料] 理解请求未能完成', error instanceof Error ? error.name : 'unknown')
     patchUnderstanding(key, {
@@ -826,21 +866,32 @@ function blockIdOf(payload: {
 function confirmDraftItem(payload: { materialId: string; materialVersion: number; itemId: string }) {
   const blockId = blockIdOf(payload)
   if (blockId === null) {
+    // 条目已经不在：这段未提交文字也不该再留着
+    clearRememberedEdit(payload.materialId, payload.materialVersion)
     store.toast('这条理解已经不存在，请重新生成理解草稿')
     return
   }
   const result = store.confirmUnderstandingBlock({ blockId })
-  if (!result.ok) notifyFailure(result)
+  if (!result.ok) {
+    notifyFailure(result)
+    return
+  }
+  clearRememberedEdit(payload.materialId, payload.materialVersion)
 }
 
 function undoDraftItem(payload: { materialId: string; materialVersion: number; itemId: string }) {
   const blockId = blockIdOf(payload)
   if (blockId === null) {
+    clearRememberedEdit(payload.materialId, payload.materialVersion)
     store.toast('这条理解已经不存在，请重新生成理解草稿')
     return
   }
   const result = store.unconfirmUnderstandingBlock({ blockId })
-  if (!result.ok) notifyFailure(result)
+  if (!result.ok) {
+    notifyFailure(result)
+    return
+  }
+  clearRememberedEdit(payload.materialId, payload.materialVersion)
 }
 
 function editDraftItem(payload: {
@@ -851,26 +902,41 @@ function editDraftItem(payload: {
 }) {
   const blockId = blockIdOf(payload)
   if (blockId === null) {
+    clearRememberedEdit(payload.materialId, payload.materialVersion)
     store.toast('这条理解已经不存在，请重新生成理解草稿')
     return
   }
   const result = store.modifyUnderstandingBlock({ blockId, content: payload.text })
-  if (!result.ok) notifyFailure(result)
+  if (!result.ok) {
+    // 提交失败：保留缓存，用户切回这份材料还能接着改
+    notifyFailure(result)
+    return
+  }
+  clearRememberedEdit(payload.materialId, payload.materialVersion)
 }
 
 function removeDraftItem(payload: { materialId: string; materialVersion: number; itemId: string }) {
   const blockId = blockIdOf(payload)
   if (blockId === null) {
+    clearRememberedEdit(payload.materialId, payload.materialVersion)
     store.toast('这条理解已经不存在')
     return
   }
   const result = store.deleteUnderstandingBlock({ blockId })
-  if (!result.ok) notifyFailure(result)
+  if (!result.ok) {
+    notifyFailure(result)
+    return
+  }
+  clearRememberedEdit(payload.materialId, payload.materialVersion)
 }
 
 function confirmDraftAll(payload: { materialId: string; materialVersion: number }) {
   const result = store.confirmAllUnderstanding({ materialId: payload.materialId })
-  if (!result.ok) notifyFailure(result)
+  if (!result.ok) {
+    notifyFailure(result)
+    return
+  }
+  clearRememberedEdit(payload.materialId, payload.materialVersion)
 }
 
 /* -------------------------------------------------------------- 问答 */
@@ -1466,7 +1532,7 @@ watch(
                 :has-material="true"
                 :can-generate="selectedDraft.canGenerate"
                 :current-material-version="selectedMaterial.version"
-                :pending-edit="pendingDraftEdits[selectedMaterial.materialId] ?? null"
+                :pending-edit="pendingEditOf(selectedMaterial)"
                 @generate="generateUnderstanding(selectedMaterial)"
                 @retry="generateUnderstanding(selectedMaterial)"
                 @confirm="confirmDraftItem"
