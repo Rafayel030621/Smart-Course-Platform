@@ -14,6 +14,7 @@ import {
   understandingDraftViewOf,
   type DraftSource,
   type MaterialFileType,
+  type UnderstandingDraftView,
 } from '@/components/materialTypes'
 import { CHINESE_NUM, WEEK_LABELS, useWorkbenchStore } from '@/stores/workbench'
 import { deriveDoubtSnapshots, deriveEvidenceSnapshots, toDisplayTime } from '@/domain/activity'
@@ -533,6 +534,192 @@ function replaceMaterial(materialId: string) {
   materialInput.value?.chooseReplace(materialId)
 }
 
+/* ------------------------------------------- 工作台视图标签（推进 / 资料） */
+
+/**
+ * 工作台内部两个视图：
+ *   - 项目推进：日常推进（建议、任务、问答、证据、里程碑、疑问、活跃度）；
+ *   - 项目资料：项目基本信息、材料列表与**当前材料**的理解草稿。
+ *
+ * 为什么用标签：原来把基本信息表单和全部材料的草稿都塞在 280px 侧栏，
+ * 侧栏无限变长、草稿挤在窄栏里读不了。标签让每一屏只承担一类任务，
+ * 资料页因此能拿到主体宽度。
+ *
+ * 两个面板都用 `hidden` 而不是 `v-if`：切换标签不能卸载组件，
+ * 否则未保存的表单输入、草稿编辑文字与聊天输入都会被丢掉。
+ */
+type WorkbenchTab = 'progress' | 'data'
+
+const TABS: ReadonlyArray<{ key: WorkbenchTab; label: string }> = [
+  { key: 'progress', label: '项目推进' },
+  { key: 'data', label: '项目资料' },
+]
+
+const activeTab = ref<WorkbenchTab>('progress')
+
+function selectTab(tab: WorkbenchTab): void {
+  activeTab.value = tab
+}
+
+/** 标签页键盘操作：左右方向键循环，Home / End 到首尾（tablist 的标准行为） */
+function onTabKeydown(event: KeyboardEvent, index: number): void {
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+  event.preventDefault()
+
+  let next = index
+  if (event.key === 'ArrowLeft') next = (index - 1 + TABS.length) % TABS.length
+  if (event.key === 'ArrowRight') next = (index + 1) % TABS.length
+  if (event.key === 'Home') next = 0
+  if (event.key === 'End') next = TABS.length - 1
+
+  const target = TABS[next]
+  if (target === undefined) return
+  activeTab.value = target.key
+  void nextTick(() => document.getElementById(`wb-tab-${target.key}`)?.focus())
+}
+
+/** 当前选中的材料：资料页右栏只展示它的草稿，避免一次展开所有材料的全部条目 */
+const selectedMaterialId = ref('')
+
+const selectedMaterial = computed<Material | null>(
+  () => store.materials.find((material) => material.materialId === selectedMaterialId.value) ?? null,
+)
+
+/** 某一材料的草稿计数（待确认 = 未确认 + 已修改，只有已确认才进 AI 上下文） */
+function draftCountsOf(materialId: string): { pending: number; confirmed: number; total: number } {
+  const blocks = (project.value?.understandingBlocks ?? []).filter(
+    (block) => block.materialId === materialId,
+  )
+  return {
+    pending: blocks.filter((block) => block.status !== 'confirmed').length,
+    confirmed: blocks.filter((block) => block.status === 'confirmed').length,
+    total: blocks.length,
+  }
+}
+
+/**
+ * 资料摘要：全部从真实状态推导（store 的当前项目读取器），不写死。
+ * `materials` 只算 v2 真实上传的材料；只登记过文件名的历史条目单独计数。
+ */
+const dataSummary = computed(() => ({
+  materials: store.materials.length,
+  pending: store.pendingUnderstandingBlocks.length + store.modifiedUnderstandingBlocks.length,
+  confirmed: store.confirmedUnderstandingBlocks.length,
+  legacy: materialRows.value.filter((row) => row.material === null).length,
+}))
+
+/** 任务计数：推进页摘要与地图入口共用同一份真实数据 */
+const taskCounts = computed(() => {
+  const tasks = project.value?.tasks ?? []
+  return {
+    doing: tasks.filter((task) => task.status === 'doing').length,
+    done: tasks.filter((task) => task.status === 'done').length,
+    todo: tasks.filter((task) => task.status === 'todo').length,
+  }
+})
+
+/** 材料列表变化后保证选中的材料仍属于当前项目；失效时选第一份 */
+watch(
+  () => store.materials.map((material) => material.materialId).join(','),
+  () => {
+    if (store.materials.some((material) => material.materialId === selectedMaterialId.value)) return
+    const first = store.materials[0]
+    selectedMaterialId.value = first === undefined ? '' : first.materialId
+  },
+  { immediate: true },
+)
+
+function selectMaterial(materialId: string): void {
+  selectedMaterialId.value = materialId
+}
+
+/** 还有待确认内容的材料（优先打开它）；没有则退到第一份材料 */
+function firstMaterialToConfirm(): Material | null {
+  const materials = store.materials
+  const hit = materials.find((material) => draftCountsOf(material.materialId).pending > 0)
+  return hit ?? materials[0] ?? null
+}
+
+/** 「去确认」：切到项目资料、选中那条材料，并把材料详情滚进视野 */
+async function goConfirmMaterials(): Promise<void> {
+  const target = firstMaterialToConfirm()
+  activeTab.value = 'data'
+  if (target !== null) selectedMaterialId.value = target.materialId
+  await nextTick()
+  const detail = document.getElementById('wb-data-detail')
+  detail?.scrollIntoView({ block: 'start', behavior: 'smooth' })
+}
+
+/**
+ * 未提交的草稿编辑按 **项目 + 材料 + 材料版本** 隔离：
+ * 切换材料时卡片把没保存的文字交回来，切回**同一份材料同一版本**时才还给卡片，
+ * 不静默丢弃用户已经打好的内容。
+ *
+ * 两个边界：
+ *   - 材料重新上传（version + 1）后旧缓存失效：旧版本的文字不能落到新版本的条目上；
+ *   - 缓存里同时记住条目原文 `original`，条目被删除或被重新生成替换后不再恢复
+ *     （卡片会再比对一次原文，双保险）。
+ */
+interface PendingDraftEdit {
+  itemId: string
+  text: string
+  /** 缓存时该条目的原文 */
+  original: string
+}
+
+const pendingDraftEdits = ref<Record<string, PendingDraftEdit>>({})
+
+function pendingEditKey(materialId: string, materialVersion: number): string {
+  return `${project.value?.projectId ?? ''}::${materialId}::${materialVersion}`
+}
+
+function pendingEditOf(material: Material | null): PendingDraftEdit | null {
+  if (material === null) return null
+  return pendingDraftEdits.value[pendingEditKey(material.materialId, material.version)] ?? null
+}
+
+function rememberAbortedEdit(payload: {
+  materialId: string
+  materialVersion: number
+  itemId: string
+  text: string
+  original: string
+}): void {
+  if (payload.text.trim() === '') return
+  pendingDraftEdits.value = {
+    ...pendingDraftEdits.value,
+    [pendingEditKey(payload.materialId, payload.materialVersion)]: {
+      itemId: payload.itemId,
+      text: payload.text,
+      original: payload.original,
+    },
+  }
+  store.toast('这条修改还没有保存，已保留；切回这份材料可以继续改。')
+}
+
+/**
+ * 清掉某份材料当前版本的缓存：确认、撤销确认、删除、保存修改、重新生成之后，
+ * 那段未提交文字已经不再适用，留着会让旧内容复活。
+ */
+function clearRememberedEdit(materialId: string, materialVersion: number): void {
+  const key = pendingEditKey(materialId, materialVersion)
+  if (pendingDraftEdits.value[key] === undefined) return
+  const next = { ...pendingDraftEdits.value }
+  delete next[key]
+  pendingDraftEdits.value = next
+}
+
+/** 提交修改：先清掉「保留的未提交编辑」，再走原有的按 blockId 提交 */
+function onDraftEdited(payload: {
+  materialId: string
+  materialVersion: number
+  itemId: string
+  text: string
+}): void {
+  // 缓存由 editDraftItem 在**写入成功之后**清理：失败时用户切回来还能接着改
+  editDraftItem(payload)
+}
+
 /* --------------------------------------------------- 材料理解草稿（M2-A） */
 
 type UnderstandingPhase = 'idle' | 'loading' | 'done' | 'error'
@@ -593,6 +780,9 @@ async function generateUnderstanding(material: Material): Promise<void> {
       notice: result.data.notice,
       errorText: null,
     })
+
+    // 重新生成是整体替换：上一版草稿的未提交文字不再适用，避免挂到被替换的条目上
+    clearRememberedEdit(material.materialId, material.version)
   } catch (error: unknown) {
     console.warn('[材料] 理解请求未能完成', error instanceof Error ? error.name : 'unknown')
     patchUnderstanding(key, {
@@ -605,17 +795,41 @@ async function generateUnderstanding(material: Material): Promise<void> {
 }
 
 /**
- * 草稿卡片按材料渲染。条目状态与来源全部来自 store，
- * 页面只做投影（不自己造候选、不自己改状态）。
+ * 当前材料的草稿投影：资料页只渲染**这一份**材料的草稿，
+ * 不再把每份材料的全部条目一次性铺开（那正是原来把窄栏撑爆的原因）。
+ * 条目状态与来源仍然全部来自 store，页面只做投影。
  */
-const draftGroups = computed(() => {
+const selectedDraft = computed(() => {
   const p = project.value
-  if (p === undefined) return []
-  return store.materials.map((material) => ({
-    material,
+  const material = selectedMaterial.value
+  if (p === undefined || material === null) {
+    return {
+      draft: null as UnderstandingDraftView | null,
+      state: {
+        phase: 'idle' as UnderstandingPhase,
+        source: null,
+        notice: null,
+        errorText: null,
+      },
+      canGenerate: false,
+    }
+  }
+
+  return {
     draft: understandingDraftViewOf(material, blocksOfMaterial(p, material.materialId)),
     state: understandingStateOf(material),
-  }))
+    canGenerate:
+      materialRows.value.find((row) => row.material?.materialId === material.materialId)?.canGenerate ===
+      true,
+  }
+})
+
+/** 当前材料在列表里的片段文案（详情头部复用，模板里不再重复 find） */
+const selectedRowText = computed(() => {
+  const material = selectedMaterial.value
+  if (material === null) return ''
+  const row = materialRows.value.find((item) => item.material?.materialId === material.materialId)
+  return row?.segmentText ?? ''
 })
 
 /**
@@ -652,21 +866,32 @@ function blockIdOf(payload: {
 function confirmDraftItem(payload: { materialId: string; materialVersion: number; itemId: string }) {
   const blockId = blockIdOf(payload)
   if (blockId === null) {
+    // 条目已经不在：这段未提交文字也不该再留着
+    clearRememberedEdit(payload.materialId, payload.materialVersion)
     store.toast('这条理解已经不存在，请重新生成理解草稿')
     return
   }
   const result = store.confirmUnderstandingBlock({ blockId })
-  if (!result.ok) notifyFailure(result)
+  if (!result.ok) {
+    notifyFailure(result)
+    return
+  }
+  clearRememberedEdit(payload.materialId, payload.materialVersion)
 }
 
 function undoDraftItem(payload: { materialId: string; materialVersion: number; itemId: string }) {
   const blockId = blockIdOf(payload)
   if (blockId === null) {
+    clearRememberedEdit(payload.materialId, payload.materialVersion)
     store.toast('这条理解已经不存在，请重新生成理解草稿')
     return
   }
   const result = store.unconfirmUnderstandingBlock({ blockId })
-  if (!result.ok) notifyFailure(result)
+  if (!result.ok) {
+    notifyFailure(result)
+    return
+  }
+  clearRememberedEdit(payload.materialId, payload.materialVersion)
 }
 
 function editDraftItem(payload: {
@@ -677,26 +902,41 @@ function editDraftItem(payload: {
 }) {
   const blockId = blockIdOf(payload)
   if (blockId === null) {
+    clearRememberedEdit(payload.materialId, payload.materialVersion)
     store.toast('这条理解已经不存在，请重新生成理解草稿')
     return
   }
   const result = store.modifyUnderstandingBlock({ blockId, content: payload.text })
-  if (!result.ok) notifyFailure(result)
+  if (!result.ok) {
+    // 提交失败：保留缓存，用户切回这份材料还能接着改
+    notifyFailure(result)
+    return
+  }
+  clearRememberedEdit(payload.materialId, payload.materialVersion)
 }
 
 function removeDraftItem(payload: { materialId: string; materialVersion: number; itemId: string }) {
   const blockId = blockIdOf(payload)
   if (blockId === null) {
+    clearRememberedEdit(payload.materialId, payload.materialVersion)
     store.toast('这条理解已经不存在')
     return
   }
   const result = store.deleteUnderstandingBlock({ blockId })
-  if (!result.ok) notifyFailure(result)
+  if (!result.ok) {
+    notifyFailure(result)
+    return
+  }
+  clearRememberedEdit(payload.materialId, payload.materialVersion)
 }
 
 function confirmDraftAll(payload: { materialId: string; materialVersion: number }) {
   const result = store.confirmAllUnderstanding({ materialId: payload.materialId })
-  if (!result.ok) notifyFailure(result)
+  if (!result.ok) {
+    notifyFailure(result)
+    return
+  }
+  clearRememberedEdit(payload.materialId, payload.materialVersion)
 }
 
 /* -------------------------------------------------------------- 问答 */
@@ -810,6 +1050,9 @@ watch(
     lastSavedAt.value = ''
     lastQuestion.value = ''
     chatText.value = ''
+    // 摘要、选中材料与保留的编辑都属于上一个项目：一并清掉，避免串项目
+    selectedMaterialId.value = ''
+    pendingDraftEdits.value = {}
   },
   { immediate: true },
 )
@@ -821,6 +1064,59 @@ watch(
 
   <!-- 项目工作台 -->
   <div v-else>
+    <!-- 共用头部：当前项目与切换入口在两个标签页都可见，避免切了标签不知道在操作哪个项目 -->
+    <div class="card wb-head">
+      <div class="wb-head-top">
+        <div class="wb-head-project">
+          <label class="wb-proj-label" for="wb-project-select">当前项目</label>
+          <select
+            id="wb-project-select"
+            class="proj-select"
+            :value="project.projectId"
+            @change="onSelectProject(($event.target as HTMLSelectElement).value)"
+          >
+            <option v-for="item in store.projects" :key="item.projectId" :value="item.projectId">
+              {{ item.name }}
+            </option>
+          </select>
+          <div class="wb-proj-meta">{{ project.group }} · {{ project.members }} · {{ project.updated }}</div>
+        </div>
+        <div class="wb-head-actions">
+          <button class="btn" type="button" @click="store.showCreate()">＋ 新建项目</button>
+          <button class="btn" type="button" @click="router.push('/map')">查看项目地图</button>
+        </div>
+      </div>
+
+      <div class="wb-tabs" role="tablist" aria-label="工作台视图">
+        <button
+          v-for="(tab, index) in TABS"
+          :id="`wb-tab-${tab.key}`"
+          :key="tab.key"
+          class="wb-tab"
+          type="button"
+          role="tab"
+          :aria-selected="activeTab === tab.key"
+          :aria-controls="`wb-panel-${tab.key}`"
+          :tabindex="activeTab === tab.key ? 0 : -1"
+          @click="selectTab(tab.key)"
+          @keydown="onTabKeydown($event, index)"
+        >
+          {{ tab.label }}
+          <span v-if="tab.key === 'data' && dataSummary.pending > 0" class="tag wb-tab-badge">
+            待确认 {{ dataSummary.pending }}
+          </span>
+        </button>
+      </div>
+    </div>
+
+    <!-- ======================================================= 项目推进 -->
+    <section
+      id="wb-panel-progress"
+      class="wb-panel"
+      role="tabpanel"
+      aria-labelledby="wb-tab-progress"
+      :hidden="activeTab !== 'progress'"
+    >
     <!-- 流程条：没有里程碑时给真实空状态 -->
     <div class="card">
       <div class="card-b" style="padding:10px 14px 4px;">
@@ -842,140 +1138,47 @@ watch(
     <div class="stu-grid">
       <!-- ---------------------------------------------------------- 左栏 -->
       <div>
-        <div class="card" style="margin-bottom:14px;">
-          <div class="card-h">我的项目</div>
-          <div class="card-b">
-            <select
-              class="proj-select"
-              :value="project.projectId"
-              @change="onSelectProject(($event.target as HTMLSelectElement).value)"
-            >
-              <option v-for="item in store.projects" :key="item.projectId" :value="item.projectId">
-                {{ item.name }}
-              </option>
-            </select>
-            <div style="font-size:12px;color:#888780;line-height:1.7;margin-bottom:8px;">
-              {{ project.group }} · {{ project.members }}<br />{{ project.updated }}
-            </div>
-            <button class="btn" style="width:100%;margin-bottom:8px;" @click="store.showCreate()">
-              ＋ 新建项目
-            </button>
-            <button class="btn" style="width:100%;" @click="router.push('/map')">查看项目地图</button>
-          </div>
-        </div>
-
-        <!-- 项目资料：唯一的材料入口（真实 MD / TXT 上传 → 解析 → 理解草稿） -->
+        <!-- 侧栏只放简明信息与入口：完整表单与材料草稿在「项目资料」标签页 -->
         <div class="card" style="margin-bottom:14px;">
           <div class="card-h">
-            项目资料
-            <span class="tag" style="background:#EEEDFE;color:#3C3489;border:1px solid #CECBF6;">
-              本轮支持 MD / TXT
+            项目状态
+            <span class="tag" style="background:#E6F1FB;color:#185FA5;border:1px solid #B5D4F4;">
+              {{ dataSummary.materials }} 份材料
             </span>
           </div>
           <div class="card-b">
-            <div v-for="row in materialRows" :key="row.key" class="mat-row">
-              <div class="mat-head">
-                <span class="mat-name" :title="row.name">{{ row.name }}</span>
-                <span class="tag mat-tag" :class="row.canGenerate ? 'is-ok' : 'is-wait'">
-                  {{ row.parseText }}
-                </span>
+            <dl class="stat-list">
+              <div class="stat-row">
+                <dt>资料</dt>
+                <dd>材料 {{ dataSummary.materials }} 份 · 待确认 {{ dataSummary.pending }} 条</dd>
               </div>
-              <div class="mat-meta">
-                <span v-if="row.versionText">{{ row.versionText }}</span>
-                <span v-if="row.segmentText">{{ row.segmentText }}</span>
-                <span>读取状态：{{ row.readText }}</span>
+              <div class="stat-row">
+                <dt>任务</dt>
+                <dd>进行中 {{ taskCounts.doing }} · 已完成 {{ taskCounts.done }}</dd>
               </div>
-              <div v-if="row.material" class="mat-actions">
-                <button
-                  class="btn"
-                  type="button"
-                  :disabled="!row.canGenerate || materialBusy"
-                  @click="generateUnderstanding(row.material)"
-                >
-                  获取理解草稿
-                </button>
-                <button
-                  class="btn"
-                  type="button"
-                  :disabled="materialBusy"
-                  @click="replaceMaterial(row.material.materialId)"
-                >
-                  重新上传
-                </button>
+              <div class="stat-row">
+                <dt>证据</dt>
+                <dd>{{ project.evidenceRecords.length }} 条</dd>
               </div>
-              <div v-else class="mat-actions">
-                <span class="mat-hint">这份材料只有文件名：重新上传一份 MD / TXT 才能生成理解草稿。</span>
-              </div>
+            </dl>
+            <p v-if="dataSummary.legacy > 0" class="stat-note">
+              另有 {{ dataSummary.legacy }} 条历史材料只登记了文件名，正文还没有读取。
+            </p>
+            <div class="stat-actions">
+              <button
+                v-if="dataSummary.pending > 0"
+                class="btn primary"
+                type="button"
+                @click="goConfirmMaterials"
+              >
+                去确认（{{ dataSummary.pending }} 条）
+              </button>
+              <button class="btn" type="button" @click="selectTab('data')">查看项目资料</button>
             </div>
-
-            <div v-if="!materialRows.length" class="empty" style="padding:4px 0 8px;">
-              还没有材料。上传一份 MD 或 TXT 文件后，系统会拆成片段并生成待确认的理解草稿。
-            </div>
-
-            <MaterialUploader
-              ref="materialInput"
-              :stage="materialStage"
-              :busy="materialBusy"
-              :error-text="materialError"
-              :notice="materialNotice"
-              @upload="onMaterialUpload"
-              @retry="retryMaterialUpload"
-            />
-
-            <p class="mat-roadmap">
-              本轮支持 MD、TXT（单个文件不超过 1 MB）；CSV、XLSX 将在下一批支持，PDF、DOCX、ZIP
-              将在后续版本支持。
-            </p>
           </div>
         </div>
 
-        <div class="card" style="margin-bottom:14px;">
-          <div class="card-h">项目基本信息（目标 / 预期结果 / 成员 / 研究周期）</div>
-          <div class="card-b">
-            <ProjectProfileForm />
-          </div>
-        </div>
-
-        <div class="card" style="margin-bottom:14px;">
-          <div class="card-h">
-            材料理解草稿
-            <span class="tag" style="background:#FAEEDA;color:#854F0B;border:1px solid #FAC775;">
-              确认后才会用于建议
-            </span>
-          </div>
-          <div class="card-b">
-            <template v-if="draftGroups.length">
-              <UnderstandingDraftCard
-                v-for="group in draftGroups"
-                :key="group.material.materialId"
-                :draft="group.draft"
-                :source="group.state.source"
-                :notice="group.state.notice"
-                :loading="group.state.phase === 'loading'"
-                :error-text="group.state.errorText"
-                :confirming="group.state.phase === 'loading'"
-                :has-material="true"
-                :can-generate="materialRows.some((row) => row.material?.materialId === group.material.materialId && row.canGenerate)"
-                :current-material-version="group.material.version"
-                @generate="generateUnderstanding(group.material)"
-                @retry="generateUnderstanding(group.material)"
-                @confirm="confirmDraftItem"
-                @undo="undoDraftItem"
-                @edit="editDraftItem"
-                @remove="removeDraftItem"
-                @confirm-all="confirmDraftAll"
-              />
-            </template>
-            <p v-else class="empty" style="padding:4px 0;">
-              还没有材料。先在「项目资料」里上传 MD 或 TXT 文件，再生成理解草稿。
-            </p>
-            <p class="draft-note">
-              只有标着「已确认」的内容会进入 AI 建议与问答；「待确认」和「已修改」都只是草稿。
-            </p>
-          </div>
-        </div>
-
-        <div class="card" style="margin-bottom:14px;">
+                <div class="card" style="margin-bottom:14px;">
           <div class="card-h">里程碑进度</div>
           <div class="card-b">
             <template v-if="project.ms.length">
@@ -1206,7 +1409,151 @@ watch(
           </div>
         </div>
       </div>
-    </div>
+      </div>
+    </section>
+
+    <!-- ======================================================= 项目资料 -->
+    <section
+      id="wb-panel-data"
+      class="wb-panel"
+      role="tabpanel"
+      aria-labelledby="wb-tab-data"
+      :hidden="activeTab !== 'data'"
+    >
+      <!-- 项目基本信息：用主体宽度的宽表单，不再挤在窄侧栏 -->
+      <div class="card" style="margin-bottom:14px;">
+        <div class="card-h">
+          项目基本信息（目标 / 预期结果 / 成员 / 研究周期）
+          <span class="tag" style="background:#f1efe8;color:#5f5e5a;border:1px solid #d3d1c7;">
+            保存后会随建议一起交给 AI
+          </span>
+        </div>
+        <div class="card-b">
+          <ProjectProfileForm layout="wide" />
+        </div>
+      </div>
+
+      <!-- 材料：左边选材料，右边只显示当前这份材料的解析、草稿与来源 -->
+      <div class="card">
+        <div class="card-h">
+          材料
+          <span class="tag" style="background:#EEEDFE;color:#3C3489;border:1px solid #CECBF6;">
+            本轮支持 MD / TXT
+          </span>
+        </div>
+        <div class="card-b data-grid">
+          <div class="data-list">
+            <p class="data-list-h">材料列表</p>
+            <ul class="mat-list">
+              <li v-for="row in materialRows" :key="row.key">
+                <button
+                  class="mat-pick"
+                  type="button"
+                  :aria-current="
+                    row.material !== null && row.material.materialId === selectedMaterialId
+                      ? 'true'
+                      : undefined
+                  "
+                  @click="row.material !== null && selectMaterial(row.material.materialId)"
+                >
+                  <span class="mat-pick-name" :title="row.name">{{ row.name }}</span>
+                  <span class="mat-pick-meta">
+                    {{ row.parseText }}
+                    <template v-if="row.versionText">· {{ row.versionText }}</template>
+                    <template v-if="row.segmentText">· {{ row.segmentText }}</template>
+                  </span>
+                  <span class="mat-pick-flags">
+                    <span
+                      v-if="row.material !== null && draftCountsOf(row.material.materialId).pending > 0"
+                      class="tag mat-pick-pending"
+                    >
+                      待确认 {{ draftCountsOf(row.material.materialId).pending }}
+                    </span>
+                    <span
+                      v-else-if="row.material !== null"
+                      class="tag mat-pick-ok"
+                    >
+                      已确认 {{ draftCountsOf(row.material.materialId).confirmed }}
+                    </span>
+                    <span v-else class="tag">正文未读取</span>
+                  </span>
+                </button>
+              </li>
+            </ul>
+
+            <p v-if="!materialRows.length" class="empty" style="padding:2px 0 8px;">
+              还没有材料。上传一份 MD 或 TXT 文件后，系统会拆成片段并生成待确认的理解草稿。
+            </p>
+
+            <MaterialUploader
+              ref="materialInput"
+              :key="project.projectId"
+              :stage="materialStage"
+              :busy="materialBusy"
+              :error-text="materialError"
+              :notice="materialNotice"
+              @upload="onMaterialUpload"
+              @retry="retryMaterialUpload"
+            />
+
+            <p class="mat-roadmap">
+              本轮支持 MD、TXT（单个文件不超过 1 MB）；CSV、XLSX 将在下一批支持，PDF、DOCX、ZIP
+              将在后续版本支持。
+            </p>
+          </div>
+
+          <div id="wb-data-detail" class="data-detail">
+            <template v-if="selectedMaterial">
+              <div class="data-detail-h">
+                <b class="data-detail-name" :title="selectedMaterial.name">{{ selectedMaterial.name }}</b>
+                <span class="data-detail-meta">
+                  版本 {{ selectedMaterial.version }}
+                  <template v-if="selectedRowText !== ''"> · {{ selectedRowText }}</template>
+                </span>
+                <div class="data-detail-actions">
+                  <button
+                    class="btn"
+                    type="button"
+                    :disabled="materialBusy"
+                    @click="replaceMaterial(selectedMaterial.materialId)"
+                  >
+                    重新上传
+                  </button>
+                </div>
+              </div>
+
+              <UnderstandingDraftCard
+                :draft="selectedDraft.draft"
+                :source="selectedDraft.state.source"
+                :notice="selectedDraft.state.notice"
+                :loading="selectedDraft.state.phase === 'loading'"
+                :error-text="selectedDraft.state.errorText"
+                :confirming="selectedDraft.state.phase === 'loading'"
+                :has-material="true"
+                :can-generate="selectedDraft.canGenerate"
+                :current-material-version="selectedMaterial.version"
+                :pending-edit="pendingEditOf(selectedMaterial)"
+                @generate="generateUnderstanding(selectedMaterial)"
+                @retry="generateUnderstanding(selectedMaterial)"
+                @confirm="confirmDraftItem"
+                @undo="undoDraftItem"
+                @edit="onDraftEdited"
+                @remove="removeDraftItem"
+                @confirm-all="confirmDraftAll"
+                @edit-abort="rememberAbortedEdit"
+              />
+            </template>
+            <p v-else-if="materialRows.length > 0" class="empty">
+              这些历史条目只登记了文件名，正文没有被读取，也没有理解草稿；重新上传一份 MD / TXT
+              才能生成理解草稿。
+            </p>
+            <p v-else class="empty">
+              左边还没有可显示的材料。上传一份 MD 或 TXT 文件后，这里会显示这份材料的状态、理解草稿与来源。
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
   </div>
 </template>
 
@@ -1339,5 +1686,290 @@ watch(
   font-size: 11.5px;
   color: #888780;
   align-self: center;
+}
+
+/* ============================================================================
+   工作台视图：共用头部 + 两个标签面板
+   ----------------------------------------------------------------------------
+   层次仍然只靠底色差、发丝线与字号阶梯（见 DESIGN.md），不引入新的颜色体系。
+   ========================================================================== */
+
+.wb-head {
+  margin-bottom: 14px;
+}
+
+.wb-head-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 16px 10px;
+}
+
+.wb-head-project {
+  min-width: 0;
+  flex: 1;
+}
+
+.wb-proj-label {
+  display: block;
+  font-size: 11px;
+  color: #888780;
+  margin-bottom: 5px;
+}
+
+.wb-head-project .proj-select {
+  max-width: 420px;
+  margin-bottom: 6px;
+}
+
+.wb-proj-meta {
+  font-size: 12px;
+  color: #888780;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.wb-head-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+
+.wb-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 0 8px;
+  border-top: 1px solid #efeee9;
+}
+
+.wb-tab {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  border: none;
+  background: none;
+  padding: 11px 16px;
+  font-size: 13.5px;
+  color: #5f5e5a;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+
+.wb-tab:hover {
+  color: #185fa5;
+}
+
+.wb-tab[aria-selected='true'] {
+  color: #185fa5;
+  font-weight: 600;
+  border-bottom-color: #185fa5;
+}
+
+.wb-tab:focus-visible {
+  outline: 2px solid #378add;
+  outline-offset: -2px;
+  border-radius: 6px;
+}
+
+.wb-tab-badge {
+  background: #faeeda;
+  color: #854f0b;
+  border: 1px solid #fac775;
+}
+
+/* hidden 属性可能被元素自身的 display 覆盖，这里显式兜住 */
+.wb-panel[hidden] {
+  display: none;
+}
+
+/* ------------------------------------------------------------- 侧栏摘要 */
+
+.stat-list {
+  margin: 0 0 10px;
+}
+
+.stat-row {
+  display: flex;
+  gap: 10px;
+  padding: 5px 0;
+  border-bottom: 1px dashed #efeee9;
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.stat-row:last-of-type {
+  border-bottom: none;
+}
+
+.stat-row dt {
+  flex-shrink: 0;
+  width: 34px;
+  color: #888780;
+}
+
+.stat-row dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.stat-note {
+  font-size: 11.5px;
+  color: #854f0b;
+  background: #faeeda;
+  border: 1px solid #fac775;
+  border-radius: 8px;
+  padding: 6px 10px;
+  line-height: 1.6;
+  margin-bottom: 10px;
+}
+
+.stat-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* ---------------------------------------------------------------- 资料页 */
+
+.data-grid {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.data-list {
+  min-width: 0;
+}
+
+.data-list-h {
+  font-size: 11px;
+  color: #888780;
+  margin-bottom: 8px;
+}
+
+.mat-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.mat-pick {
+  width: 100%;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid #e3e2dd;
+  border-radius: 10px;
+  background: #fff;
+  padding: 9px 11px;
+}
+
+.mat-pick:hover {
+  border-color: #b5d4f4;
+}
+
+.mat-pick[aria-current='true'] {
+  border-color: #185fa5;
+  background: #e6f1fb;
+}
+
+.mat-pick:focus-visible {
+  outline: 2px solid #378add;
+  outline-offset: 1px;
+}
+
+.mat-pick-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mat-pick-meta {
+  font-size: 11.5px;
+  color: #888780;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.mat-pick-flags {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.mat-pick-pending {
+  background: #faeeda;
+  color: #854f0b;
+  border: 1px solid #fac775;
+}
+
+.mat-pick-ok {
+  background: #e1f5ee;
+  color: #0f6e56;
+  border: 1px solid #9fe1cb;
+}
+
+.data-detail {
+  min-width: 0;
+}
+
+.data-detail-h {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding-bottom: 10px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid #efeee9;
+}
+
+.data-detail-name {
+  font-size: 13.5px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.data-detail-meta {
+  font-size: 12px;
+  color: #888780;
+}
+
+.data-detail-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 1100px) {
+  .data-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .wb-head-top {
+    flex-direction: column;
+  }
+}
+
+@media (max-width: 640px) {
+  .wb-tabs {
+    padding: 0 4px;
+    overflow-x: auto;
+  }
+
+  .wb-tab {
+    padding: 10px 12px;
+    flex-shrink: 0;
+  }
 }
 </style>

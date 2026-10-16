@@ -42,6 +42,12 @@ const props = defineProps<{
   currentMaterialVersion?: number | null
   emptyHint?: string | null
   disabled?: boolean
+  /**
+   * 父级替这条材料的**同一版本**保留的未提交编辑（切换材料返回时恢复）。
+   * 只有 `itemId` 仍存在、且该条目的原文与缓存时**逐字一致**才恢复——
+   * 条目被删除、被重新生成替换、或材料换了版本，旧文字都不能挂到新内容上。
+   */
+  pendingEdit?: { itemId: string; text: string; original: string } | null
 }>()
 
 const emit = defineEmits<{
@@ -52,11 +58,27 @@ const emit = defineEmits<{
   remove: [payload: { materialId: string; materialVersion: number; itemId: string }]
   undo: [payload: { materialId: string; materialVersion: number; itemId: string }]
   confirmAll: [payload: { materialId: string; materialVersion: number; itemIds: string[] }]
+  /**
+   * 草稿身份变化（切换材料或换版）时放弃的未提交编辑。
+   * 父级收到后负责保留这段文字，不能静默丢掉用户已经打好的内容。
+   */
+  editAbort: [
+    payload: {
+      materialId: string
+      materialVersion: number
+      itemId: string
+      text: string
+      /** 开始编辑时该条目的原文：父级用它判断这条有没有被替换过 */
+      original: string
+    },
+  ]
 }>()
 
 const editingItemId = ref('')
 const editText = ref('')
 const editError = ref('')
+/** 开始编辑时条目的原文；用于判断条目是否已被替换（不能把旧文字挂到新内容上） */
+const editOriginal = ref('')
 /** 正在进行编辑的材料身份（材料 ID + 版本）：材料一换，这次编辑作废 */
 const editMaterialKey = ref('')
 
@@ -133,11 +155,65 @@ function sourceTextOf(item: DraftItemView): string {
     .join('；')
 }
 
-// 材料 ID 或材料版本变化（切换材料、材料更新）：正在编辑的内容一律作废
+// 材料 ID 或材料版本变化（切换材料、材料更新）：这次编辑不能静默丢掉——
+// 先把未提交的文字交给父级保留，再看父级是否要求恢复一条编辑。
 watch(
   () => materialKeyOf(props.draft),
-  () => cancelEdit(),
+  () => {
+    abortEdit()
+    restorePendingEdit()
+  },
 )
+
+/** 未提交的编辑：把文字、条目原文与它原本属于哪份材料一起交给父级（没有输入就不打扰） */
+function abortEdit(): void {
+  const text = editText.value
+  if (editingItemId.value === '' || text.trim() === '') return
+  const [materialId, versionText] = editMaterialKey.value.split('#')
+  if (materialId === undefined || materialId === '') return
+  emit('editAbort', {
+    materialId,
+    materialVersion: Number(versionText ?? ''),
+    itemId: editingItemId.value,
+    text,
+    original: editOriginal.value,
+  })
+}
+
+/**
+ * 恢复父级替这条材料保留的未提交编辑。
+ *
+ * 三项都要对上才恢复：条目还在、条目原文与缓存时一致、缓存文字非空；
+ * 否则一定退出编辑态（既不能把旧文字挂到新内容上，也不能让编辑框串到另一份材料上）。
+ */
+function restorePendingEdit(): void {
+  const pending = props.pendingEdit
+  const draft = props.draft
+
+  const currentItem =
+    pending === null || pending === undefined
+      ? undefined
+      : blocks.value.flatMap((block) => block.items).find((item) => item.itemId === pending.itemId)
+
+  const restorable =
+    pending !== null &&
+    pending !== undefined &&
+    draft !== null &&
+    pending.text.trim() !== '' &&
+    currentItem !== undefined &&
+    currentItem.text === pending.original
+
+  if (!restorable || draft === null || pending === null || pending === undefined) {
+    cancelEdit()
+    return
+  }
+
+  editingItemId.value = pending.itemId
+  editText.value = pending.text
+  editOriginal.value = currentItem.text
+  editMaterialKey.value = materialKeyOf(draft)
+  editError.value = ''
+}
 
 function startEdit(item: DraftItemView): void {
   const draft = props.draft
@@ -145,12 +221,14 @@ function startEdit(item: DraftItemView): void {
   editError.value = ''
   editingItemId.value = item.itemId
   editText.value = item.text
+  editOriginal.value = item.text
   editMaterialKey.value = materialKeyOf(draft)
 }
 
 function cancelEdit(): void {
   editingItemId.value = ''
   editText.value = ''
+  editOriginal.value = ''
   editMaterialKey.value = ''
   editError.value = ''
 }

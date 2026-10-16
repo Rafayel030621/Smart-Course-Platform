@@ -799,14 +799,44 @@ describe('WorkbenchView', () => {
     await flushPromises()
   }
 
-  it('M2-A：工作台出现项目基本信息、材料入口与材料理解草稿', () => {
+  /** 工作台内部标签：切到「项目资料」（项目基本信息、材料与草稿都在这一页） */
+  async function goToDataTab(wrapper: ReturnType<typeof mount>): Promise<void> {
+    const tab = wrapper.findAll('.wb-tab').find((item) => item.text().includes('项目资料'))
+    expect(tab).toBeDefined()
+    await tab?.trigger('click')
+    await flushPromises()
+  }
+
+  /** 工作台内部标签：切回「项目推进」 */
+  async function goToProgressTab(wrapper: ReturnType<typeof mount>): Promise<void> {
+    const tab = wrapper.findAll('.wb-tab').find((item) => item.text().includes('项目推进'))
+    expect(tab).toBeDefined()
+    await tab?.trigger('click')
+    await flushPromises()
+  }
+
+  /** 面板可见性：`hidden` 而不是卸载，所以断言属性而不是文本 */
+  function panelHidden(wrapper: ReturnType<typeof mount>, panelId: string): boolean {
+    return wrapper.get(`#${panelId}`).attributes('hidden') !== undefined
+  }
+
+  it('M2-A：基本信息、材料入口与理解草稿都在「项目资料」，推进页不再堆这些内容', async () => {
     const store = freshStore()
     createProject(store, 'M2-A 界面项目')
     const wrapper = mount(WorkbenchView)
 
+    // 默认进入「项目推进」：材料表单与上传入口不在这一页
+    expect(panelHidden(wrapper, 'wb-panel-progress')).toBe(false)
+    expect(panelHidden(wrapper, 'wb-panel-data')).toBe(true)
+    const progress = wrapper.get('#wb-panel-progress')
+    expect(progress.text()).toContain('AI 下一步建议')
+    expect(progress.find('input.mu-input').exists()).toBe(false)
+    expect(progress.find('#profile-goal').exists()).toBe(false)
+
+    await goToDataTab(wrapper)
+
     const text = wrapper.text()
     expect(text).toContain('项目基本信息')
-    expect(text).toContain('材料理解草稿')
     // 材料入口是真实上传组件：只讲 MD / TXT 与大小上限，并把后续批次说清楚
     expect(text).toContain('选择 MD / TXT 文件')
     expect(text).toContain('CSV、XLSX 将在下一批支持')
@@ -843,6 +873,7 @@ describe('WorkbenchView', () => {
       }),
     )
     const wrapper = mount(WorkbenchView)
+    await goToDataTab(wrapper)
 
     await chooseMaterialFile(wrapper, new File(['# 实验手册\n第一段正文。'], '实验手册.md'))
 
@@ -860,7 +891,7 @@ describe('WorkbenchView', () => {
     expect(text).toContain('实验手册.md')
     expect(text).toContain('已解析')
     expect(text).toContain('2 个片段')
-    expect(text).toContain('获取理解草稿')
+    expect(text).toContain('生成理解草稿')
     expect(wrapper.get('.mu-notice').text()).toContain('解析成功')
   })
 
@@ -888,6 +919,7 @@ describe('WorkbenchView', () => {
     createProject(store, '登记文件名项目')
     store.uploadMaterial('实验手册', '实验手册.pdf')
     const wrapper = mount(WorkbenchView)
+    await goToDataTab(wrapper)
 
     const text = wrapper.text()
     expect(text).toContain('实验手册.pdf')
@@ -965,9 +997,10 @@ describe('WorkbenchView', () => {
       }),
     )
     const wrapper = mount(WorkbenchView)
+    await goToDataTab(wrapper)
 
     await chooseMaterialFile(wrapper, new File(['# 实验手册\n第一段正文。'], '实验手册.md'))
-    const generate = wrapper.findAll('button').find((button) => button.text() === '获取理解草稿')
+    const generate = wrapper.findAll('button').find((button) => button.text() === '生成理解草稿')
     expect(generate).toBeDefined()
     await generate?.trigger('click')
     await flushPromises()
@@ -1107,5 +1140,408 @@ describe('WorkbenchView', () => {
     expect(chat[1]?.source).toBe('model')
     expect(wrapper.text()).toContain('AI 生成')
     expect(wrapper.find('.chat-error').exists()).toBe(false)
+  })
+
+  /* ------------------------------------------- 工作台布局：推进 / 资料 */
+
+  /**
+   * 多材料场景替身：上传成功，理解草稿的文案带上材料名，便于区分是哪一份。
+   * 请求体里的身份字段原样回显，否则会被判成过期响应。
+   */
+  function stubMaterialPipeline(): void {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+        if (String(input).includes('/api/materials/understanding')) {
+          const material = request.material as Record<string, unknown>
+          const segments = material.segments as Array<Record<string, unknown>> | undefined
+          return new Response(
+            JSON.stringify({
+              contractVersion: '1.0',
+              requestId: request.requestId,
+              projectId: request.projectId,
+              projectRevision: request.projectRevision,
+              materialId: material.materialId,
+              materialVersion: material.version,
+              promptVersion: request.promptVersion,
+              source: 'model',
+              fallbackReason: null,
+              notice: null,
+              draft: {
+                goalCandidates: [
+                  {
+                    itemId: 'cnd_goal_0',
+                    text: `${String(material.name)} 的目标候选`,
+                    sources: [
+                      {
+                        materialId: material.materialId,
+                        materialName: material.name,
+                        materialVersion: material.version,
+                        segmentId: segments?.[0]?.segmentId ?? 'seg_0',
+                        startLine: 1,
+                        endLine: 4,
+                      },
+                    ],
+                  },
+                ],
+                outcomeCandidates: [],
+                dataNotes: [],
+                methodNotes: [],
+                openQuestions: [],
+              },
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          )
+        }
+        return materialUploadSuccess(request)
+      }),
+    )
+  }
+
+  /** 点击材料列表里的某一项（按文件名匹配） */
+  async function pickMaterial(wrapper: ReturnType<typeof mount>, name: string): Promise<void> {
+    const item = wrapper.findAll('.mat-pick').find((entry) => entry.text().includes(name))
+    expect(item).toBeDefined()
+    await item?.trigger('click')
+    await flushPromises()
+  }
+
+  /** 点详情区里的某个按钮（生成草稿 / 确认 / 修改…） */
+  async function clickButton(wrapper: ReturnType<typeof mount>, label: string): Promise<void> {
+    const button = wrapper.findAll('button').find((entry) => entry.text() === label)
+    expect(button).toBeDefined()
+    await button?.trigger('click')
+    await flushPromises()
+  }
+
+  it('工作台标签：默认在推进页，资料页承载基本信息与材料，两者功能都可达', async () => {
+    const store = freshStore()
+    createProject(store, '标签切换项目')
+    const wrapper = mount(WorkbenchView)
+
+    // 默认进入「项目推进」
+    expect(panelHidden(wrapper, 'wb-panel-progress')).toBe(false)
+    expect(panelHidden(wrapper, 'wb-panel-data')).toBe(true)
+
+    const progress = wrapper.get('#wb-panel-progress')
+    expect(progress.text()).toContain('AI 下一步建议')
+    expect(progress.text()).toContain('提交步骤证据')
+    expect(progress.text()).toContain('向顾问提问')
+    expect(progress.text()).toContain('查看项目地图')
+
+    await goToDataTab(wrapper)
+    expect(panelHidden(wrapper, 'wb-panel-progress')).toBe(true)
+    expect(panelHidden(wrapper, 'wb-panel-data')).toBe(false)
+
+    const data = wrapper.get('#wb-panel-data')
+    expect(data.find('#profile-goal').exists()).toBe(true)
+    expect(data.find('.data-list').exists()).toBe(true)
+    expect(data.find('#wb-data-detail').exists()).toBe(true)
+    expect(data.find('input.mu-input').exists()).toBe(true)
+
+    await goToProgressTab(wrapper)
+    expect(panelHidden(wrapper, 'wb-panel-progress')).toBe(false)
+    expect(panelHidden(wrapper, 'wb-panel-data')).toBe(true)
+    expect(wrapper.get('#wb-panel-progress').text()).toContain('AI 下一步建议')
+  })
+
+  it('标签页支持键盘操作：方向键切换，焦点跟着走', async () => {
+    const store = freshStore()
+    createProject(store, '键盘项目')
+    const wrapper = mount(WorkbenchView, { attachTo: document.body })
+
+    try {
+      const tabs = wrapper.findAll('.wb-tab')
+      expect(tabs[0]?.attributes('aria-selected')).toBe('true')
+      expect(tabs[0]?.attributes('tabindex')).toBe('0')
+      expect(tabs[1]?.attributes('tabindex')).toBe('-1')
+      // 语义：tablist 里的标签通过 aria-controls 指向各自面板
+      expect(tabs[1]?.attributes('aria-controls')).toBe('wb-panel-data')
+
+      await tabs[0]?.trigger('keydown', { key: 'ArrowRight' })
+      await flushPromises()
+
+      const after = wrapper.findAll('.wb-tab')
+      expect(after[1]?.attributes('aria-selected')).toBe('true')
+      expect(after[0]?.attributes('tabindex')).toBe('-1')
+      expect(panelHidden(wrapper, 'wb-panel-data')).toBe(false)
+      expect(document.activeElement?.id).toBe('wb-tab-data')
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('切换标签不丢未保存输入：聊天草稿与基本信息都还在', async () => {
+    const store = freshStore()
+    createProject(store, '输入保留项目')
+    const wrapper = mount(WorkbenchView)
+
+    await wrapper.get('.chat-input input').setValue('还没发出去的草稿问题')
+
+    await goToDataTab(wrapper)
+    await wrapper.get('#profile-goal').setValue('还没保存的项目目标')
+
+    await goToProgressTab(wrapper)
+    expect((wrapper.get('.chat-input input').element as HTMLInputElement).value).toBe('还没发出去的草稿问题')
+
+    await goToDataTab(wrapper)
+    expect((wrapper.get('#profile-goal').element as HTMLTextAreaElement).value).toBe('还没保存的项目目标')
+  })
+
+  it('切材料不丢未提交的编辑：详情显示当前材料身份，切回还能接着改', async () => {
+    const store = freshStore()
+    createProject(store, '多材料项目')
+    stubMaterialPipeline()
+    const wrapper = mount(WorkbenchView)
+    await goToDataTab(wrapper)
+
+    await chooseMaterialFile(wrapper, new File(['# 材料一\n正文。'], '材料一.md'))
+    await chooseMaterialFile(wrapper, new File(['# 材料二\n正文。'], '材料二.md'))
+    expect(store.materials).toHaveLength(2)
+
+    await pickMaterial(wrapper, '材料一.md')
+    await clickButton(wrapper, '生成理解草稿')
+    await pickMaterial(wrapper, '材料二.md')
+    await clickButton(wrapper, '生成理解草稿')
+
+    // 回到材料一，改一半不保存
+    await pickMaterial(wrapper, '材料一.md')
+    const card = wrapper.get('.dc')
+    expect(card.text()).toContain('材料一.md 的目标候选')
+    expect(card.text()).toContain('材料一.md')
+    await clickButton(wrapper, '修改')
+    await wrapper.get('.dc-edit').setValue('我改了一半的句子')
+
+    // 切到材料二：详情换成另一份材料，编辑不能静默消失
+    await pickMaterial(wrapper, '材料二.md')
+    expect(wrapper.get('.dc').text()).toContain('材料二.md 的目标候选')
+    expect(wrapper.get('.dc').text()).not.toContain('材料一.md 的目标候选')
+    expect(store.toastText).toContain('已保留')
+
+    // 切回材料一：未提交的文字恢复，可以继续改
+    await pickMaterial(wrapper, '材料一.md')
+    expect((wrapper.get('.dc-edit').element as HTMLTextAreaElement).value).toBe('我改了一半的句子')
+  })
+
+  it('资料摘要与「去确认」按真实状态：数量正确，并打开还有待确认内容的那份材料', async () => {
+    const store = freshStore()
+    createProject(store, '摘要项目')
+    stubMaterialPipeline()
+    const wrapper = mount(WorkbenchView)
+
+    // 还没有材料：摘要为 0，且不出现「去确认」
+    expect(wrapper.get('#wb-panel-progress').text()).toContain('材料 0 份 · 待确认 0 条')
+    expect(wrapper.findAll('button').some((button) => button.text().includes('去确认'))).toBe(false)
+
+    await goToDataTab(wrapper)
+    await chooseMaterialFile(wrapper, new File(['# 甲\n正文。'], '甲材料.md'))
+    await chooseMaterialFile(wrapper, new File(['# 乙\n正文。'], '乙材料.md'))
+
+    // 甲：生成并确认；乙：只生成，保持待确认
+    await pickMaterial(wrapper, '甲材料.md')
+    await clickButton(wrapper, '生成理解草稿')
+    await clickButton(wrapper, '确认')
+    await pickMaterial(wrapper, '乙材料.md')
+    await clickButton(wrapper, '生成理解草稿')
+
+    expect(store.confirmedUnderstandingBlocks).toHaveLength(1)
+    expect(store.pendingUnderstandingBlocks).toHaveLength(1)
+
+    await goToProgressTab(wrapper)
+    expect(wrapper.get('#wb-panel-progress').text()).toContain('材料 2 份 · 待确认 1 条')
+    // 标签上也带待确认徽标
+    expect(wrapper.findAll('.wb-tab')[1]?.text()).toContain('待确认 1')
+
+    // 点「去确认」：切到资料页，并选中还有待确认内容的乙材料
+    const goConfirm = wrapper.findAll('button').find((button) => button.text().includes('去确认'))
+    expect(goConfirm).toBeDefined()
+    await goConfirm?.trigger('click')
+    await flushPromises()
+
+    expect(panelHidden(wrapper, 'wb-panel-data')).toBe(false)
+    expect(wrapper.get('#wb-data-detail').text()).toContain('乙材料.md 的目标候选')
+    expect(wrapper.get('#wb-data-detail').text()).not.toContain('甲材料.md 的目标候选')
+  })
+
+  it('切换项目后：资料摘要、材料列表与待确认数量都属于当前项目', async () => {
+    const store = freshStore()
+    createProject(store, '项目甲')
+    stubMaterialPipeline()
+    const wrapper = mount(WorkbenchView)
+    await goToDataTab(wrapper)
+
+    await chooseMaterialFile(wrapper, new File(['# 甲\n正文。'], '项目甲材料.md'))
+    await clickButton(wrapper, '生成理解草稿')
+    expect(wrapper.get('#wb-panel-progress').text()).toContain('材料 1 份 · 待确认 1 条')
+
+    // 切到新项目：不能残留上一个项目的材料、草稿与摘要
+    const created = store.createProject({ topicId: '__custom__', customName: '项目乙', members: 3 })
+    expect(created.ok).toBe(true)
+    await flushPromises()
+
+    expect(store.materials).toHaveLength(0)
+    expect(wrapper.get('#wb-panel-data').text()).not.toContain('项目甲材料.md')
+    expect(wrapper.get('#wb-panel-progress').text()).toContain('材料 0 份 · 待确认 0 条')
+    expect(wrapper.findAll('button').some((button) => button.text().includes('去确认'))).toBe(false)
+
+    // 切回项目甲：材料与摘要恢复
+    const first = store.projects[0]
+    expect(first).toBeDefined()
+    store.selectProject(first?.projectId ?? '')
+    await flushPromises()
+
+    expect(wrapper.get('#wb-panel-progress').text()).toContain('材料 1 份 · 待确认 1 条')
+    expect(wrapper.get('#wb-panel-data').text()).toContain('项目甲材料.md')
+  })
+
+  /* --------------------------------- 未提交编辑缓存：隔离与失效（合并前复核） */
+
+  /** 两份材料 + 各自草稿的公共前置，返回已挂载的工作台 */
+  async function mountTwoMaterials(scenario: string) {
+    const store = freshStore()
+    createProject(store, scenario)
+    stubMaterialPipeline()
+    const wrapper = mount(WorkbenchView)
+    await goToDataTab(wrapper)
+
+    await chooseMaterialFile(wrapper, new File(['# 材料一\n正文。'], '材料一.md'))
+    await chooseMaterialFile(wrapper, new File(['# 材料二\n正文。'], '材料二.md'))
+    await pickMaterial(wrapper, '材料一.md')
+    await clickButton(wrapper, '生成理解草稿')
+    await pickMaterial(wrapper, '材料二.md')
+    await clickButton(wrapper, '生成理解草稿')
+
+    return { store, wrapper }
+  }
+
+  it('材料换版后，旧版本的未提交编辑不会复活（缓存按项目 + 材料 + 版本隔离）', async () => {
+    const { wrapper } = await mountTwoMaterials('换版缓存项目')
+
+    // 在材料一里改一半，切到材料二（父级保留这段文字）
+    await pickMaterial(wrapper, '材料一.md')
+    await clickButton(wrapper, '修改')
+    await wrapper.get('.dc-edit').setValue('材料一旧版本的半句话')
+    await pickMaterial(wrapper, '材料二.md')
+
+    // 切回来能接着改
+    await pickMaterial(wrapper, '材料一.md')
+    expect((wrapper.get('.dc-edit').element as HTMLTextAreaElement).value).toBe('材料一旧版本的半句话')
+
+    // 重新上传同一份材料：version + 1，旧草稿作废
+    await clickButton(wrapper, '重新上传')
+    await chooseMaterialFile(wrapper, new File(['# 材料一 第二版\n新的正文。'], '材料一.md'))
+    expect(wrapper.get('#wb-data-detail').text()).toContain('版本 2')
+
+    // 新版本重新生成草稿：同 itemId 的条目又出现了
+    await clickButton(wrapper, '生成理解草稿')
+    await pickMaterial(wrapper, '材料二.md')
+    await pickMaterial(wrapper, '材料一.md')
+
+    expect(wrapper.get('.dc').text()).toContain('材料一.md 的目标候选')
+    // 版本已经变了：旧版本的未提交文字不能落到新版本条目上
+    expect(wrapper.find('.dc-edit').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('材料一旧版本的半句话')
+  })
+
+  it('删除条目之后，被保留的旧编辑不会复活', async () => {
+    const { store, wrapper } = await mountTwoMaterials('删除缓存项目')
+
+    await pickMaterial(wrapper, '材料一.md')
+    await clickButton(wrapper, '修改')
+    await wrapper.get('.dc-edit').setValue('删掉这条之前写的话')
+    await pickMaterial(wrapper, '材料二.md')
+
+    await pickMaterial(wrapper, '材料一.md')
+    await clickButton(wrapper, '取消')
+    await clickButton(wrapper, '删除')
+    // 材料一这条已经删掉（材料二的草稿仍在，这里按材料断言）
+    expect(store.pendingUnderstandingBlocks.map((block) => block.materialId)).not.toContain(
+      store.materials[0]?.materialId,
+    )
+    expect(wrapper.get('.dc').text()).not.toContain('材料一.md 的目标候选')
+
+    await pickMaterial(wrapper, '材料二.md')
+    await pickMaterial(wrapper, '材料一.md')
+
+    expect(wrapper.find('.dc-edit').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('删掉这条之前写的话')
+  })
+
+  it('保存修改之后不再恢复旧文字，页面显示刚保存的内容', async () => {
+    const { store, wrapper } = await mountTwoMaterials('保存缓存项目')
+
+    await pickMaterial(wrapper, '材料一.md')
+    await clickButton(wrapper, '修改')
+    await wrapper.get('.dc-edit').setValue('已经保存的新说法')
+    await pickMaterial(wrapper, '材料二.md')
+
+    await pickMaterial(wrapper, '材料一.md')
+    await clickButton(wrapper, '保存修改')
+    expect(store.modifiedUnderstandingBlocks).toHaveLength(1)
+    expect(store.toastText).toContain('已修改')
+
+    await pickMaterial(wrapper, '材料二.md')
+    await pickMaterial(wrapper, '材料一.md')
+
+    expect(wrapper.find('.dc-edit').exists()).toBe(false)
+    expect(wrapper.get('.dc').text()).toContain('已经保存的新说法')
+  })
+
+  it('确认之后不再把旧编辑恢复成编辑态', async () => {
+    const { store, wrapper } = await mountTwoMaterials('确认缓存项目')
+
+    await pickMaterial(wrapper, '材料一.md')
+    await clickButton(wrapper, '修改')
+    await wrapper.get('.dc-edit').setValue('确认前写了一半的话')
+    await pickMaterial(wrapper, '材料二.md')
+
+    await pickMaterial(wrapper, '材料一.md')
+    await clickButton(wrapper, '取消')
+    await clickButton(wrapper, '确认')
+    expect(store.confirmedUnderstandingBlocks).toHaveLength(1)
+
+    await pickMaterial(wrapper, '材料二.md')
+    await pickMaterial(wrapper, '材料一.md')
+
+    expect(wrapper.find('.dc-edit').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('确认前写了一半的话')
+    expect(wrapper.get('.dc').text()).toContain('已确认')
+  })
+
+  it('已修改但未确认的条目计入「待确认」数量，并被「去确认」定位到', async () => {
+    const store = freshStore()
+    createProject(store, '已修改计数项目')
+    stubMaterialPipeline()
+    const wrapper = mount(WorkbenchView)
+    await goToDataTab(wrapper)
+
+    await chooseMaterialFile(wrapper, new File(['# 甲\n正文。'], '甲材料.md'))
+    await chooseMaterialFile(wrapper, new File(['# 乙\n正文。'], '乙材料.md'))
+
+    // 甲的草稿确认掉；乙的草稿改一半（modified，仍未确认）
+    await pickMaterial(wrapper, '甲材料.md')
+    await clickButton(wrapper, '生成理解草稿')
+    await clickButton(wrapper, '确认')
+    await pickMaterial(wrapper, '乙材料.md')
+    await clickButton(wrapper, '生成理解草稿')
+    await clickButton(wrapper, '修改')
+    await wrapper.get('.dc-edit').setValue('乙材料里改过但还没确认的内容')
+    await clickButton(wrapper, '保存修改')
+
+    expect(store.modifiedUnderstandingBlocks).toHaveLength(1)
+    expect(store.confirmedUnderstandingBlocks).toHaveLength(1)
+
+    await goToProgressTab(wrapper)
+    // 已确认的 1 条不计入；modified 计入
+    expect(wrapper.get('#wb-panel-progress').text()).toContain('材料 2 份 · 待确认 1 条')
+
+    const goConfirm = wrapper.findAll('button').find((button) => button.text().includes('去确认'))
+    await goConfirm?.trigger('click')
+    await flushPromises()
+
+    // 定位到还有未确认内容的乙材料，且显示的是改过的内容
+    expect(wrapper.get('#wb-data-detail').text()).toContain('乙材料里改过但还没确认的内容')
+    expect(wrapper.get('#wb-data-detail').text()).toContain('已修改')
   })
 })
