@@ -2776,7 +2776,7 @@ AI 候选确认规则见 23.7；**服务端不得因“项目为空”自动创�
 - `undoDraftItem` 只撤销确认，不是删除；`pending` / `modified` 条目调用它是无操作；
 - **确认必须有可验证来源**：单条确认和整份确认在写入前，必须按条目的 `materialId + materialVersion` 查询 `material_segments`，至少解析到一个真实存在且正文非空的 `segmentId`；`sources_json` 中的材料 ID、版本、行号等元数据不可信，不能替代数据库校验；
 - 没有有效来源时返回 409 `DRAFT_SOURCE_MISSING`，不得把条目变为 `confirmed`；学生点击确认不能补足缺失来源；无来源手工事实不属于材料理解条目；
-- 已 `confirmed` 的历史条目再次单条确认仍按幂等返回 `changed: false`；但整份确认会校验所有提交条目，任一条无有效来源则整单失败；
+- 已 `confirmed` 且来源有效的历史条目再次单条确认仍按幂等返回 `changed: false`；已 `confirmed` 但无有效来源的条目也返回 409 `DRAFT_SOURCE_MISSING`，不得返回成功；整份确认会校验所有提交条目，任一条无有效来源则整单失败；
 - `confirmAllDraft` 的 `items` 必须覆盖当前版本全部未归档条目，遗漏返回 400 `INVALID_INPUT`；任一条目 revision 不匹配返回 409 `STALE_REVISION`，整单不写入；
 - `confirmAllDraft` 只把 `pending` / `modified` 改为 `confirmed`；已确认条目跳过，`skippedCount` 计数；响应 `items` 返回本次提交的全部条目最终状态，`confirmedCount` 只统计本次实际变更的条目。
 
