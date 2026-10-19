@@ -1,6 +1,6 @@
 # 智慧课程平台 V3/V4 领域模型（PR1 冻结）
 
-> 状态：**已冻结（PR1 最终收尾，2026-10-19）**
+> 状态：**已冻结（PR1 已合并；2026-10-19 补充草稿撤销与归档确认规则）**
 > 适用版本：V3/V4 产品化阶段，`contractVersion = "3.0"`
 > 关联文档：`docs/contracts.md` 第 20～27 节（接口契约）、`项目文档v2.md`、`V3-V4任务分配与实施计划.md`
 > 本文只冻结模型、关系和规则，**不实现数据库、不实现 API、不修改前端**。
@@ -546,8 +546,9 @@ pending ──confirm──> confirmed
 pending ──edit─────> modified
 modified ──confirm─> confirmed
 confirmed ──edit────> modified（清空 confirmedAt/By）
-confirmed ──undo────> pending（text == originalText）或 modified
+confirmed ──undo────> pending（text == originalText）或 modified（清空确认信息）
 任意非归档 ──remove──> archived（写 removedAt）
+archived ──×────────> pending / modified / confirmed（不可恢复）
 ```
 
 关系：`Material 1:N MaterialUnderstandingItem`；`MaterialUnderstandingItem.sources` 通过 `materialId + materialVersion + segmentId` 引用 `MaterialSegment`，不得跨材料版本。
@@ -562,6 +563,25 @@ confirmed ──undo────> pending（text == originalText）或 modified
 6. 重复确认、重复撤销、重复移除是幂等的：状态已满足时返回 `changed: false`，不递增 `revision` 与 `projectRevision`；
 7. 移除不删除来源片段；已归档条目不能再确认，必须重新生成草稿；
 8. 编辑文本与当前 `text` 完全相同时是无操作，不改变状态、不递增版本。
+
+`undoDraftItem` 的确定规则：
+
+1. 先校验 `materialId`、`materialVersion`、`itemId`、`expectedRevision`，再判断状态；只有校验通过后，`pending` / `modified` 调用才返回 `changed: false`；
+2. 使用保存的 `text` 与 `originalText` 做完全字符串比较：相同 → `pending`，不同 → `modified`；
+3. 成功时清空 `confirmedAt` 与 `confirmedByUserId`；
+4. 成功状态变化时条目 `revision +1`、`projectRevision +1`，且只递增一次；
+5. `materialId`、`materialVersion`、`itemId`、`expectedRevision` 任一不匹配必须拒绝，不写入；
+6. 已归档条目返回 409 `DRAFT_ITEM_ARCHIVED`，**不得恢复**为 `pending` 或 `modified`。
+
+`confirmAllDraft` 的确定规则：
+
+1. `items` 必须包含当前材料版本的全部未归档条目，不能包含任何 `archived` 条目；
+2. 任一条目是 `archived` → 整个请求 409 `DRAFT_ITEM_ARCHIVED`（archived 检查先于 revision 校验），不得部分成功，也不得把 archived 恢复为 `pending` 或 `confirmed`；
+3. 所有 `itemId`、`materialVersion`、`expectedRevision` 校验通过后才允许进入单事务写入；
+4. 事务内只将 `pending` / `modified` 改为 `confirmed`；已确认条目跳过；
+5. 成功时每条变化条目 `revision +1`，`projectRevision` 只 +1 一次；
+6. 失败时 `projectRevision` 不递增，不得部分写入；
+7. 旧前端重新提交已删除条目的 `itemId` 不得使其复活。
 
 ### 4.7 ProgressRecord
 
