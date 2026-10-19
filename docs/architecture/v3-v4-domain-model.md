@@ -1,6 +1,6 @@
 # 智慧课程平台 V3/V4 领域模型（PR1 冻结）
 
-> 状态：**已冻结（PR1，2026-10-19）**
+> 状态：**已冻结（PR1 最终收尾，2026-10-19）**
 > 适用版本：V3/V4 产品化阶段，`contractVersion = "3.0"`
 > 关联文档：`docs/contracts.md` 第 20～27 节（接口契约）、`项目文档v2.md`、`V3-V4任务分配与实施计划.md`
 > 本文只冻结模型、关系和规则，**不实现数据库、不实现 API、不修改前端**。
@@ -31,6 +31,7 @@
 
 ```text
 User (usr_)
+  ├── Session (ses_)                        1:N，登录会话（HttpOnly Cookie）
   └── Project (prj_)                        1:N，唯一所有者 ownerUserId
         ├── Milestone (ms_)                 1:N，可为空（空白项目）
         │     └── Task (tsk_)               1:N，task.milestoneId 可空
@@ -83,11 +84,14 @@ User (usr_)
 | 实体 | 版本字段 | 初值 | 递增时机 |
 | --- | --- | --- | --- |
 | User | `revision` | 1 | 昵称、状态、密码等资料变更 |
+| Session | 无业务 revision | — | 只记录 `status`、`lastSeenAt`、`expiresAt`、`revokedAt`；不参与项目版本 |
 | Project | `projectRevision` | 1 | 项目领域状态每次成功写入（见 3.4） |
 | Milestone | `revision` | 1 | 名称、目标、完成标准、截止时间、状态、排序变更 |
 | Task | `revision` | 1 | 标题、完成标准、所属阶段、状态、归档变更 |
 | Evidence | `revision` | 1 | 建立/修改任务或阶段关联；正文不可改 |
 | Material | `version` + `revision` | 1 / 1 | `version`：内容重新上传 +1；`revision`：元数据或归档状态变更 +1 |
+| MaterialSegment | 无（不可变） | — | 随材料版本生成；旧版本由派生状态标记 `superseded` |
+| MaterialUnderstandingItem | `revision` | 1 | 确认、修改、撤销确认、移除 |
 | ProgressRecord | `revision` | 1 | 更正/取代/归档 |
 | Doubt | `revision` | 1 | 解决、重新打开、归档 |
 | ChatSession | `chatRevision` | 1 | 消息追加、会话归档/恢复 |
@@ -130,11 +134,14 @@ User (usr_)
 | 实体 | 枚举 | 说明 |
 | --- | --- | --- |
 | User | `active` \| `disabled` | 本阶段不提供自助注销；`disabled` 仅管理员操作 |
+| Session | `active` \| `expired` \| `revoked` | 登录会话；到期或退出后失效 |
 | Project | `active` \| `archived` \| `deleted` | `deleted` 为软删除，保留 30 天 |
 | Milestone | `planned` \| `active` \| `completed` \| `archived` | 展示映射：`planned→todo`、`active→cur`、`completed→done` |
 | Task | `todo` \| `doing` \| `done` | 与 V2 完全一致；归档用独立 `archivedAt` 表示 |
 | Evidence | `active` \| `redacted` | 只追加，不删除；脱敏仅管理员 |
 | Material | `registered` \| `parsed` \| `parse_failed` \| `unsupported` \| `archived` | 新上传只产生 `parsed` / `parse_failed`；`unsupported` 只用于迁移旧材料 |
+| MaterialSegment | `active` \| `superseded` | 按材料当前版本派生；旧版本片段只读 |
+| MaterialUnderstandingItem | `pending` \| `modified` \| `confirmed` \| `archived` | 只有 `confirmed` 进入 AI 可信上下文 |
 | ProgressRecord | `active` \| `superseded` \| `archived` | 更正生成新记录，旧记录置 `superseded` |
 | Doubt | `open` \| `resolved` \| `archived` | 只有 `open` 进入 AI 上下文 |
 | ChatSession | `active` \| `archived` | 清空会话 = 归档，不物理删除 |
@@ -146,9 +153,12 @@ User (usr_)
 | --- | --- | --- | --- |
 | 所有 V3 写接口 | `idempotencyKey` | `(userId, idempotencyKey)` | 24 小时 |
 | 注册 | `accountNormalized` 唯一约束 | 全局 | 永久 |
+| 登录 | 无幂等键；每次成功登录轮换 Session | 用户内 | — |
+| 退出 | 按当前 Session 撤销，天然幂等 | 会话内 | — |
 | 创建项目 | `idempotencyKey` + `clientProjectId`（迁移时） | `(userId, idempotencyKey)` / `(userId, clientProjectId)` | 24 小时 / 永久 |
 | 证据提交 | `idempotencyKey` + 兼容字段 `submissionId` | `(projectId, submissionId)` | 永久 |
 | 材料上传 | `(projectId, materialId, version)` 唯一 | 项目内 | 永久 |
+| 材料草稿确认/编辑/移除/撤销 | `idempotencyKey` + `itemId` + `materialVersion` + `expectedRevision` | 材料版本内 | 永久（按条目 revision） |
 | 本地迁移 | `migrationId` + `(userId, clientProjectId)` | 用户内 | 永久 |
 | 聊天发送 | `clientMessageId` | `(chatId, clientMessageId)` | 永久 |
 
@@ -208,11 +218,38 @@ activeMilestoneId（可空）
 | `createdAt` / `updatedAt` | string | 是 | 服务端时间 |
 | `lastLoginAt` | string \| null | 是 | 最近成功登录时间 |
 
-关系：`User 1:N Project`。用户只能访问 `ownerUserId = 当前会话 userId` 的项目。
+关系：`User 1:N Project`、`User 1:N Session`。用户只能访问 `ownerUserId = 当前会话 userId` 的项目。
 
 删除规则：本阶段不提供自助删除；管理员可将 `status` 置为 `disabled`。禁用后所有会话立即失效，项目数据保留，便于恢复。用户表不做级联物理删除。
 
 未来扩展：`role` 和独立的 `ProjectMember` 表预留；本阶段不暴露教师端接口。
+
+#### 4.1.1 Session（登录会话）
+
+Session 是**服务端会话记录**，与 `ChatSession` 无关。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `sessionId` | string | 是 | `ses_` 前缀，服务端生成 |
+| `userId` | string | 是 | 所属用户 |
+| `tokenHash` | string | 是 | 会话令牌的 SHA-256 哈希；**不保存明文令牌**，不返回 |
+| `status` | `active` \| `expired` \| `revoked` | 是 | `expired` 由 `expiresAt` 到期判定；`revoked` 由退出或管理员禁用产生 |
+| `createdAt` | string | 是 | 创建时间 |
+| `lastSeenAt` | string | 是 | 最近一次通过校验的请求时间 |
+| `expiresAt` | string | 是 | 绝对过期时间，创建后 7 天，不滑动续期 |
+| `revokedAt` | string \| null | 是 | 撤销时间 |
+| `rotatedFromSessionId` | string \| null | 是 | 登录轮换时指向旧会话，便于审计 |
+| `updatedAt` | 无 | — | 会话用 `lastSeenAt` / `revokedAt`，不存在 `updatedAt` |
+
+规则：
+
+1. 浏览器只持有 `HttpOnly` Cookie 中的随机令牌；服务端只保存 `tokenHash`；
+2. 登录成功创建新 Session 并撤销旧 Session（防会话固定）；退出撤销当前 Session；
+3. `expiresAt` 到期即视为 `expired`，返回 401 `UNAUTHORIZED`；
+4. Session 不参与项目 `projectRevision`，没有业务 revision；
+5. 过期/撤销记录保留 30 天用于审计，之后由后台清理；本 PR 不实现清理任务；
+6. 用户被禁用时，其全部 Session 立即置 `revoked`；
+7. 任何人不能用 `sessionId` 访问他人会话；Cookie 令牌只映射到唯一 Session。
 
 ### 4.2 Project
 
@@ -221,7 +258,7 @@ activeMilestoneId（可空）
 | `projectId` | string | 是 | `prj_` 前缀，服务端生成 |
 | `ownerUserId` | string | 是 | 所有者；来自会话，不接受客户端传入 |
 | `name` | string | 是 | 项目完整名称，1～120 字 |
-| `short` | string | 是 | 短名，1～20 字，用于标签与地图 |
+| `short` | string | 是 | **项目短名/标签名，不是描述**；1～20 字；用于项目切换器、地图中心和标签；完整名称用 `name`，目标/范围用 `profile.goal` / `profile.scope`；自动生成时取名称前 12 字，超出加 `…` |
 | `profile` | ProjectProfile | 是 | 目标、预期结果、成员姓名、研究周期、范围、暂不处理 |
 | `status` | `active` \| `archived` \| `deleted` | 是 | 见 4.2.1 |
 | `visibility` | `private` | 是 | 预留 `shared`，本阶段固定 `private` |
@@ -236,6 +273,8 @@ activeMilestoneId（可空）
 | `createdByUserId` | string | 是 | 创建者，当前恒等于 `ownerUserId` |
 
 ProjectProfile 字段与 V2 契约 13.1 完全一致：`goal`、`expectedOutcome`、`memberNames`、`researchPeriod`、`scope`、`outOfScope`。
+
+**字段命名澄清（`short`）**：`short` 是 V2 已有的项目短名，不是“简短描述”。它的长度上限为 20 字，只用于空间有限的标签、项目切换器和地图中心；不要把项目目标、范围或摘要塞进 `short`。V3 为兼容旧数据继续使用该名称；前端展示时按“项目短名”理解，不按 `description` 理解。若后续需要长描述，使用 `profile.goal` 或新增独立字段，不复用 `short`。
 
 关系：
 
@@ -308,6 +347,25 @@ completed ──reopen──> active（清除 completedAt）
 7. 重名（未归档范围内）返回 409 `MILESTONE_NAME_CONFLICT`；
 8. `orderIndex` 由排序接口整体重写为 `0..N-1`，不允许重复或跳跃。
 
+#### 4.3.1 合法状态转换矩阵
+
+| 当前状态 | `activate` | `complete` | `reopen` | `archive` | `restore` |
+| --- | --- | --- | --- | --- | --- |
+| `planned` | `active` | `completed`（允许直接完成） | 不合法 | `archived` | 不合法 |
+| `active` | `active`（幂等，不递增） | `completed` | 不合法 | `archived` | 不合法 |
+| `completed` | 不合法 | `completed`（幂等，不递增） | `active`，清 `completedAt` | `archived` | 不合法 |
+| `archived` | 不合法 | 不合法 | 不合法 | `archived`（幂等） | `archivedFromStatus` |
+
+必须明确的规则：
+
+1. **阶段不强制显式 activate**：`planned` 可以创建任务，也可以直接 `complete`；`activate` 只用于把阶段标记为“当前推进中”，并影响 `currentMilestoneId` 的优先选择；
+2. **完成后 reopen**：只能 `completed → active`；清除 `completedAt`；任务状态不变；进度按当前任务重新计算；
+3. **归档**：任何非归档状态都可以归档，记录 `archivedAt` 与 `archivedFromStatus`；归档不删除任务、证据、进展或聊天引用；
+4. **恢复**：`archived → archivedFromStatus`，恢复后回到归档前状态，不重置 revision；
+5. **归档阶段不能新增任务、不能提交关联证据、不能作为 AI 当前阶段**；必须先 `restore`；已有任务和证据仍可查询；
+6. `active → planned`、`completed → planned`、`archived` 直接 `complete` 都不是合法转换，返回 409 `INVALID_STATE_TRANSITION`；
+7. 同一状态动作重复调用按上表幂等，不递增 `revision` 与 `projectRevision`。
+
 任务统计（响应计算字段，不落库）：
 
 ```text
@@ -357,6 +415,26 @@ todo ──start──> doing ──complete──> done
 6. 移动阶段：`milestoneId` 可改为同项目其他未归档阶段或 `null`；源/目标阶段进度同时重算；
 7. 硬删除只允许没有证据、没有进展、没有聊天引用的任务；否则归档；
 8. 同一项目内任务标题不要求唯一，但客户端应提示重复。
+
+#### 4.4.1 合法状态转换矩阵
+
+`archivedAt` 是独立归档标记；任务归档前的 `status` 保留，恢复时恢复该值。
+
+| 当前状态 | `start` | `complete` | `reopen` | `archive` | `restore` |
+| --- | --- | --- | --- | --- | --- |
+| `todo` | `doing` | `done`（允许直接完成） | 不合法 | `archivedAt` 非空 | 不合法 |
+| `doing` | `doing`（幂等） | `done` | 不合法 | `archivedAt` 非空 | 不合法 |
+| `done` | 不合法 | `done`（幂等） | `doing`（默认）或 `todo` | `archivedAt` 非空 | 不合法 |
+| `archived` | 不合法 | 不合法 | 不合法 | 幂等 | 清除 `archivedAt`，恢复归档前状态 |
+
+规则：
+
+1. 归档任务不能开始、完成、重开、提交证据或进展；必须先 `restore`；
+2. `done → todo` 只能通过 `reopen` 的 `targetStatus`，不能通过普通字段更新；
+3. 开始/完成/重开/归档/恢复成功都必须递增任务 `revision` 与 `projectRevision`；同状态幂等调用不递增；
+4. 任务完成不自动改变阶段状态；阶段进度按 5.1 公式重算；
+5. 在 `planned` 阶段开始任务不会自动激活阶段；激活仍是显式动作；
+6. 归档任务不计入阶段进度分母，但历史证据仍可查询。
 
 兼容：V2 的 `milestone` 名称字段在 V3 响应中同时返回 `milestoneId` 与 `milestoneName`；`owner` 旧字段映射为 `null`，`suggestedOwner` 只保留为前端展示，不进入 V3 DTO。
 
@@ -424,35 +502,66 @@ todo ──start──> doing ──complete──> done
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `segmentId` | string | 是 | `seg_` + 序号；只在 `materialId + version` 内唯一 |
+| `segmentId` | string | 是 | `seg_` + 序号；只在 `materialId + materialVersion` 内唯一 |
 | `materialId` | string | 是 | 所属材料 |
 | `materialVersion` | number | 是 | 所属内容版本 |
 | `index` | number | 是 | 0 起稳定序号 |
 | `startLine` / `endLine` | number | 是 | 1 起、包含两端 |
-| `text` | string | 是 | 1～2,000 字 |
-| `createdAt` | string | 是 | 解析时间 |
+| `text` | string | 是 | 分段正文，1～2,000 字 |
+| `charCount` | number | 是 | `text` 的字符数，服务端计算 |
+| `status` | `active` \| `superseded` | 是 | 按材料当前版本派生：当前版本 `active`，旧版本 `superseded`；不单独存储 |
+| `createdAt` | string | 是 | 解析/生成时间，不可变 |
+| `updatedAt` | 无 | — | 片段不可变，不存在 `updatedAt` |
 
-分段不可变；重新上传生成新版本片段，旧片段保留但标记过期。
+关系与规则：
+
+1. `Material 1:N MaterialSegment`；片段属于唯一 `materialId + materialVersion`；
+2. 分段不可变；重新上传生成新版本片段，旧版本片段保留为 `superseded` 只读历史，不进入 AI 上下文；
+3. 片段没有用户可执行的删除/归档动作，生命周期跟随材料版本；
+4. `(materialId, materialVersion, segmentId)` 唯一；同一输入与版本的分段结果必须确定；
+5. `MaterialUnderstandingItem.sources` 只能引用同一 `materialId + materialVersion` 的片段。
 
 #### 4.6.3 MaterialUnderstandingItem
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `itemId` | string | 是 | `cnd_` 前缀；只在本次生成批次内唯一，落库后作为稳定 ID |
+| `itemId` | string | 是 | `cnd_` 前缀；服务端落库后的稳定 ID，项目内唯一 |
+| `clientItemId` | string \| null | 是 | 迁移/旧前端使用的原始 `itemId`，仅用于 `idMap` 追溯；新请求不再使用 |
 | `materialId` / `materialVersion` | string / number | 是 | 来源材料与版本 |
-| `kind` | `goal` \| `outcome` \| `data_note` \| `method_note` \| `open_question` | 是 | 对应 V2 的五块 |
-| `text` | string | 是 | 1～300 字 |
-| `sources` | MaterialSourceRef[] | 是 | 至少 1 条；来源片段必须属于同一材料版本 |
-| `status` | `pending` \| `confirmed` \| `modified` \| `archived` | 是 | 只有 `confirmed` 进入可信上下文；`modified` 必须再次确认 |
-| `revision` | number | 是 | ≥ 1 |
+| `kind` | `goalCandidates` \| `outcomeCandidates` \| `dataNotes` \| `methodNotes` \| `openQuestions` | 是 | 与 V2 `UnderstandingBlock.kind` 完全一致，不另造枚举 |
+| `text` | string | 是 | 展示/确认后的正文，1～300 字；对应本地字段 `content` |
+| `originalText` | string | 是 | 服务端原始候选文本，用于撤销修改/撤销确认；对应本地 `originalContent` |
+| `sources` | MaterialSourceRef[] | 是 | 1～3 条；来源片段必须属于同一材料版本 |
+| `status` | `pending` \| `modified` \| `confirmed` \| `archived` | 是 | 只有 `confirmed` 进入可信上下文；`modified` 必须再次确认 |
+| `source` | `model` \| `manual` \| `migration` | 是 | 候选来源；`fallback` 不产生伪造候选 |
+| `revision` | number | 是 | ≥ 1；确认、修改、撤销、移除各 +1 |
 | `createdAt` / `updatedAt` | string | 是 | 服务端时间 |
-| `confirmedAt` / `confirmedByUserId` | string \| null | 是 | 确认信息 |
+| `confirmedAt` / `confirmedByUserId` | string \| null | 是 | 最近一次确认信息；撤销/修改后清空 |
+| `removedAt` | string \| null | 是 | 移除时间；移除 = `status: archived`，不物理删除 |
 
-确认门禁：
+状态转换：
+
+```text
+pending ──confirm──> confirmed
+pending ──edit─────> modified
+modified ──confirm─> confirmed
+confirmed ──edit────> modified（清空 confirmedAt/By）
+confirmed ──undo────> pending（text == originalText）或 modified
+任意非归档 ──remove──> archived（写 removedAt）
+```
+
+关系：`Material 1:N MaterialUnderstandingItem`；`MaterialUnderstandingItem.sources` 通过 `materialId + materialVersion + segmentId` 引用 `MaterialSegment`，不得跨材料版本。
+
+确认门禁与规则：
 
 1. 未确认条目**不得**进入 `confirmedMaterials`，服务端在 v3 提示词下必须按数据库确认状态复核；
 2. 模型只能返回 `segmentId`；材料名、版本、行号由服务端从数据库回填；
-3. 材料新版本发布后，旧版本条目自动转 `archived`，需要重新确认。
+3. 材料新版本发布后，旧版本条目自动转 `archived`，需要重新确认；
+4. `itemId` 在项目内唯一；V2 的 `itemId` 只在单次响应内唯一，迁移时由服务端重新分配稳定 `itemId`，旧值放 `clientItemId`；
+5. 确认/修改/撤销/移除都必须带 `materialVersion` 与 `expectedRevision`；版本不符返回 409；
+6. 重复确认、重复撤销、重复移除是幂等的：状态已满足时返回 `changed: false`，不递增 `revision` 与 `projectRevision`；
+7. 移除不删除来源片段；已归档条目不能再确认，必须重新生成草稿；
+8. 编辑文本与当前 `text` 完全相同时是无操作，不改变状态、不递增版本。
 
 ### 4.7 ProgressRecord
 
@@ -508,39 +617,51 @@ ChatHistory 由会话与消息两部分组成。
 | --- | --- | --- | --- |
 | `chatId` | string | 是 | `chat_` 前缀 |
 | `projectId` | string | 是 | 所属项目 |
-| `milestoneId` | string \| null | 是 | 会话发起时的阶段上下文 |
+| `milestoneId` | string \| null | 是 | 会话发起时的阶段上下文；阶段归档后保留快照 |
 | `userId` | string | 是 | 冗余租户键 |
 | `title` | string \| null | 是 | 会话标题，≤ 60 字 |
 | `status` | `active` \| `archived` | 是 | 清空 = 归档 |
 | `chatRevision` | number | 是 | 消息追加/归档 +1；不影响 `projectRevision` |
-| `messageCount` | number | 是 | 当前消息数 |
+| `messageCount` | number | 是 | 当前消息数（不含已删除，消息本身不可删） |
 | `lastMessageAt` | string \| null | 是 | 最后一条消息时间 |
 | `createdAt` / `updatedAt` | string | 是 | 服务端时间 |
 | `archivedAt` | string \| null | 是 | 归档时间 |
+
+关系与规则：
+
+1. `Project 1:N ChatSession`、`ChatSession 1:N ChatMessage`；
+2. 会话归档可恢复；归档会话不进入默认 AI 历史上下文，但历史消息仍可查询；
+3. 聊天消息追加只递增 `chatRevision`，不递增 `projectRevision`；
+4. 会话标题可为 `null`；清空会话 = 归档，不物理删除消息。
 
 #### ChatMessage（`msg_`）
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `messageId` | string | 是 | `msg_` 前缀 |
+| `messageId` | string | 是 | `msg_` 前缀，服务端生成 |
 | `chatId` | string | 是 | 所属会话 |
 | `projectId` | string | 是 | 冗余项目键 |
-| `sequence` | number | 是 | 会话内 1 起连续序号 |
-| `role` | `user` \| `assistant` | 是 | 角色 |
-| `content` | string | 是 | 1～4,000 字 |
-| `source` | `model` \| `fallback` \| `local-rule` \| null | 是 | 用户消息为 `null` |
+| `sequence` | number | 是 | 会话内 1 起连续序号，唯一且不可重排 |
+| `role` | `user` \| `assistant` | 是 | 角色；对应本地 `me` 的反向映射 |
+| `content` | string | 是 | 1～4,000 字；对应本地 `text` |
+| `source` | `model` \| `fallback` \| `local-rule` \| `error` \| null | 是 | 用户消息为 `null`；`local-rule`/`error` 只用于本地展示，V3 服务端只持久化 `model`/`fallback` 或用户消息 |
 | `fallbackReason` | string \| null | 是 | 安全原因码，不是模型原文 |
 | `promptVersion` | string \| null | 是 | 助手消息使用的提示词版本 |
-| `citations` | MaterialSourceRef[] | 是 | 仅已确认材料；服务端回填名称与行号 |
-| `clientMessageId` | string \| null | 是 | 用户消息幂等键 |
+| `requestId` | string \| null | 是 | 产生该回答的请求 ID，便于追踪；用户消息为 `null` |
+| `projectRevisionAtSend` | number | 是 | 发送时的项目版本，用于过期追溯 |
+| `citations` | MaterialSourceRef[] | 是 | 仅已确认材料；服务端回填名称与行号；用户消息为 `[]` |
+| `clientMessageId` | string \| null | 是 | 用户消息幂等键；助手消息为 `null` |
 | `createdAt` | string | 是 | 不可变 |
+| `updatedAt` | 无 | — | 消息不可变，不存在 `updatedAt` |
 
 规则：
 
 1. 消息不可编辑、不可物理删除；清空会话只归档；
 2. 聊天写入不递增 `projectRevision`，避免把所有在途 AI 响应判为过期；
 3. 会话归档可恢复；归档会话不进入默认 AI 历史上下文；
-4. 历史上下文最多 20 条，超出由服务端截断最早消息，并在日志记录条数，不记录正文。
+4. 历史上下文最多 20 条，超出由服务端截断最早消息，并在日志记录条数，不记录正文；
+5. `(chatId, clientMessageId)` 唯一；重复发送同一 `clientMessageId` 返回首次消息，不重复追加；
+6. `sequence` 在事务内连续递增；并发发送由 `chatRevision` 乐观锁保护。
 
 ### 4.10 MaterialSourceRef（引用结构）
 
@@ -558,15 +679,18 @@ ChatHistory 由会话与消息两部分组成。
 | 实体 | ID | 所属关系 | 时间字段 | 版本 | 状态 | 删除 / 归档 / 恢复 | 幂等键 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | User | `usr_` | 权限根 | `createdAt`、`updatedAt`、`lastLoginAt` | `revision` | `active` / `disabled` | 无自助删除；管理员禁用/恢复 | `accountNormalized` 唯一 |
+| Session | `ses_` | `userId` | `createdAt`、`lastSeenAt`、`expiresAt`、`revokedAt` | 无业务 revision | `active` / `expired` / `revoked` | 退出/过期/禁用即失效；审计保留 30 天 | 登录轮换；退出幂等 |
 | Project | `prj_` | `ownerUserId` | `createdAt`、`updatedAt`、`archivedAt`、`deletedAt` | `projectRevision` | `active` / `archived` / `deleted` | 归档可逆；软删除 30 天可恢复 | `idempotencyKey` / `clientProjectId` |
 | Milestone | `ms_` | `projectId` + `userId` | `createdAt`、`updatedAt`、`completedAt`、`archivedAt` | `revision` | `planned` / `active` / `completed` / `archived` | 删除 = 归档；恢复回 `archivedFromStatus` | `idempotencyKey` |
 | Task | `tsk_` | `projectId` + `milestoneId`（可空） | `createdAt`、`updatedAt`、`startedAt`、`completedAt`、`archivedAt` | `revision` | `todo` / `doing` / `done` + `archivedAt` | 删除 = 归档；恢复原状态 | `idempotencyKey` |
 | Evidence | `evd_` | `projectId` + `taskId`（可空）+ `milestoneId` 快照 | `createdAt`、`updatedAt`、`redactedAt` | `revision` | `active` / `redacted` | 不删除；阶段归档不影响历史 | `submissionId` + `idempotencyKey` |
 | Material | `mat_` | `projectId` + `userId` | `createdAt`、`updatedAt`、`archivedAt` | `version` + `revision` | `registered` / `parsed` / `parse_failed` / `unsupported` / `archived` | 软归档可恢复；被引用时禁止物理删除 | `(projectId, materialId, version)` |
+| MaterialSegment | `seg_` | `materialId` + `materialVersion` | `createdAt` | 无（不可变） | `active` / `superseded`（按材料版本派生） | 随材料版本保留；不单独删除 | `(materialId, materialVersion, segmentId)` |
+| MaterialUnderstandingItem | `cnd_` | `materialId` + `materialVersion` | `createdAt`、`updatedAt`、`confirmedAt`、`removedAt` | `revision` | `pending` / `modified` / `confirmed` / `archived` | 移除 = 归档；不物理删除 | `itemId` + `materialVersion` + `expectedRevision` |
 | ProgressRecord | `prg_` | `projectId` + `milestoneId` / `taskId`（可空） | `createdAt`、`updatedAt`、`occurredAt` | `revision` | `active` / `superseded` / `archived` | 软归档；更正用新记录取代 | `idempotencyKey` |
 | Doubt | `dbt_` | `projectId` + `milestoneId` / `taskId`（可空） | `createdAt`、`updatedAt`、`resolvedAt` | `revision` | `open` / `resolved` / `archived` | 软归档可恢复；不物理删除 | `idempotencyKey`；来源证据唯一 |
 | ChatSession | `chat_` | `projectId` + `userId` | `createdAt`、`updatedAt`、`lastMessageAt`、`archivedAt` | `chatRevision` | `active` / `archived` | 清空 = 归档；可恢复 | `idempotencyKey` |
-| ChatMessage | `msg_` | `chatId` + `projectId` | `createdAt` | 无（不可变） | `user` / `assistant` | 不删除 | `clientMessageId` |
+| ChatMessage | `msg_` | `chatId` + `projectId` | `createdAt` | 无（不可变） | 无业务状态；`role` 为 `user` / `assistant` | 不删除 | `clientMessageId` |
 
 所有实体的“项目切换和过期响应规则”统一适用第 3.7 节：响应必须匹配 `activeProjectId`，`projectRevision` 不得回退，实体 revision 不得小于本地值；不匹配整份丢弃。
 
@@ -727,5 +851,5 @@ progress = total = 0 ? 0 : floor(done * 100 / total)
 2. **会话有效期**：本文按 7 天绝对有效期设计；是否改为 30 天或滑动续期需负责人确认。
 3. **项目软删除保留期**：本文按 30 天；是否允许用户立即彻底删除需确认（涉及数据安全与审计）。
 4. **聊天是否计入项目版本**：本文选择不计入 `projectRevision`，只维护 `chatRevision`；如果负责人要求聊天也参与过期判断，需要同步修改 AI 丢弃规则。
-5. **材料确认写接口**：本 PR 只冻结确认状态与 AI 读取门禁；确认写入接口属于材料 PR，需与现有 M2-A 契约对齐后补充，避免两套确认语义。
+5. **V3 材料上传/重新解析持久化接口**：本 PR 已冻结五个草稿确认接口（确认、修改、移除、撤销、整份确认）；上传与重新解析仍复用 V2 `POST /api/materials`，V3 材料持久化写入接口留给材料 PR，避免两套确认语义。
 6. **迁移冲突策略**：本文规定同一 `clientProjectId` 只迁移一次、后续不覆盖云端；是否允许“以本地覆盖云端”需要负责人确认，默认禁止。
