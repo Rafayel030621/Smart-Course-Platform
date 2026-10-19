@@ -1,6 +1,6 @@
 # 智慧课程平台 · 前后端接口契约
 
-> 文档修订：v3.3（补充材料理解条目的有效来源校验：无真实片段的条目不能确认；新增 `DRAFT_SOURCE_MISSING`；新接口 `contractVersion = "3.0"`；V2 接口仍为 `"1.0"`）
+> 文档修订：v3.4（新增 PR2B 第一阶段只读接口：任务列表/单任务、材料列表/单材料、片段与理解草稿读取；明确当前版本、归档和分页语义；新接口 `contractVersion = "3.0"`；V2 接口仍为 `"1.0"`）
 > 编制日期：2026-09-25（v2.0：2026-10-12；v3.0：2026-10-19，PR1 冻结 V3/V4 账号、阶段、进展、AI 上下文与迁移）
 > owner：负责人（后端）
 > 地位：**本文件是前后端唯一契约。** 四名成员不得自行新增字段或创建第二套 DTO。
@@ -2021,9 +2021,11 @@ await fetch(`${API_BASE}/api/projects`, {
 | 信封 | 写接口使用 20.2；读接口返回 `contractVersion` / `projectId` / `projectRevision` / `data` |
 | 幂等 | 所有写接口必须带 `idempotencyKey` |
 | 并发 | 所有写接口按 `projectRevision` 校验；单实体更新加 `expectedRevision` |
-| 错误 | 使用第 25 节错误码；跨用户 404，同用户跨项目 409 `PROJECT_MISMATCH` |
+| 错误 | 使用第 25 节错误码；跨用户项目 404 `PROJECT_NOT_FOUND`；跨项目实体 ID 一律 404 `RESOURCE_NOT_FOUND`，避免通过 ID 探测其他项目数据 |
 | 时间 | 服务端生成 `createdAt`/`updatedAt`；客户端只传业务时间 |
 | 空值 | 缺失值一律 `null`，不省略字段 |
+| 读分页 | 列表读接口使用 `limit`（默认 50，最大 100；片段/草稿条目最大 200）和 opaque `cursor`；非法 limit/cursor 返回 400 `INVALID_INPUT`；排序规则见各接口 |
+| 读操作 | 读接口不要求 `idempotencyKey`，不递增 `projectRevision`，不写幂等记录 |
 | 疑问 | 本 PR 只冻结 `Doubt` 模型与读取语义；手工创建/解决/归档写接口留给后续 PR；证据自动创建疑问、迁移导入疑问，AI 继续使用顶层 `doubts` |
 
 ### 22.1 项目列表与创建
@@ -2363,6 +2365,37 @@ AI 候选确认规则见 23.7；**服务端不得因“项目为空”自动创�
 7. `restore` 恢复出的名称若与当前未归档阶段重名，返回 409 `MILESTONE_NAME_CONFLICT`；整个事务回滚，阶段保持归档、版本不变，也不写入成功幂等记录；用户可先给现有同名阶段改名再恢复。
 
 ### 22.3 任务（Task）接口
+
+#### GET /api/projects/{projectId}/tasks
+
+查询参数：
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `milestoneId` | 无 | 只返回该阶段任务；阶段必须属于当前项目 |
+| `status` | 无 | `todo` / `doing` / `done` |
+| `includeArchived` | `false` | 是否包含归档任务及归档阶段下的任务 |
+| `limit` | 50 | 1～100 |
+| `cursor` | 无 | 上一页返回的 opaque `nextCursor` |
+
+排序：`createdAt DESC, taskId DESC`；任务 `milestoneName` 由服务端回填。
+
+默认规则：
+
+- 默认排除 `archivedAt != null` 的任务；
+- 默认排除所属阶段已归档（`milestones.archived_at != null`）的任务；`includeArchived=true` 时一并返回；
+- 项目软删除后所有读取 404 `PROJECT_NOT_FOUND`；归档项目仍可读；
+- 不返回材料正文、证据正文或聊天内容。
+
+成功响应：`data.tasks` 为任务 DTO 列表，`data.nextCursor` 为 `null` 或下一页游标；顶层带 `projectRevision`。
+
+#### GET /api/projects/{projectId}/tasks/{taskId}
+
+查询参数：`includeArchived=false|true`，默认 `false`。
+
+- 任务必须同时匹配 `taskId + projectId`；跨项目一律 404 `RESOURCE_NOT_FOUND`；
+- 归档任务或所属阶段归档的任务默认 404；`includeArchived=true` 返回只读详情；
+- 响应 `data.task`，不改变任务状态或 `projectRevision`。
 
 #### POST /api/projects/{projectId}/tasks
 
@@ -2914,6 +2947,79 @@ AI 候选确认规则见 23.7；**服务端不得因“项目为空”自动创�
 | 文本为空或超长 | `INVALID_INPUT` | 400 | 理解内容需为 1～300 字 |
 | 整份确认遗漏条目 | `INVALID_INPUT` | 400 | 整份确认需要包含当前版本的全部理解条目 |
 | 同键不同内容 | `IDEMPOTENCY_CONFLICT` | 409 | 重复请求的内容不一致，请刷新后重试 |
+
+### 22.8 材料与理解草稿读取接口
+
+本阶段只提供读取，不提供 V3 材料上传、重新解析、删除或归档写接口。
+
+#### Material DTO
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `materialId` | string | 跨版本稳定 |
+| `materialVersion` | number | 内容版本，≥ 1 |
+| `name` | string | 原始文件名 |
+| `type` | `md` \| `txt` \| `xlsx` 等 | 迁移旧材料可能是其他类型 |
+| `size` | number | 文件字节数 |
+| `encoding` | string | 实际解码编码 |
+| `status` | string | `registered` / `parsed` / `parse_failed` / `unsupported` / `archived` |
+| `revision` | number | 元数据/归档版本 |
+| `sha256` | string \| null | 内容摘要 |
+| `failureReason` | string \| null | 解析失败原因 |
+| `createdAt` / `updatedAt` | string | 服务端时间 |
+| `archivedAt` | string \| null | 归档时间 |
+| `isCurrent` | boolean | 是否为该 `materialId` 的当前版本 |
+| `readOnly` | boolean | 旧版本或归档材料为 `true` |
+
+#### GET /api/projects/{projectId}/materials
+
+查询参数：`includeArchived=false|true`、`limit`（默认 50，最大 100）、`cursor`。
+
+- 默认只返回每个 `materialId` 的**当前版本**元数据，不返回历史版本；
+- 默认排除归档材料；`includeArchived=true` 时包含当前版本已归档的材料；
+- 排序：`updatedAt DESC, materialId DESC`；
+- 成功响应 `data.materials` + `data.nextCursor`，不包含片段正文或理解条目正文。
+
+#### GET /api/projects/{projectId}/materials/{materialId}
+
+查询参数：`version`（可选，≥ 1）、`includeArchived=false|true`。
+
+- 默认返回当前版本；
+- `version` 指向历史版本时返回只读历史，`isCurrent=false`、`readOnly=true`；
+- 历史版本和归档材料默认不可见时返回 404 `RESOURCE_NOT_FOUND`；归档材料需 `includeArchived=true`；
+- 材料必须同时匹配 `materialId + projectId`，跨项目 404；
+- 响应 `data.material`，不改变 `projectRevision`。
+
+#### GET /api/projects/{projectId}/materials/{materialId}/segments
+
+查询参数：`version`、`includeArchived`、`limit`（默认 100，最大 200）、`cursor`。
+
+- 只返回该 `materialId + materialVersion` 的片段，绝不混合其他材料或版本；
+- 排序：`index ASC, segmentId ASC`；
+- `status` 由版本派生：当前版本 `active`，历史版本 `superseded`；
+- 响应 `data.materialId`、`data.materialVersion`、`data.isCurrent`、`data.readOnly`、`data.segments`、`data.nextCursor`；
+- 片段正文原样返回，不做 trim 或改写。
+
+片段 DTO：`segmentId`、`materialId`、`materialVersion`、`index`、`startLine`、`endLine`、`text`、`charCount`、`status`、`createdAt`。
+
+#### GET /api/projects/{projectId}/materials/{materialId}/understanding
+
+查询参数：`version`、`includeArchived`、`limit`（默认 100，最大 200）、`cursor`。
+
+- 只返回该 `materialId + materialVersion` 的理解条目；
+- 默认排除 `status=archived` 的条目；`includeArchived=true` 同时包含归档条目；
+- 排序：`createdAt ASC, itemId ASC`；
+- 条目 `sources` 必须按 `materialId + materialVersion + segmentId` 查询数据库真实片段生成，忽略 `sources_json` 中的材料 ID、版本、行号；无效来源不返回；
+- 响应 `data.materialId`、`data.materialVersion`、`data.isCurrent`、`data.readOnly`、`data.items`、`data.nextCursor`；
+- 条目 DTO 复用 `itemId`、`kind`、`text`、`originalText`、`sources`、`status`、`revision`、`confirmedAt`、`confirmedByUserId`、`removedAt`。
+
+#### 共同读取规则
+
+- 所有接口要求登录，并先校验 `userId + projectId` 所有权；
+- 软删除项目 404 `PROJECT_NOT_FOUND`；归档项目仍可读，但所有材料/片段/草稿按只读语义返回；
+- 跨用户 404 `PROJECT_NOT_FOUND`；同用户跨项目实体 404 `RESOURCE_NOT_FOUND`；
+- 读取不递增项目/实体 revision、不创建幂等记录、不改变任何业务状态；
+- 非法 `version`、`limit`、`cursor` 返回 400 `INVALID_INPUT`。
 
 ---
 
@@ -3859,3 +3965,4 @@ git status / git diff --name-only 检查是否误改 server/src、src、部署�
 | v3.1 | 2026-10-19 | PR1 最终收尾：明确 `contractVersion` / `promptVersion` 组合并禁止静默降级；补充 Session 与材料草稿五动作、Milestone/Task 状态机、Cookie/CORS/CSRF 约定；按当前 `PROJECT_SCHEMA_VERSION = 3` 与 localStorage 实际字段修正迁移映射；澄清 `Project.short` 语义 | 姜厚禄（后端） |
 | v3.2 | 2026-10-19 | 明确 `undoDraftItem` 按 `text` 与 `originalText` 比较决定 `pending`/`modified`，清空确认信息且 `projectRevision` 只递增一次；明确 `confirmAllDraft` 不得包含或恢复 archived 条目、任一条目 archived 整单 409、所有 revision 校验通过后单事务写入、失败不递增版本；新增错误码 `DRAFT_ITEM_ARCHIVED` | 姜厚禄（后端） |
 | v3.3 | 2026-10-19 | 材料理解条目确认必须至少有一个能解析到当前材料版本、且 `text.trim().length > 0` 的真实片段；迁移将空来源/全部失效来源降为 `pending` 并警告，`archived` 保持；单条确认与整份确认共用数据库来源校验，不信任 `sources_json` 元数据；新增错误码 `DRAFT_SOURCE_MISSING` | 姜厚禄（后端） |
+| v3.4 | 2026-10-19 | PR2B 第一阶段：新增任务列表/单任务、材料列表/单材料、片段与理解草稿只读接口；材料列表默认当前版本，历史版本通过 `version` 只读访问；任务默认排除归档任务与归档阶段任务；统一 `limit`/`cursor`；读取不递增版本、不写幂等记录 | 姜厚禄（后端） |
