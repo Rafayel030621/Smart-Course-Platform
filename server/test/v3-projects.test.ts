@@ -743,14 +743,17 @@ test('进展只追加、不改变任务状态，更正生成 superseded 记录',
     `/api/projects/${project.projectId}/tasks/${task.taskId}`,
     { cookie: alice.cookie },
   )
-  // 没有单任务 GET 接口；通过阶段统计确认任务仍是 todo
+  const taskAfterProgressBody = (await taskAfterProgress.json()) as {
+    data: { task: { status: string } }
+  }
+  assert.equal(taskAfterProgress.status, 200)
+  assert.equal(taskAfterProgressBody.data.task.status, 'todo')
   const milestones = await client.request(`/api/projects/${project.projectId}/milestones`, {
     cookie: alice.cookie,
   })
   const milestonesBody = (await milestones.json()) as {
     data: { milestones: Array<{ taskStats: { todo: number; doing: number; done: number } }> }
   }
-  assert.equal(taskAfterProgress.status, 404)
   assert.equal(milestonesBody.data.milestones[0]?.taskStats.todo, 1)
   assert.equal(milestonesBody.data.milestones[0]?.taskStats.doing, 0)
   assert.equal(milestonesBody.data.milestones[0]?.taskStats.done, 0)

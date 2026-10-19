@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { transaction, type V3Database } from './db.js'
 import {
   assertProjectRevision,
+  assertProjectWritable,
   assertStageWritable,
   bumpProjectRevision,
   getEvidence,
@@ -143,6 +144,7 @@ export async function handleProgressCreate(
   }
 
   const project = loadProject(db, userId, projectId)
+  assertProjectWritable(project)
   assertProjectRevision(project, envelope.projectRevision)
   const stage = validateLinks(db, projectId, milestoneId, taskId, evidenceIds)
   const effectiveMilestoneId = stage.milestoneId
@@ -306,6 +308,7 @@ export async function handleProgressSupersede(
   }
 
   const project = loadProject(db, userId, projectId)
+  assertProjectWritable(project)
   assertProjectRevision(project, envelope.projectRevision)
   const previous = getProgress(db, projectId, progressId)
   if (previous.revision !== expected) {

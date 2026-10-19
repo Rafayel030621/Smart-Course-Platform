@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { transaction, type V3Database } from './db.js'
 import {
   assertProjectRevision,
+  assertProjectWritable,
   bumpProjectRevision,
   getMilestone,
   getTask,
@@ -118,6 +119,7 @@ export async function handleTaskCreate(
   }
 
   const project = loadProject(db, userId, projectId)
+  assertProjectWritable(project)
   assertProjectRevision(project, envelope.projectRevision)
 
   if (milestoneId !== null) {
@@ -203,6 +205,7 @@ export async function handleTaskPatch(
   }
 
   const project = loadProject(db, userId, projectId)
+  assertProjectWritable(project)
   assertProjectRevision(project, envelope.projectRevision)
   const task = getTask(db, projectId, taskId)
   if (task.revision !== expected) {
@@ -280,6 +283,7 @@ export async function handleTaskLinkMilestone(
   }
 
   const project = loadProject(db, userId, projectId)
+  assertProjectWritable(project)
   assertProjectRevision(project, envelope.projectRevision)
   const task = getTask(db, projectId, taskId)
   if (task.revision !== expected) {
@@ -384,6 +388,7 @@ export async function handleTaskAction(
   }
 
   const project = loadProject(db, userId, projectId)
+  assertProjectWritable(project)
   assertProjectRevision(project, envelope.projectRevision)
   const task = getTask(db, projectId, taskId)
   if (task.revision !== expected) {

@@ -16,6 +16,7 @@ export type V3ErrorCode =
   | 'FORBIDDEN_ORIGIN'
   | 'RATE_LIMITED'
   | 'PROJECT_NOT_FOUND'
+  | 'PROJECT_ARCHIVED'
   | 'RESOURCE_NOT_FOUND'
   | 'PROJECT_MISMATCH'
   | 'STALE_REVISION'
@@ -71,6 +72,11 @@ export const V3_ERROR_META: Record<V3ErrorCode, ErrorMeta> = {
   FORBIDDEN_ORIGIN: { status: 403, retryable: false, message: '请求来源不受信任' },
   RATE_LIMITED: { status: 429, retryable: true, message: '尝试次数过多，请稍后再试' },
   PROJECT_NOT_FOUND: { status: 404, retryable: false, message: '项目不存在或无权访问' },
+  PROJECT_ARCHIVED: {
+    status: 409,
+    retryable: false,
+    message: '项目已归档，请先恢复再编辑',
+  },
   RESOURCE_NOT_FOUND: { status: 404, retryable: false, message: '请求的内容不存在或无权访问' },
   PROJECT_MISMATCH: { status: 409, retryable: false, message: '请求内容与当前项目不匹配' },
   STALE_REVISION: { status: 409, retryable: false, message: '项目内容已更新，请刷新后重试' },

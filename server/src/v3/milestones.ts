@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { transaction, type V3Database } from './db.js'
 import {
   assertProjectRevision,
+  assertProjectWritable,
   bumpProjectRevision,
   getMilestone,
   loadProject,
@@ -150,6 +151,7 @@ export async function handleMilestoneCreate(
   }
 
   const project = loadProject(db, userId, projectId)
+  assertProjectWritable(project)
   assertProjectRevision(project, envelope.projectRevision)
 
   if (source === 'ai-candidate') {
@@ -244,6 +246,7 @@ export async function handleMilestonePatch(
   }
 
   const project = loadProject(db, userId, projectId)
+  assertProjectWritable(project)
   assertProjectRevision(project, envelope.projectRevision)
   const milestone = getMilestone(db, projectId, milestoneId)
   if (milestone.revision !== expected) {
@@ -329,6 +332,7 @@ export async function handleMilestoneReorder(
   }
 
   const project = loadProject(db, userId, projectId)
+  assertProjectWritable(project)
   assertProjectRevision(project, envelope.projectRevision)
 
   const rows = db
@@ -412,6 +416,7 @@ export async function handleMilestoneAction(
   }
 
   const project = loadProject(db, userId, projectId)
+  assertProjectWritable(project)
   assertProjectRevision(project, envelope.projectRevision)
   const milestone = getMilestone(db, projectId, milestoneId)
   if (milestone.revision !== expected) {

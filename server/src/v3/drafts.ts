@@ -2,10 +2,12 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { transaction, type V3Database } from './db.js'
 import {
   assertProjectRevision,
+  assertProjectWritable,
   bumpProjectRevision,
-  isMeaningfulText,
+  hasValidUnderstandingSource,
   loadProject,
   requiredText,
+  toUnderstandingItemDto,
   type MaterialRow,
   type UnderstandingItemRow,
 } from './domain.js'
@@ -72,82 +74,6 @@ function loadCurrentMaterial(
   return row
 }
 
-interface SegmentRow {
-  segment_id: string
-  material_id: string
-  material_version: number
-  start_line: number
-  end_line: number
-  text: string
-}
-
-function requestedSegmentIds(item: UnderstandingItemRow): string[] {
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(item.sources_json)
-  } catch {
-    return []
-  }
-  if (!Array.isArray(parsed)) return []
-  const ids = parsed
-    .filter((entry): entry is Record<string, unknown> => entry !== null && typeof entry === 'object')
-    .map((entry) => (typeof entry.segmentId === 'string' ? entry.segmentId : ''))
-    .filter((segmentId) => segmentId !== '')
-  return [...new Set(ids)]
-}
-
-/**
- * 只信任数据库中与条目 materialId + materialVersion 匹配的真实片段。
- * sources_json 中的 materialId、版本、行号都不可信。
- */
-function resolveValidSegments(db: V3Database, item: UnderstandingItemRow): SegmentRow[] {
-  const statement = db.prepare(
-    `SELECT segment_id, material_id, material_version, start_line, end_line, text
-       FROM material_segments
-      WHERE material_id = ? AND material_version = ? AND segment_id = ?`,
-  )
-  const segments: SegmentRow[] = []
-  for (const segmentId of requestedSegmentIds(item)) {
-    const row = statement.get(
-      item.material_id,
-      item.material_version,
-      segmentId,
-    ) as SegmentRow | undefined
-    if (row !== undefined && isMeaningfulText(row.text)) segments.push(row)
-  }
-  return segments
-}
-
-function assertItemHasValidSource(db: V3Database, item: UnderstandingItemRow): void {
-  if (resolveValidSegments(db, item).length === 0) {
-    throw new V3Error('DRAFT_SOURCE_MISSING')
-  }
-}
-
-function itemDto(db: V3Database, item: UnderstandingItemRow, materialName: string): Record<string, unknown> {
-  const sources = resolveValidSegments(db, item).map((segment) => ({
-    materialId: item.material_id,
-    materialName,
-    materialVersion: item.material_version,
-    segmentId: segment.segment_id,
-    startLine: segment.start_line,
-    endLine: segment.end_line,
-  }))
-
-  return {
-    itemId: item.item_id,
-    kind: item.kind,
-    text: item.text,
-    originalText: item.original_text,
-    sources,
-    status: item.status,
-    revision: item.revision,
-    confirmedAt: item.confirmed_at,
-    confirmedByUserId: item.confirmed_by_user_id,
-    removedAt: item.removed_at,
-  }
-}
-
 async function prepare(
   req: IncomingMessage,
   runtime: V3Runtime,
@@ -194,6 +120,7 @@ async function prepare(
   }
 
   const project = loadProject(db, auth.user.user_id, projectId)
+  assertProjectWritable(project)
   assertProjectRevision(project, projectRevision)
   const material = loadCurrentMaterial(db, projectId, materialId)
   if (material.material_version !== materialVersion) {
@@ -273,7 +200,7 @@ function finish(
       materialId: ctx.materialId,
       materialVersion: ctx.materialVersion,
       changed,
-      item: itemDto(ctx.db, item, ctx.material.name),
+      item: toUnderstandingItemDto(ctx.db, item, ctx.material.name),
       ...extra,
     },
   })
@@ -331,7 +258,9 @@ export async function handleDraftItemAction(
       if (action === 'confirm') {
         // 学生点击确认不能补足来源：必须有数据库中真实存在的片段。
         // 即使历史数据已是 confirmed，只要来源无效也拒绝返回成功。
-        assertItemHasValidSource(ctx.db, item)
+        if (!hasValidUnderstandingSource(ctx.db, item)) {
+          throw new V3Error('DRAFT_SOURCE_MISSING')
+        }
         if (item.status === 'confirmed') return finish(ctx, false, item)
         ctx.db.prepare(
           `UPDATE understanding_items
@@ -469,7 +398,9 @@ export async function handleConfirmAllDraft(
 
     // 任一条目没有真实来源就整单失败；此时尚未进入事务、尚未写入任何字段
     for (const entry of entries) {
-      assertItemHasValidSource(ctx.db, byId.get(entry.itemId) as UnderstandingItemRow)
+      if (!hasValidUnderstandingSource(ctx.db, byId.get(entry.itemId) as UnderstandingItemRow)) {
+        throw new V3Error('DRAFT_SOURCE_MISSING')
+      }
     }
 
     const response = transaction(ctx.db, () => {

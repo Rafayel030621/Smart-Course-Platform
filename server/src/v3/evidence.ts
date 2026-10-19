@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { transaction, type V3Database } from './db.js'
 import {
   assertProjectRevision,
+  assertProjectWritable,
   bumpProjectRevision,
   getEvidence,
   getMilestone,
@@ -112,6 +113,7 @@ export async function handleEvidenceCreate(
   }
 
   const project = loadProject(db, userId, projectId)
+  assertProjectWritable(project)
   assertProjectRevision(project, envelope.projectRevision)
 
   const existing = db
@@ -277,6 +279,7 @@ export async function handleEvidenceLinks(
   }
 
   const project = loadProject(db, userId, projectId)
+  assertProjectWritable(project)
   assertProjectRevision(project, envelope.projectRevision)
   const evidence = getEvidence(db, projectId, evidenceId)
   if (evidence.revision !== expected) {
