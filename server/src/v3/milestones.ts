@@ -136,7 +136,12 @@ export async function handleMilestoneCreate(
   const now = runtime.now()
   const nowText = now.toISOString()
   const userId = auth.user.user_id
-  const fingerprint = requestFingerprint(body)
+  const fingerprint = requestFingerprint({
+    method: 'POST',
+    operation: 'milestone.create',
+    resource: projectId,
+    body,
+  })
 
   const replay = lookupIdempotent(db, userId, envelope.idempotencyKey, fingerprint, nowText)
   if (replay !== null) {
@@ -225,7 +230,12 @@ export async function handleMilestonePatch(
   const now = runtime.now()
   const nowText = now.toISOString()
   const userId = auth.user.user_id
-  const fingerprint = requestFingerprint(body)
+  const fingerprint = requestFingerprint({
+    method: 'PATCH',
+    operation: 'milestone.patch',
+    resource: `${projectId}/${milestoneId}`,
+    body,
+  })
 
   const replay = lookupIdempotent(db, userId, envelope.idempotencyKey, fingerprint, nowText)
   if (replay !== null) {
@@ -305,7 +315,12 @@ export async function handleMilestoneReorder(
   const now = runtime.now()
   const nowText = now.toISOString()
   const userId = auth.user.user_id
-  const fingerprint = requestFingerprint(body)
+  const fingerprint = requestFingerprint({
+    method: 'POST',
+    operation: 'milestone.reorder',
+    resource: projectId,
+    body,
+  })
 
   const replay = lookupIdempotent(db, userId, envelope.idempotencyKey, fingerprint, nowText)
   if (replay !== null) {
@@ -383,7 +398,12 @@ export async function handleMilestoneAction(
   const now = runtime.now()
   const nowText = now.toISOString()
   const userId = auth.user.user_id
-  const fingerprint = requestFingerprint(body)
+  const fingerprint = requestFingerprint({
+    method: 'POST',
+    operation: `milestone.${action}`,
+    resource: `${projectId}/${milestoneId}`,
+    body,
+  })
 
   const replay = lookupIdempotent(db, userId, envelope.idempotencyKey, fingerprint, nowText)
   if (replay !== null) {
@@ -425,10 +445,14 @@ export async function handleMilestoneAction(
         changed = true
       }
     } else if (action === 'reopen') {
-      if (current.status !== 'completed') throw new V3Error('INVALID_STATE_TRANSITION')
-      nextStatus = 'active'
-      completedAt = null
-      changed = true
+      if (current.status === 'completed') {
+        nextStatus = 'active'
+        completedAt = null
+        changed = true
+      } else if (current.status !== 'active') {
+        // completed → active 是唯一实际转换；active 再 reopen 幂等
+        throw new V3Error('INVALID_STATE_TRANSITION')
+      }
     } else if (action === 'archive') {
       if (current.status !== 'archived') {
         archivedFrom = current.status
@@ -437,21 +461,31 @@ export async function handleMilestoneAction(
         changed = true
       }
     } else if (action === 'restore') {
-      if (current.status !== 'archived') throw new V3Error('INVALID_STATE_TRANSITION')
-      nextStatus = current.archived_from_status ?? 'planned'
-      archivedAt = null
-      archivedFrom = null
-      if (nextStatus !== 'completed') completedAt = null
-      changed = true
+      if (current.status === 'archived') {
+        nextStatus = current.archived_from_status ?? 'planned'
+        archivedAt = null
+        archivedFrom = null
+        if (nextStatus !== 'completed') completedAt = null
+        changed = true
+      }
+      // 非归档阶段 restore 幂等，不递增实体或项目版本
     }
 
     if (changed) {
-      db.prepare(
-        `UPDATE milestones
-            SET status = ?, completed_at = ?, archived_at = ?, archived_from_status = ?,
-                revision = revision + 1, updated_at = ?
-          WHERE milestone_id = ? AND project_id = ?`,
-      ).run(nextStatus, completedAt, archivedAt, archivedFrom, nowText, milestoneId, projectId)
+      try {
+        db.prepare(
+          `UPDATE milestones
+              SET status = ?, completed_at = ?, archived_at = ?, archived_from_status = ?,
+                  revision = revision + 1, updated_at = ?
+            WHERE milestone_id = ? AND project_id = ?`,
+        ).run(nextStatus, completedAt, archivedAt, archivedFrom, nowText, milestoneId, projectId)
+      } catch (error) {
+        if (isSqliteUniqueError(error)) {
+          // 归档期间创建了同名阶段：恢复会触发部分唯一索引冲突
+          throw new V3Error('MILESTONE_NAME_CONFLICT')
+        }
+        throw error
+      }
     }
 
     const revision = changed

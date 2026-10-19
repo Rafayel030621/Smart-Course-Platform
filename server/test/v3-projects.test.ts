@@ -159,7 +159,7 @@ test('阶段：创建、编辑、激活、完成、重开、归档、恢复', as
   assert.equal(reopened.data.milestone.status, 'active')
   assert.equal(reopened.data.milestone.completedAt, null)
 
-  // completed → active 是唯一 reopen 路径；active 再 reopen 属于非法转换
+  // active 再 reopen 幂等：返回当前状态，不递增实体或项目版本
   const activeReopen = await client.request(
     `/api/projects/${project.projectId}/milestones/${milestone.milestoneId}/reopen`,
     {
@@ -168,8 +168,16 @@ test('阶段：创建、编辑、激活、完成、重开、归档、恢复', as
       body: envelope(project.projectId, reopened.projectRevision, { expectedRevision: 5 }),
     },
   )
-  assert.equal(activeReopen.status, 409)
-  assert.equal((await jsonOf(activeReopen)).code, 'INVALID_STATE_TRANSITION')
+  const activeReopenBody = (await activeReopen.json()) as {
+    projectRevision: number
+    changed: boolean
+    data: { milestone: { status: string; revision: number } }
+  }
+  assert.equal(activeReopen.status, 200)
+  assert.equal(activeReopenBody.changed, false)
+  assert.equal(activeReopenBody.projectRevision, reopened.projectRevision)
+  assert.equal(activeReopenBody.data.milestone.status, 'active')
+  assert.equal(activeReopenBody.data.milestone.revision, 5)
 
   const archive = await client.request(
     `/api/projects/${project.projectId}/milestones/${milestone.milestoneId}/archive`,
@@ -195,10 +203,32 @@ test('阶段：创建、编辑、激活、完成、重开、归档、恢复', as
     },
   )
   const restored = (await restore.json()) as {
-    data: { milestone: { status: string; archivedAt: string | null } }
+    projectRevision: number
+    data: { milestone: { status: string; archivedAt: string | null; revision: number } }
   }
   assert.equal(restored.data.milestone.status, 'active')
   assert.equal(restored.data.milestone.archivedAt, null)
+
+  // 非归档阶段 restore 幂等
+  const restoreAgain = await client.request(
+    `/api/projects/${project.projectId}/milestones/${milestone.milestoneId}/restore`,
+    {
+      method: 'POST',
+      cookie: alice.cookie,
+      body: envelope(project.projectId, restored.projectRevision, {
+        expectedRevision: restored.data.milestone.revision,
+      }),
+    },
+  )
+  const restoreAgainBody = (await restoreAgain.json()) as {
+    changed: boolean
+    projectRevision: number
+    data: { milestone: { revision: number } }
+  }
+  assert.equal(restoreAgain.status, 200)
+  assert.equal(restoreAgainBody.changed, false)
+  assert.equal(restoreAgainBody.projectRevision, restored.projectRevision)
+  assert.equal(restoreAgainBody.data.milestone.revision, restored.data.milestone.revision)
 })
 
 test('归档阶段不能新增任务或提交证据，但历史证据仍可查询', async () => {

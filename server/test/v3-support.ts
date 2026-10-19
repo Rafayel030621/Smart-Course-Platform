@@ -70,7 +70,17 @@ export interface TestClient {
 }
 
 export async function createTestClient(
-  options: { sessionTtlMs?: number; secureCookies?: boolean } = {},
+  options: {
+    sessionTtlMs?: number
+    secureCookies?: boolean
+    rateLimit?: {
+      maxAccountAttempts?: number
+      maxIpAttempts?: number
+      windowMs?: number
+      maxEntries?: number
+    }
+    trustProxyHops?: number
+  } = {},
 ): Promise<TestClient> {
   const dir = mkdtempSync(path.join(tmpdir(), 'scp-v3-test-'))
   const logger = new CapturingLogger()
@@ -81,6 +91,9 @@ export async function createTestClient(
     inviteCodeHashes: [TEST_INVITE_HASH],
     sessionTtlMs: options.sessionTtlMs ?? 7 * 24 * 60 * 60 * 1000,
     passwordRounds: 4,
+    rateLimit: options.rateLimit,
+    // 测试显式固定为 0，避免开发者本机 SCP_TRUST_PROXY_HOPS 影响限流键
+    trustProxyHops: options.trustProxyHops ?? 0,
     logger,
   })
   const server = createApp(config, { logger: silentLogger, v3Runtime: runtime })

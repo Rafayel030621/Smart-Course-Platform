@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { transaction, type V3Database } from './db.js'
 import {
   assertProjectRevision,
+  assertStageWritable,
   bumpProjectRevision,
   getEvidence,
   getMilestone,
@@ -12,6 +13,8 @@ import {
   optionalIso,
   parseJsonArray,
   requiredText,
+  resolveEffectiveStage,
+  type EffectiveStage,
   type ProgressRow,
 } from './domain.js'
 import { V3Error, invalidInput } from './errors.js'
@@ -97,21 +100,14 @@ function validateLinks(
   milestoneId: string | null,
   taskId: string | null,
   evidenceIds: string[],
-): void {
-  if (milestoneId !== null) {
-    const milestone = getMilestone(db, projectId, milestoneId)
-    if (milestone.status === 'archived') throw new V3Error('MILESTONE_ARCHIVED')
-  }
-  if (taskId !== null) {
-    const task = getTask(db, projectId, taskId)
-    if (task.archived_at !== null) throw new V3Error('TASK_ARCHIVED')
-    if (milestoneId !== null && task.milestone_id !== milestoneId) {
-      throw invalidInput('任务的当前阶段与 milestoneId 不一致')
-    }
-  }
+): EffectiveStage {
+  // 任务自带阶段时，milestoneId 漏传也要按任务阶段校验归档状态
+  const stage = resolveEffectiveStage(db, projectId, taskId, milestoneId)
+  assertStageWritable(stage)
   for (const evidenceId of evidenceIds) {
     getEvidence(db, projectId, evidenceId)
   }
+  return stage
 }
 
 export async function handleProgressCreate(
@@ -133,7 +129,12 @@ export async function handleProgressCreate(
   const now = runtime.now()
   const nowText = now.toISOString()
   const userId = auth.user.user_id
-  const fingerprint = requestFingerprint(body)
+  const fingerprint = requestFingerprint({
+    method: 'POST',
+    operation: 'progress.create',
+    resource: projectId,
+    body,
+  })
 
   const replay = lookupIdempotent(db, userId, envelope.idempotencyKey, fingerprint, nowText)
   if (replay !== null) {
@@ -143,7 +144,8 @@ export async function handleProgressCreate(
 
   const project = loadProject(db, userId, projectId)
   assertProjectRevision(project, envelope.projectRevision)
-  validateLinks(db, projectId, milestoneId, taskId, evidenceIds)
+  const stage = validateLinks(db, projectId, milestoneId, taskId, evidenceIds)
+  const effectiveMilestoneId = stage.milestoneId
 
   const progressId = newId('prg', now.getTime())
   const response = transaction(db, () => {
@@ -156,7 +158,7 @@ export async function handleProgressCreate(
     ).run(
       progressId,
       projectId,
-      milestoneId,
+      effectiveMilestoneId,
       taskId,
       userId,
       summary,
@@ -175,7 +177,9 @@ export async function handleProgressCreate(
       data: {
         progress: toProgressDto(created),
         milestoneStats:
-          milestoneId === null ? null : milestoneTaskStats(db, projectId, milestoneId),
+          effectiveMilestoneId === null
+            ? null
+            : milestoneTaskStats(db, projectId, effectiveMilestoneId),
       },
     })
     saveIdempotent(db, userId, envelope.idempotencyKey, fingerprint, 200, payload, nowText)
@@ -288,7 +292,12 @@ export async function handleProgressSupersede(
   const now = runtime.now()
   const nowText = now.toISOString()
   const userId = auth.user.user_id
-  const fingerprint = requestFingerprint(body)
+  const fingerprint = requestFingerprint({
+    method: 'POST',
+    operation: 'progress.supersede',
+    resource: `${projectId}/${progressId}`,
+    body,
+  })
 
   const replay = lookupIdempotent(db, userId, envelope.idempotencyKey, fingerprint, nowText)
   if (replay !== null) {
@@ -311,12 +320,19 @@ export async function handleProgressSupersede(
   }
 
   const summary = body.summary === undefined ? previous.summary : requiredText(body.summary, 1000, 'summary')
-  const milestoneId = body.milestoneId === undefined ? previous.milestone_id : readNullableId(body, 'milestoneId')
   const taskId = body.taskId === undefined ? previous.task_id : readNullableId(body, 'taskId')
+  // 任务存在时以任务当前阶段为准；否则保留原进展阶段，避免更正时丢失归属
+  const milestoneId =
+    body.milestoneId !== undefined
+      ? readNullableId(body, 'milestoneId')
+      : taskId !== null
+        ? null
+        : previous.milestone_id
   const evidenceIds =
     body.evidenceIds === undefined ? parseJsonArray(previous.evidence_ids_json) : readEvidenceIds(body)
   const occurredAt = optionalIso(body.occurredAt, 'occurredAt') ?? nowText
-  validateLinks(db, projectId, milestoneId, taskId, evidenceIds)
+  const stage = validateLinks(db, projectId, milestoneId, taskId, evidenceIds)
+  const effectiveMilestoneId = stage.milestoneId
 
   const newProgressId = newId('prg', now.getTime())
   const response = transaction(db, () => {
@@ -335,7 +351,7 @@ export async function handleProgressSupersede(
     ).run(
       newProgressId,
       projectId,
-      milestoneId,
+      effectiveMilestoneId,
       taskId,
       userId,
       summary,
@@ -356,7 +372,9 @@ export async function handleProgressSupersede(
         progress: toProgressDto(created),
         supersededProgressId: progressId,
         milestoneStats:
-          milestoneId === null ? null : milestoneTaskStats(db, projectId, milestoneId),
+          effectiveMilestoneId === null
+            ? null
+            : milestoneTaskStats(db, projectId, effectiveMilestoneId),
       },
     })
     saveIdempotent(db, userId, envelope.idempotencyKey, fingerprint, 200, payload, nowText)

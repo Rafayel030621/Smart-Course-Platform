@@ -1,8 +1,15 @@
 import { createHash } from 'node:crypto'
+import type { IncomingMessage } from 'node:http'
 import type { V3Database } from './db.js'
 import { defaultDatabasePath, openV3Database } from './db.js'
 import { DEFAULT_ALLOWED_ORIGINS } from './http.js'
 import { createV3ConsoleLogger, silentV3Logger, type V3Logger } from './logger.js'
+import {
+  AuthRateLimiter,
+  resolveClientIp,
+  resolveTrustProxyHops,
+  type AuthRateLimitOptions,
+} from './rateLimiter.js'
 
 /**
  * V3 运行时
@@ -24,6 +31,10 @@ export interface V3RuntimeOptions {
   sessionTtlMs?: number
   /** bcrypt cost，默认 12；测试可降低 */
   passwordRounds?: number
+  /** 登录/注册限流参数；每个 runtime 独立，不与测试或其他实例共享 */
+  rateLimit?: AuthRateLimitOptions
+  /** 仅当明确部署在可信反代后时设置，默认 0（不信任 X-Forwarded-For） */
+  trustProxyHops?: number
   logger?: V3Logger
   now?: () => Date
 }
@@ -34,8 +45,10 @@ export interface V3Runtime {
   readonly inviteCodeHashes: readonly string[]
   readonly sessionTtlMs: number
   readonly passwordRounds: number
+  readonly authLimiter: AuthRateLimiter
   readonly logger: V3Logger
   readonly now: () => Date
+  clientIp(req: IncomingMessage): string
   getDb(): V3Database
   close(): void
 }
@@ -80,6 +93,8 @@ export function createV3Runtime(options: V3RuntimeOptions = {}): V3Runtime {
   const inviteCodeHashes = resolveInviteCodeHashes(options.inviteCodeHashes)
   const sessionTtlMs = options.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS
   const passwordRounds = resolvePasswordRounds(options.passwordRounds, process.env)
+  const authLimiter = new AuthRateLimiter(options.rateLimit)
+  const trustProxyHops = resolveTrustProxyHops(options.trustProxyHops, process.env)
   const logger = options.logger ?? (process.env.NODE_ENV === 'test' ? silentV3Logger : createV3ConsoleLogger())
   const now = options.now ?? (() => new Date())
 
@@ -91,8 +106,12 @@ export function createV3Runtime(options: V3RuntimeOptions = {}): V3Runtime {
     inviteCodeHashes,
     sessionTtlMs,
     passwordRounds,
+    authLimiter,
     logger,
     now,
+    clientIp(req: IncomingMessage) {
+      return resolveClientIp(req, trustProxyHops)
+    },
     getDb() {
       if (db === null) {
         db = openV3Database({ filePath: databasePath })

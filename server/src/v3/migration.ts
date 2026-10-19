@@ -175,6 +175,8 @@ interface UnderstandingInput {
   clientItemId: string | null
   kind: string
   text: string
+  /** 旧数据可能没有 originalText；null 表示缺失，不能假装原文已完整保留 */
+  originalText: string | null
   sourceSegmentIds: string[]
   status: string
 }
@@ -460,12 +462,24 @@ function parseMaterials(
         if (typeof value !== 'string') throw migrationInvalid()
         return value
       })
+      const text = readString(item.text, 'understandingItems.text', 300)
+      const originalText =
+        item.originalText === undefined || item.originalText === null || item.originalText === ''
+          ? null
+          : readString(item.originalText, 'understandingItems.originalText', 300)
       const missing = sourceSegmentIds.some((id) => !segmentIds.has(id))
       if (missing) warnings.add('UNDERSTANDING_SOURCE_MISSING', '部分理解条目来源片段缺失，已退回待确认')
+      if (originalText === null) {
+        warnings.add(
+          'UNDERSTANDING_ORIGINAL_TEXT_MISSING',
+          '旧数据缺少理解条目原文，已保留当前文本并退回待确认',
+        )
+      }
+      // 缺少原文时无法正确判断 undo 应回 pending 还是 modified，保守退回 pending
       const status =
         item.status === 'archived'
           ? 'archived'
-          : missing
+          : missing || originalText === null
             ? 'pending'
             : item.status === 'confirmed' || item.status === 'modified'
               ? item.status
@@ -474,7 +488,8 @@ function parseMaterials(
         clientId: itemClientId,
         clientItemId: readNullableString(item.clientItemId, 64),
         kind: item.kind,
-        text: readString(item.text, 'understandingItems.text', 300),
+        text,
+        originalText,
         sourceSegmentIds: sourceSegmentIds.filter((id) => segmentIds.has(id)),
         status,
       })
@@ -865,7 +880,7 @@ function writeMigration(
         material.version,
         item.kind,
         item.text,
-        item.text,
+        item.originalText ?? item.text,
         JSON.stringify(sources),
         item.status,
         material.createdAt,
@@ -993,7 +1008,12 @@ export async function handleMigrateLocal(
   const now = runtime.now()
   const nowText = now.toISOString()
   const userId = auth.user.user_id
-  const fingerprint = requestFingerprint(body)
+  const fingerprint = requestFingerprint({
+    method: 'POST',
+    operation: 'project.migrate-local',
+    resource: `migration:${body.migrationId}`,
+    body,
+  })
 
   const replay = lookupIdempotent(db, userId, idempotencyKey, fingerprint, nowText)
   if (replay !== null) {

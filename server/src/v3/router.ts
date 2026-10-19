@@ -15,7 +15,7 @@ import {
   requireJsonContentType,
   sendV3Json,
 } from './http.js'
-import { safeUserRef } from './logger.js'
+import { safeUserRef, sanitizeLogFields } from './logger.js'
 import { handleMigrateLocal, handleMigrationStatus } from './migration.js'
 import {
   handleMilestoneAction,
@@ -95,6 +95,21 @@ export async function handleV3Request(
   const segments = pathname.split('/').filter((segment) => segment !== '')
   const projectId = pathProjectId(segments)
 
+  // 成功请求只记录安全字段；失败请求由 catch 记录错误码
+  res.once('finish', () => {
+    if (res.statusCode >= 400) return
+    runtime.logger.info(
+      'v3 request completed',
+      sanitizeLogFields({
+        category,
+        status: res.statusCode,
+        requestId: getRecordedRequestId(req),
+        userRef: safeUserRef(getRecordedUserId(req)),
+        durationMs: Date.now() - startedAt,
+      }),
+    )
+  })
+
   try {
     const cors = handleV3Cors(req, res, runtime.allowedOrigins)
     if (cors.handled) return true
@@ -123,6 +138,10 @@ export async function handleV3Request(
       assertMethod(method, 'GET')
       handleMe(req, res, runtime)
       return true
+    }
+    // 未知 /api/auth/* 直接 404，不解析请求体，避免客户端文字进入日志上下文
+    if (pathname === '/api/auth' || pathname.startsWith('/api/auth/')) {
+      throw new V3Error('RESOURCE_NOT_FOUND')
     }
 
     const auth = requireAuth(db, req, now)
@@ -279,14 +298,17 @@ export async function handleV3Request(
   } catch (error) {
     const v3Error = isV3Error(error) ? error : new V3Error('INTERNAL')
     const requestId = getRecordedRequestId(req)
-    runtime.logger.warn('v3 request failed', {
-      category,
-      code: v3Error.code,
-      status: v3Error.status,
-      requestId,
-      userRef: safeUserRef(getRecordedUserId(req)),
-      durationMs: Date.now() - startedAt,
-    })
+    runtime.logger.warn(
+      'v3 request failed',
+      sanitizeLogFields({
+        category,
+        code: v3Error.code,
+        status: v3Error.status,
+        requestId,
+        userRef: safeUserRef(getRecordedUserId(req)),
+        durationMs: Date.now() - startedAt,
+      }),
+    )
     if (!res.headersSent) {
       sendV3Json(res, v3Error.status, toFailureBody(v3Error, requestId, v3Error.projectId ?? projectId))
     } else {

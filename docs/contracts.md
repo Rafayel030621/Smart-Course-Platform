@@ -1722,8 +1722,8 @@ model 响应：
 
 ### 20.6 幂等、并发与过期
 
-1. 幂等键作用域 `(userId, idempotencyKey)`，保留 24 小时；同一键 + 相同请求体返回首次响应并置 `replayed: true`，不递增版本；
-2. 同一键 + 不同请求体返回 409 `IDEMPOTENCY_CONFLICT`，不写入任何数据；
+1. 幂等键作用域 `(userId, idempotencyKey)`，保留 24 小时；请求指纹必须绑定规范化 HTTP 方法、服务端操作类别、资源目标（如 `projectId` / `projectId/entityId`）和有效请求体；同一键 + 完全相同的操作/资源/请求体返回首次响应并置 `replayed: true`，不递增版本；
+2. 同一键被用于不同操作、不同资源或不同请求体返回 409 `IDEMPOTENCY_CONFLICT`，不写入任何数据；密码、邀请码等敏感字段不进入快速哈希指纹，由业务层用 bcrypt/常量时间比较单独验证；
 3. 幂等查询先于版本校验；重放响应可能带旧版本号，客户端必须按 20.7 丢弃；
 4. `projectRevision` 不匹配返回 409 `STALE_REVISION`，响应带 `currentProjectRevision`，不执行部分写入；
 5. `expectedRevision` 不匹配返回 409 `STALE_REVISION`，响应带 `currentEntityRevision`；
@@ -1897,16 +1897,21 @@ await fetch(`${API_BASE}/api/projects`, {
     "createdAt": "2026-10-19T02:30:00.000Z",
     "updatedAt": "2026-10-19T02:30:00.000Z"
   },
-  "sessionExpiresAt": "2026-10-26T02:30:00.000Z"
+  "sessionExpiresAt": "2026-10-26T02:30:00.000Z",
+  "replayed": false
 }
 ```
+
+首次注册响应丢失后的恢复响应额外包含 `"replayed": true`、`"recovered": true`；首次响应为 `"replayed": false`。
 
 重复注册与邀请码错误：
 
 - 统一返回 409 `REGISTER_REJECTED`，文案固定为“注册未完成，请检查用户名、密码和邀请码”；
 - 不区分“账号已存在”“邀请码错误”“账号被禁用”；
 - 不覆盖已有账号，不返回已有用户信息；
-- 重复使用同一 `idempotencyKey` + 相同请求体：返回首次响应，不重复创建；不同请求体返回 409 `IDEMPOTENCY_CONFLICT`。
+- **响应丢失恢复**：重复使用同一 `idempotencyKey` + 相同非敏感请求内容（账号、昵称）时，服务端必须重新校验密码（bcrypt）和邀请码；验证通过返回 200 + 新 `Set-Cookie`，并标记 `replayed: true`、`recovered: true`；密码或邀请码不匹配仍返回 409 `REGISTER_REJECTED`，不得仅凭 `account + idempotencyKey` 签发会话；
+- 同一 `idempotencyKey` 但昵称等非敏感内容不同：409 `IDEMPOTENCY_CONFLICT`；
+- 使用新 `idempotencyKey` 重复注册：409 `REGISTER_REJECTED`。
 
 ### 21.4 POST /api/auth/login
 
@@ -1927,8 +1932,10 @@ await fetch(`${API_BASE}/api/projects`, {
 
 - 账号不存在、密码错误、账号禁用统一 401 `AUTH_FAILED`，文案“用户名或密码不正确”；
 - 不返回“账号不存在”“密码错误”“剩余尝试次数”等可枚举信息；
-- 连续失败按 IP + 账号限流，超限 429 `RATE_LIMITED`，`retryAfterSeconds` 为正整数；
-- 登录请求不要求 `idempotencyKey`；每次成功登录都生成新会话。
+- 按 IP + 账号限流，超限 429 `RATE_LIMITED`，`retryAfterSeconds` 为正整数；
+- **限流预算必须在 bcrypt 之前预占**：并发请求共享同一窗口计数，不能全部进入密码比较；默认账号 5 次 / IP 50 次每 15 分钟，超限请求直接 429；成功登录只清账号预算，不清 IP 预算；
+- 客户端地址默认取 TCP socket 地址，**不信任任意 `X-Forwarded-For`**；只有显式配置 `SCP_TRUST_PROXY_HOPS=N`（表示前面有 N 层可信反代）时，才从 XFF 右侧取第 N 个合法 IP；
+- 登录请求不要求 `idempotencyKey`；每次成功登录都生成新会话；旧会话撤销与新会话创建必须在同一事务，失败时整体回滚。
 
 ### 21.5 POST /api/auth/logout
 
@@ -2340,9 +2347,9 @@ AI 候选确认规则见 23.7；**服务端不得因“项目为空”自动创�
 
 | 当前状态 | `activate` | `complete` | `reopen` | `archive` | `restore` |
 | --- | --- | --- | --- | --- | --- |
-| `planned` | `active` | `completed`（允许直接完成） | 不合法 | `archived` | 不合法 |
-| `active` | `active`（幂等） | `completed` | 不合法 | `archived` | 不合法 |
-| `completed` | 不合法 | `completed`（幂等） | `active`，清 `completedAt` | `archived` | 不合法 |
+| `planned` | `active` | `completed`（允许直接完成） | 不合法 | `archived` | `no-op`（非归档） |
+| `active` | `active`（幂等） | `completed` | `no-op`（幂等，不递增） | `archived` | `no-op`（非归档） |
+| `completed` | 不合法 | `completed`（幂等） | `active`，清 `completedAt` | `archived` | `no-op`（非归档） |
 | `archived` | 不合法 | 不合法 | 不合法 | 幂等 | `archivedFromStatus` |
 
 必须明确：
@@ -2351,7 +2358,9 @@ AI 候选确认规则见 23.7；**服务端不得因“项目为空”自动创�
 2. `completed → active` 是唯一 reopen 路径；任务状态不变，进度重新计算；
 3. 归档记录 `archivedFromStatus`；恢复回到该状态，不重置 revision；
 4. 归档阶段新增任务/证据返回 409 `MILESTONE_ARCHIVED`；必须先 `restore`；
-5. `active → planned`、`completed → planned`、`archived` 直接 `complete` 返回 409 `INVALID_STATE_TRANSITION`。
+5. `active → planned`、`completed → planned`、`archived` 直接 `complete` 返回 409 `INVALID_STATE_TRANSITION`；
+6. `active` 再 `reopen`、非归档阶段 `restore` 为幂等 no-op：返回当前状态，`changed: false`，不递增实体 revision 或 `projectRevision`；`planned`/`archived` 不能通过 `reopen` 跳过其他转换；
+7. `restore` 恢复出的名称若与当前未归档阶段重名，返回 409 `MILESTONE_NAME_CONFLICT`；整个事务回滚，阶段保持归档、版本不变，也不写入成功幂等记录；用户可先给现有同名阶段改名再恢复。
 
 ### 22.3 任务（Task）接口
 
@@ -2513,6 +2522,7 @@ AI 候选确认规则见 23.7；**服务端不得因“项目为空”自动创�
 规则：
 
 - 如果同时传 `milestoneId` 和 `taskId`，任务的当前阶段必须等于 `milestoneId`，否则 400 `INVALID_INPUT`（字段级冲突，不执行写入）；
+- 任务已归属阶段时，`milestoneId` 缺失或 `null` **不能绕过归档限制**：服务端以数据库中的任务阶段为准；有效阶段已归档返回 409 `MILESTONE_ARCHIVED`；显式传入不同阶段返回 400 `INVALID_INPUT`；拒绝时不得写入进展或递增版本；
 - 提交进展**不改变任务状态**；完成任务必须调用任务完成动作；
 - 成功返回 `data.progress` 与 `data.milestoneStats`（可空）；
 - 进展只追加；更正通过 `POST /api/projects/{projectId}/progress/{progressId}/supersede` 创建新记录，旧记录置 `superseded`，正文保留；
@@ -2552,7 +2562,7 @@ AI 候选确认规则见 23.7；**服务端不得因“项目为空”自动创�
 | --- | --- | --- | --- |
 | `submissionId` | string | 否 | 8～64 可打印字符；不传由服务端生成；同项目内唯一 |
 | `taskId` | string \| null | 是 | 同项目；归档任务拒绝 |
-| `milestoneId` | string \| null | 是 | 同项目；归档阶段拒绝；与任务当前阶段可以不同（历史快照） |
+| `milestoneId` | string \| null | 是 | 同项目；归档阶段拒绝；任务已归属阶段时必须与任务当前阶段一致（缺失/`null` 按任务阶段处理，不同阶段 400 `INVALID_INPUT`） |
 | `didWhat` | string | 是 | 1～300 字 |
 | `foundWhat` | string \| null | 是 | ≤ 500 字 |
 | `stillUnsure` | string \| null | 是 | ≤ 500 字；非空时创建疑问 |
@@ -2609,9 +2619,10 @@ AI 候选确认规则见 23.7；**服务端不得因“项目为空”自动创�
 规则：
 
 - 证据正文不可修改；`stillUnsure` 非空自动创建一条 `Doubt`，重复 `submissionId` 不重复创建；
+- 任务已归属阶段时，`milestoneId` 缺失或 `null` 不能绕过归档限制：服务端以数据库中的任务阶段为准，有效阶段归档返回 409 `MILESTONE_ARCHIVED`；显式传入不同阶段返回 400 `INVALID_INPUT`；拒绝时不得写入证据、疑问或改变任务状态；
 - `completeTask: true` 时在同一事务中把任务置 `done`、写 `completedAt`、重算阶段进度、创建证据与疑问、`projectRevision` 只 +1；
 - `completeTask` 对 `done` 任务幂等；对归档任务返回 `TASK_ARCHIVED`；
-- 证据不因阶段归档而删除；`milestoneNameSnapshot` 固定为提交时名称；
+- 证据不因阶段归档而删除；`milestoneNameSnapshot` 固定为提交时名称，任务后续移动阶段不静默改写历史快照；
 - 不提供证据删除接口。
 
 #### POST /api/projects/{projectId}/evidence/{evidenceId}/links
@@ -2635,8 +2646,9 @@ AI 候选确认规则见 23.7；**服务端不得因“项目为空”自动创�
 
 - `taskId` / `milestoneId` 可为 `null`，表示解除关联；
 - 两者必须同项目；归档任务/阶段拒绝；
+- 任务已归属阶段时，`milestoneId` 缺失/`null` 按任务阶段处理；显式不同阶段返回 400 `INVALID_INPUT`；有效阶段归档返回 409 `MILESTONE_ARCHIVED`，拒绝时不修改关联或版本；
 - 更新证据关联使证据 `revision + 1`、`projectRevision + 1`；
-- 阶段名称变化时同时更新 `milestoneNameSnapshot`；
+- 仅当本次显式改变关联阶段时更新 `milestoneNameSnapshot`；之后任务移动阶段不得静默改写历史快照；
 - 重复设置相同关联幂等，不递增版本。
 
 #### GET /api/projects/{projectId}/evidence
@@ -3502,7 +3514,9 @@ v3 规则：
 
 - `materials[]`：`clientId`（本地 `materialId`）、`name`、`type`、`size`、`encoding`、`status`（本地 `state` 映射）、`version`、`createdAt`、`updatedAt`；
 - `materials[].segments[]`：`segmentId`、`index`、`startLine`、`endLine`、`text`；
-- `materials[].understandingItems[]`：`clientId`（本地 `UnderstandingBlock.id`）、`clientItemId`（本地 `itemId`）、`kind`（五值原样）、`text`（本地 `content`）、`sourceSegmentIds`（本地 `sources[].segmentId`）、`status`（原样）。
+- `materials[].understandingItems[]`：`clientId`（本地 `UnderstandingBlock.id`）、`clientItemId`（本地 `itemId`）、`kind`（五值原样）、`text`（本地 `content`）、`originalText`（本地 `originalContent`）、`sourceSegmentIds`（本地 `sources[].segmentId`）、`status`（原样）；
+- `originalText` 缺失（旧数据）时，服务端保留 `text`、返回 `UNDERSTANDING_ORIGINAL_TEXT_MISSING` 警告并把该条置 `pending`，不得假装原文已完整保留；`archived` 仍保持 `archived`；
+- 同时提供 `text` 与 `originalText` 时分别写入；已修改后确认的条目迁移后 `undo` 应回到 `modified`，未修改条目应回到 `pending`。
 
 迁移是**单事务**：除上述明确的“跳过并警告”外，任何结构错误都整单失败，不产生半迁移项目。
 

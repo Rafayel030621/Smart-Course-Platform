@@ -32,6 +32,7 @@ const requestIds = new WeakMap<IncomingMessage, string>()
 const requestUserIds = new WeakMap<IncomingMessage, string>()
 
 export function noteRequestId(req: IncomingMessage, requestId: string): void {
+  if (!UUID_V4.test(requestId)) return
   requestIds.set(req, requestId)
 }
 
@@ -81,7 +82,12 @@ export async function readJsonBody(req: IncomingMessage, maxBytes: number): Prom
   if (text.trim() === '') throw new InvalidJsonError()
   try {
     const parsed = JSON.parse(text) as unknown
-    if (isRecord(parsed) && typeof parsed.requestId === 'string') {
+    // 只有通过 UUID v4 校验的 requestId 才进入日志上下文，避免客户端探针污染日志
+    if (
+      isRecord(parsed) &&
+      typeof parsed.requestId === 'string' &&
+      UUID_V4.test(parsed.requestId)
+    ) {
       noteRequestId(req, parsed.requestId)
     }
     return parsed
@@ -362,18 +368,34 @@ export function queryParam(url: URL, name: string): string | null {
   return value === null || value === '' ? null : value
 }
 
-export function logCategoryFor(method: string, pathname: string): string {
+const AUTH_OPERATIONS = new Set(['register', 'login', 'logout', 'me'])
+const PROJECT_SECTIONS = new Set(['milestones', 'tasks', 'evidence', 'progress', 'materials'])
+
+/**
+ * 操作类别只来自固定枚举，不拼接客户端路径片段。
+ * 未知路径统一归为 auth.unknown / project.unknown / unknown。
+ */
+export function logCategoryFor(_method: string, pathname: string): string {
   const parts = pathname.split('/').filter((part) => part !== '')
-  const resource = parts[1] ?? 'root'
-  const action = parts[2] ?? ''
-  if (resource === 'auth') return `auth.${action}`
-  if (resource === 'projects' && action === 'migrations') return 'migration.status'
-  if (resource === 'projects' && action === 'migrate-local') return 'migration.create'
-  if (resource === 'projects') {
-    const section = parts[3] ?? 'project'
-    return `project.${section}.${method.toLowerCase()}`
+  const resource = parts[1] ?? ''
+
+  if (resource === 'auth') {
+    const operation = parts.length === 3 ? (parts[2] as string) : ''
+    return AUTH_OPERATIONS.has(operation) ? `auth.${operation}` : 'auth.unknown'
   }
-  return 'other'
+
+  if (resource === 'projects') {
+    const action = parts[2] ?? ''
+    if (action === 'migrate-local' && parts.length === 3) return 'migration.create'
+    if (action === 'migrations' && parts.length === 4) return 'migration.status'
+    if (parts.length === 2) return 'project.list'
+    if (parts.length === 3) return 'project.detail'
+    const section = parts[3] as string
+    if (parts.length >= 4 && PROJECT_SECTIONS.has(section)) return `project.${section}`
+    return 'project.unknown'
+  }
+
+  return 'unknown'
 }
 
 /** 判断错误是否 SQLite 唯一约束冲突 */

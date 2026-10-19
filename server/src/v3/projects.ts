@@ -88,7 +88,12 @@ export async function handleProjectCreate(
   const now = runtime.now()
   const nowText = now.toISOString()
   const userId = auth.user.user_id
-  const fingerprint = requestFingerprint(body)
+  const fingerprint = requestFingerprint({
+    method: 'POST',
+    operation: 'project.create',
+    resource: 'projects',
+    body,
+  })
 
   const replay = lookupIdempotent(db, userId, idempotencyKey, fingerprint, nowText)
   if (replay !== null) {
@@ -158,7 +163,12 @@ export async function handleProjectPatch(
   const now = runtime.now()
   const nowText = now.toISOString()
   const userId = auth.user.user_id
-  const fingerprint = requestFingerprint(body)
+  const fingerprint = requestFingerprint({
+    method: 'PATCH',
+    operation: 'project.patch',
+    resource: projectId,
+    body,
+  })
 
   const replay = lookupIdempotent(db, userId, envelope.idempotencyKey, fingerprint, nowText)
   if (replay !== null) {
@@ -219,7 +229,12 @@ export async function handleProjectAction(
   const now = runtime.now()
   const nowText = now.toISOString()
   const userId = auth.user.user_id
-  const fingerprint = requestFingerprint(body)
+  const fingerprint = requestFingerprint({
+    method: 'POST',
+    operation: `project.${action}`,
+    resource: projectId,
+    body,
+  })
 
   const replay = lookupIdempotent(db, userId, envelope.idempotencyKey, fingerprint, nowText)
   if (replay !== null) {

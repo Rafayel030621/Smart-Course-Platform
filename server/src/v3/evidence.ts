@@ -11,6 +11,8 @@ import {
   optionalBoolean,
   optionalText,
   requiredText,
+  resolveEffectiveStage,
+  assertStageWritable,
   toEvidenceDto,
   toTaskDto,
   type EvidenceRow,
@@ -59,22 +61,15 @@ function readSubmissionId(body: Record<string, unknown>, nowText: string): strin
   return value
 }
 
-function validateTaskAndMilestone(
+function resolveWritableStage(
   db: V3Database,
   projectId: string,
   taskId: string | null,
   milestoneId: string | null,
-): { milestoneName: string | null } {
-  if (taskId !== null) {
-    const task = getTask(db, projectId, taskId)
-    if (task.archived_at !== null) throw new V3Error('TASK_ARCHIVED')
-  }
-  if (milestoneId !== null) {
-    const milestone = getMilestone(db, projectId, milestoneId)
-    if (milestone.status === 'archived') throw new V3Error('MILESTONE_ARCHIVED')
-    return { milestoneName: milestone.name }
-  }
-  return { milestoneName: null }
+): ReturnType<typeof resolveEffectiveStage> {
+  const stage = resolveEffectiveStage(db, projectId, taskId, milestoneId)
+  assertStageWritable(stage)
+  return stage
 }
 
 export async function handleEvidenceCreate(
@@ -103,7 +98,12 @@ export async function handleEvidenceCreate(
 
   const db = runtime.getDb()
   const userId = auth.user.user_id
-  const fingerprint = requestFingerprint(body)
+  const fingerprint = requestFingerprint({
+    method: 'POST',
+    operation: 'evidence.create',
+    resource: projectId,
+    body,
+  })
 
   const replay = lookupIdempotent(db, userId, envelope.idempotencyKey, fingerprint, nowText)
   if (replay !== null) {
@@ -137,7 +137,10 @@ export async function handleEvidenceCreate(
     return
   }
 
-  const { milestoneName } = validateTaskAndMilestone(db, projectId, taskId, milestoneId)
+  // 任务自带阶段时，客户端漏传 milestoneId 也必须按任务归属阶段校验归档状态
+  const stage = resolveWritableStage(db, projectId, taskId, milestoneId)
+  const effectiveMilestoneId = stage.milestoneId
+  const milestoneName = stage.milestone?.name ?? null
   if (completeTask) {
     if (taskId === null) throw invalidInput('completeTask 需要同时提供 taskId')
     if (expectedTaskRevision === null) throw invalidInput('completeTask 需要 expectedTaskRevision')
@@ -178,7 +181,7 @@ export async function handleEvidenceCreate(
       evidenceId,
       projectId,
       taskId,
-      milestoneId,
+      effectiveMilestoneId,
       milestoneName,
       userId,
       submissionId,
@@ -197,7 +200,17 @@ export async function handleEvidenceCreate(
            (doubt_id, project_id, milestone_id, task_id, user_id, text, status,
             source_evidence_id, revision, created_at, updated_at, resolved_at, resolved_by_user_id)
          VALUES (?, ?, ?, ?, ?, ?, 'open', ?, 1, ?, ?, NULL, NULL)`,
-      ).run(doubtId, projectId, milestoneId, taskId, userId, stillUnsure, evidenceId, nowText, nowText)
+      ).run(
+        doubtId,
+        projectId,
+        effectiveMilestoneId,
+        taskId,
+        userId,
+        stillUnsure,
+        evidenceId,
+        nowText,
+        nowText,
+      )
     }
 
     const revision = bumpProjectRevision(db, projectId, nowText)
@@ -220,7 +233,9 @@ export async function handleEvidenceCreate(
               },
         task: completeTask && task !== null ? toTaskDto(db, task) : null,
         milestoneStats:
-          milestoneId === null ? null : milestoneTaskStats(db, projectId, milestoneId),
+          effectiveMilestoneId === null
+            ? null
+            : milestoneTaskStats(db, projectId, effectiveMilestoneId),
       },
     })
     saveIdempotent(db, userId, envelope.idempotencyKey, fingerprint, 200, payload, nowText)
@@ -248,7 +263,12 @@ export async function handleEvidenceLinks(
   const now = runtime.now()
   const nowText = now.toISOString()
   const userId = auth.user.user_id
-  const fingerprint = requestFingerprint(body)
+  const fingerprint = requestFingerprint({
+    method: 'POST',
+    operation: 'evidence.links',
+    resource: `${projectId}/${evidenceId}`,
+    body,
+  })
 
   const replay = lookupIdempotent(db, userId, envelope.idempotencyKey, fingerprint, nowText)
   if (replay !== null) {
@@ -267,8 +287,12 @@ export async function handleEvidenceLinks(
     })
   }
 
-  const { milestoneName } = validateTaskAndMilestone(db, projectId, taskId, milestoneId)
-  const sameLinks = evidence.task_id === taskId && evidence.milestone_id === milestoneId
+  // 任务自带阶段时，milestoneId 漏传不能绕过归档限制；快照取有效阶段名
+  const stage = resolveWritableStage(db, projectId, taskId, milestoneId)
+  const effectiveMilestoneId = stage.milestoneId
+  const milestoneName = stage.milestone?.name ?? null
+  const sameLinks =
+    evidence.task_id === taskId && evidence.milestone_id === effectiveMilestoneId
 
   const response = transaction(db, () => {
     let changed = false
@@ -278,7 +302,7 @@ export async function handleEvidenceLinks(
             SET task_id = ?, milestone_id = ?, milestone_name_snapshot = ?,
                 revision = revision + 1, updated_at = ?
           WHERE evidence_id = ? AND project_id = ?`,
-      ).run(taskId, milestoneId, milestoneName, nowText, evidenceId, projectId)
+      ).run(taskId, effectiveMilestoneId, milestoneName, nowText, evidenceId, projectId)
       changed = true
     }
 
@@ -293,7 +317,9 @@ export async function handleEvidenceLinks(
       data: {
         evidence: toEvidenceDto(updated),
         milestoneStats:
-          milestoneId === null ? null : milestoneTaskStats(db, projectId, milestoneId),
+          effectiveMilestoneId === null
+            ? null
+            : milestoneTaskStats(db, projectId, effectiveMilestoneId),
       },
     })
     saveIdempotent(db, userId, envelope.idempotencyKey, fingerprint, 200, payload, nowText)

@@ -104,7 +104,12 @@ export async function handleTaskCreate(
   const now = runtime.now()
   const nowText = now.toISOString()
   const userId = auth.user.user_id
-  const fingerprint = requestFingerprint(body)
+  const fingerprint = requestFingerprint({
+    method: 'POST',
+    operation: 'task.create',
+    resource: projectId,
+    body,
+  })
 
   const replay = lookupIdempotent(db, userId, envelope.idempotencyKey, fingerprint, nowText)
   if (replay !== null) {
@@ -184,7 +189,12 @@ export async function handleTaskPatch(
   const now = runtime.now()
   const nowText = now.toISOString()
   const userId = auth.user.user_id
-  const fingerprint = requestFingerprint(body)
+  const fingerprint = requestFingerprint({
+    method: 'PATCH',
+    operation: 'task.patch',
+    resource: `${projectId}/${taskId}`,
+    body,
+  })
 
   const replay = lookupIdempotent(db, userId, envelope.idempotencyKey, fingerprint, nowText)
   if (replay !== null) {
@@ -256,7 +266,12 @@ export async function handleTaskLinkMilestone(
   const now = runtime.now()
   const nowText = now.toISOString()
   const userId = auth.user.user_id
-  const fingerprint = requestFingerprint(body)
+  const fingerprint = requestFingerprint({
+    method: 'POST',
+    operation: 'task.link-milestone',
+    resource: `${projectId}/${taskId}`,
+    body,
+  })
 
   const replay = lookupIdempotent(db, userId, envelope.idempotencyKey, fingerprint, nowText)
   if (replay !== null) {
@@ -355,7 +370,12 @@ export async function handleTaskAction(
   const now = runtime.now()
   const nowText = now.toISOString()
   const userId = auth.user.user_id
-  const fingerprint = requestFingerprint(body)
+  const fingerprint = requestFingerprint({
+    method: 'POST',
+    operation: `task.${action}`,
+    resource: `${projectId}/${taskId}`,
+    body,
+  })
 
   const replay = lookupIdempotent(db, userId, envelope.idempotencyKey, fingerprint, nowText)
   if (replay !== null) {

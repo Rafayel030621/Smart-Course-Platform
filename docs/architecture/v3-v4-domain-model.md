@@ -351,9 +351,9 @@ completed ──reopen──> active（清除 completedAt）
 
 | 当前状态 | `activate` | `complete` | `reopen` | `archive` | `restore` |
 | --- | --- | --- | --- | --- | --- |
-| `planned` | `active` | `completed`（允许直接完成） | 不合法 | `archived` | 不合法 |
-| `active` | `active`（幂等，不递增） | `completed` | 不合法 | `archived` | 不合法 |
-| `completed` | 不合法 | `completed`（幂等，不递增） | `active`，清 `completedAt` | `archived` | 不合法 |
+| `planned` | `active` | `completed`（允许直接完成） | 不合法 | `archived` | `no-op`（非归档） |
+| `active` | `active`（幂等，不递增） | `completed` | `no-op`（幂等，不递增） | `archived` | `no-op`（非归档） |
+| `completed` | 不合法 | `completed`（幂等，不递增） | `active`，清 `completedAt` | `archived` | `no-op`（非归档） |
 | `archived` | 不合法 | 不合法 | 不合法 | `archived`（幂等） | `archivedFromStatus` |
 
 必须明确的规则：
@@ -364,7 +364,8 @@ completed ──reopen──> active（清除 completedAt）
 4. **恢复**：`archived → archivedFromStatus`，恢复后回到归档前状态，不重置 revision；
 5. **归档阶段不能新增任务、不能提交关联证据、不能作为 AI 当前阶段**；必须先 `restore`；已有任务和证据仍可查询；
 6. `active → planned`、`completed → planned`、`archived` 直接 `complete` 都不是合法转换，返回 409 `INVALID_STATE_TRANSITION`；
-7. 同一状态动作重复调用按上表幂等，不递增 `revision` 与 `projectRevision`。
+7. 同一状态动作重复调用按上表幂等，不递增 `revision` 与 `projectRevision`；
+8. `active` 再 `reopen`、非归档阶段 `restore` 是幂等 no-op；`planned`/`archived` 不能通过 `reopen` 跳过其他转换；`completed → active` 仍是唯一实际 reopen 路径。
 
 任务统计（响应计算字段，不落库）：
 
@@ -465,7 +466,7 @@ todo ──start──> doing ──complete──> done
 1. 证据正文只追加，不提供普通删除；阶段归档或项目归档不删除证据；
 2. 允许把证据关联到任务和阶段；重新关联时保留 `milestoneNameSnapshot` 的原值直到显式更新，并在时间线记录变更事件；
 3. `stillUnsure` 非空时自动创建一条 `Doubt`，`sourceEvidenceId` 指向本证据；重复提交同一 `submissionId` 不重复创建疑问；
-4. `taskId` 与 `milestoneId` 必须属于同一项目；`milestoneId` 与任务的当前阶段可以不同（历史快照），但两者都必须是本项目实体；
+4. `taskId` 与 `milestoneId` 必须属于同一项目；任务已归属阶段时，证据写入的 `milestoneId` 必须与任务当前阶段一致；缺失/`null` 按任务阶段处理，显式不同返回 400 `INVALID_INPUT`；有效阶段归档返回 409 `MILESTONE_ARCHIVED`；历史证据的 `milestoneNameSnapshot` 保留提交时值，不因任务移动静默改写；
 5. 归档阶段下的证据仍可查询：`GET /evidence?milestoneId=...&includeArchived=true`；
 6. 证据不可进入已归档/已删除项目之外的其他项目；跨项目引用一律 404/409（见第 6 节）。
 
@@ -562,7 +563,8 @@ archived ──×────────> pending / modified / confirmed（不�
 5. 确认/修改/撤销/移除都必须带 `materialVersion` 与 `expectedRevision`；版本不符返回 409；
 6. 重复确认、重复撤销、重复移除是幂等的：状态已满足时返回 `changed: false`，不递增 `revision` 与 `projectRevision`；
 7. 移除不删除来源片段；已归档条目不能再确认，必须重新生成草稿；
-8. 编辑文本与当前 `text` 完全相同时是无操作，不改变状态、不递增版本。
+8. 编辑文本与当前 `text` 完全相同时是无操作，不改变状态、不递增版本；
+9. 本地迁移必须分别保留 `text` 与 `originalText`；旧数据缺少 `originalText` 时保留 `text`、返回 `UNDERSTANDING_ORIGINAL_TEXT_MISSING` 并置 `pending`（`archived` 保持不变），不得假装原文已完整保留。
 
 `undoDraftItem` 的确定规则：
 

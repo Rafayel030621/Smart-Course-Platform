@@ -375,6 +375,46 @@ export function requireTaskMilestone(db: V3Database, projectId: string, mileston
   return milestone
 }
 
+export interface EffectiveStage {
+  milestoneId: string | null
+  milestone: MilestoneRow | null
+}
+
+/**
+ * 解析“任务/证据/进展实际归属的阶段”。
+ *
+ * 客户端漏传 milestoneId 时不能绕过任务自身的阶段归档限制：
+ * - 任务有阶段：以数据库中的任务归属为准；
+ * - 显式传了不同阶段：拒绝（同用户跨阶段引用）；
+ * - 任务没有阶段：允许显式指定一个同项目阶段；
+ * - 任务已归档：拒绝提交/链接/更正。
+ */
+export function resolveEffectiveStage(
+  db: V3Database,
+  projectId: string,
+  taskId: string | null,
+  requestedMilestoneId: string | null,
+): EffectiveStage {
+  let task: TaskRow | null = null
+  if (taskId !== null) {
+    task = getTask(db, projectId, taskId)
+    if (task.archived_at !== null) throw new V3Error('TASK_ARCHIVED')
+  }
+
+  const taskStage = task?.milestone_id ?? null
+  if (requestedMilestoneId !== null && taskStage !== null && requestedMilestoneId !== taskStage) {
+    throw invalidInput('任务的当前阶段与 milestoneId 不一致')
+  }
+
+  const milestoneId = requestedMilestoneId ?? taskStage
+  if (milestoneId === null) return { milestoneId: null, milestone: null }
+  return { milestoneId, milestone: getMilestone(db, projectId, milestoneId) }
+}
+
+export function assertStageWritable(stage: EffectiveStage): void {
+  if (stage.milestone?.status === 'archived') throw new V3Error('MILESTONE_ARCHIVED')
+}
+
 /* ------------------------------------------------------------------ 统计 */
 
 export function milestoneTaskStats(

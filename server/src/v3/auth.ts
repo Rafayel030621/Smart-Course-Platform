@@ -150,13 +150,6 @@ function inviteCodeAccepted(runtime: V3Runtime, code: string): boolean {
 
 /* ------------------------------------------------------------------- 会话 */
 
-interface SessionRow {
-  session_id: string
-  user_id: string
-  expires_at: string
-  status: string
-}
-
 interface SessionJoinRow extends V3UserRow {
   session_id: string
   expires_at: string
@@ -256,55 +249,34 @@ export function revokeSessionByToken(db: V3Database, token: string | null, now: 
   ).run(now.toISOString(), tokenHash(token))
 }
 
-/* --------------------------------------------------------------- 频率限制 */
+/* --------------------------------------------------------------- 会话事务 */
 
-interface AttemptRecord {
-  count: number
-  firstAt: number
-  blockedUntil: number
-}
-
-class LoginRateLimiter {
-  private readonly attempts = new Map<string, AttemptRecord>()
-
-  constructor(
-    private readonly maxAttempts = 5,
-    private readonly windowMs = 15 * 60 * 1000,
-  ) {}
-
-  check(key: string, now: number): void {
-    const record = this.attempts.get(key)
-    if (record === undefined) return
-    if (record.blockedUntil > now) {
-      throw new V3Error('RATE_LIMITED', {
-        retryAfterSeconds: Math.max(1, Math.ceil((record.blockedUntil - now) / 1000)),
-      })
-    }
-    if (now - record.firstAt > this.windowMs) this.attempts.delete(key)
-  }
-
-  fail(key: string, now: number): void {
-    const record = this.attempts.get(key)
-    if (record === undefined || now - record.firstAt > this.windowMs) {
-      this.attempts.set(key, { count: 1, firstAt: now, blockedUntil: 0 })
-      return
-    }
-    record.count += 1
-    if (record.count >= this.maxAttempts) {
-      record.blockedUntil = now + this.windowMs
+/**
+ * 撤销当前请求携带的旧会话并创建新会话。
+ * 必须在调用方事务内执行：旧会话撤销与新会话写入同成败。
+ */
+function rotateAndCreateSession(
+  db: V3Database,
+  runtime: V3Runtime,
+  userId: string,
+  now: Date,
+  nowText: string,
+  req: IncomingMessage,
+): { token: string; sessionId: string; expiresAt: string } {
+  const oldToken = readSessionToken(req)
+  let rotatedFrom: string | null = null
+  if (oldToken !== null) {
+    const oldSession = db
+      .prepare('SELECT session_id FROM sessions WHERE token_hash = ? AND status = ?')
+      .get(tokenHash(oldToken), 'active') as { session_id: string } | undefined
+    if (oldSession !== undefined) {
+      rotatedFrom = oldSession.session_id
+      db.prepare(
+        "UPDATE sessions SET status = 'revoked', revoked_at = ? WHERE session_id = ? AND status = 'active'",
+      ).run(nowText, oldSession.session_id)
     }
   }
-
-  reset(key: string): void {
-    this.attempts.delete(key)
-  }
-}
-
-const loginLimiter = new LoginRateLimiter()
-
-function clientKey(req: IncomingMessage, account: string): string {
-  const address = req.socket.remoteAddress ?? 'unknown'
-  return `${address}|${account}`
+  return createSession(db, userId, now, runtime, rotatedFrom)
 }
 
 /* ----------------------------------------------------------------- 路由 */
@@ -341,25 +313,36 @@ export async function handleRegister(
   const nowText = now.toISOString()
   const accountNormalized = normalizeAccount(account)
   const scope = `anon:${accountNormalized}`
-  const fingerprint = requestFingerprint(body)
+  // 密码和邀请码不进入快速哈希；恢复登录时用 bcrypt/邀请码哈希单独验证。
+  const fingerprint = requestFingerprint({
+    method: 'POST',
+    operation: 'auth.register',
+    resource: accountNormalized,
+    body: { account: accountNormalized, displayName },
+  })
 
   const replay = lookupIdempotent(db, scope, idempotencyKey, fingerprint, nowText)
   if (replay !== null) {
-    sendV3Json(res, replay.statusCode, replay.body)
+    await recoverRegistration({
+      req,
+      res,
+      runtime,
+      requestId,
+      accountNormalized,
+      password,
+      inviteCode,
+      now,
+      nowText,
+    })
     return
   }
 
-  loginLimiter.check(clientKey(req, accountNormalized), now.getTime())
+  const ip = runtime.clientIp(req)
+  runtime.authLimiter.reserve(ip, accountNormalized, now.getTime())
 
   const inviteOk = inviteCodeAccepted(runtime, inviteCode)
-  const existing = db
-    .prepare('SELECT user_id FROM users WHERE account_normalized = ?')
-    .get(accountNormalized) as { user_id: string } | undefined
-
-  if (!inviteOk || existing !== undefined) {
-    loginLimiter.fail(clientKey(req, accountNormalized), now.getTime())
-    throw new V3Error('REGISTER_REJECTED')
-  }
+  const existing = findUserByAccount(db, accountNormalized)
+  if (!inviteOk || existing !== undefined) throw new V3Error('REGISTER_REJECTED')
 
   const passwordHash = await bcrypt.hash(password, runtime.passwordRounds)
   const userId = newId('usr', now.getTime())
@@ -391,14 +374,90 @@ export async function handleRegister(
         updatedAt: nowText,
       },
       sessionExpiresAt: session.expiresAt,
+      replayed: false,
     }
     saveIdempotent(db, scope, idempotencyKey, fingerprint, 200, response, nowText)
     return { session, response }
   })
 
-  loginLimiter.reset(clientKey(req, accountNormalized))
+  runtime.authLimiter.resetAccount(ip, accountNormalized)
+  noteUserId(req, userId)
   setSessionCookie(res, result.session.token, runtime.secureCookies, SESSION_MAX_AGE_SECONDS)
   sendV3Json(res, 200, result.response)
+}
+
+interface RegisterRecoveryInput {
+  req: IncomingMessage
+  res: ServerResponse
+  runtime: V3Runtime
+  requestId: string
+  accountNormalized: string
+  password: string
+  inviteCode: string
+  now: Date
+  nowText: string
+}
+
+/**
+ * 首次注册响应丢失后的恢复：
+ * - 必须重新校验密码（bcrypt）和邀请码；
+ * - 不能仅凭 account + idempotencyKey 签发会话；
+ * - 新会话与旧会话轮换在同一事务中完成。
+ */
+async function recoverRegistration(input: RegisterRecoveryInput): Promise<void> {
+  const { req, res, runtime, requestId, accountNormalized, password, inviteCode, now, nowText } = input
+  const db = runtime.getDb()
+  const ip = runtime.clientIp(req)
+  runtime.authLimiter.reserve(ip, accountNormalized, now.getTime())
+
+  const row = findUserByAccount(db, accountNormalized)
+  if (row === undefined || row.status !== 'active') throw new V3Error('REGISTER_REJECTED')
+
+  const inviteOk = inviteCodeAccepted(runtime, inviteCode)
+  let verified = false
+  try {
+    verified = await bcrypt.compare(password, row.password_hash)
+  } catch {
+    verified = false
+  }
+  if (!inviteOk || !verified) throw new V3Error('REGISTER_REJECTED')
+
+  const session = transaction(db, () => {
+    db.prepare('UPDATE users SET last_login_at = ?, updated_at = ? WHERE user_id = ?').run(
+      nowText,
+      nowText,
+      row.user_id,
+    )
+    return rotateAndCreateSession(db, runtime, row.user_id, now, nowText, req)
+  })
+
+  runtime.authLimiter.resetAccount(ip, accountNormalized)
+  noteUserId(req, row.user_id)
+  setSessionCookie(res, session.token, runtime.secureCookies, SESSION_MAX_AGE_SECONDS)
+  sendV3Json(res, 200, {
+    contractVersion: V3_CONTRACT_VERSION,
+    requestId,
+    user: toPublicUser({ ...row, updated_at: nowText }),
+    sessionExpiresAt: session.expiresAt,
+    replayed: true,
+    recovered: true,
+  })
+}
+
+interface UserWithPassword extends V3UserRow {
+  password_hash: string
+}
+
+function findUserByAccount(
+  db: V3Database,
+  accountNormalized: string,
+): UserWithPassword | undefined {
+  return db
+    .prepare(
+      `SELECT user_id, account, display_name, password_hash, status, revision, created_at, updated_at
+         FROM users WHERE account_normalized = ?`,
+    )
+    .get(accountNormalized) as UserWithPassword | undefined
 }
 
 export async function handleLogin(
@@ -416,17 +475,12 @@ export async function handleLogin(
   const db = runtime.getDb()
   const now = runtime.now()
   const nowText = now.toISOString()
+  const ip = runtime.clientIp(req)
 
-  loginLimiter.check(clientKey(req, accountNormalized), now.getTime())
+  // 在 bcrypt 之前预占预算：并发请求也会计入同一窗口
+  runtime.authLimiter.reserve(ip, accountNormalized, now.getTime())
 
-  const row = db
-    .prepare(
-      `SELECT user_id, account, display_name, password_hash, status, revision, created_at, updated_at
-         FROM users WHERE account_normalized = ?`,
-    )
-    .get(accountNormalized) as
-    | (V3UserRow & { password_hash: string })
-    | undefined
+  const row = findUserByAccount(db, accountNormalized)
 
   // 账号不存在时也执行一次哈希比较，避免通过耗时枚举账号
   const hash =
@@ -439,34 +493,21 @@ export async function handleLogin(
   }
 
   if (row === undefined || !verified || row.status !== 'active') {
-    loginLimiter.fail(clientKey(req, accountNormalized), now.getTime())
     throw new V3Error('AUTH_FAILED')
   }
 
-  const oldToken = readSessionTokenFromRequest(req)
-  let rotatedFrom: string | null = null
-  if (oldToken !== null) {
-    const oldSession = db
-      .prepare('SELECT session_id FROM sessions WHERE token_hash = ? AND status = ?')
-      .get(tokenHash(oldToken), 'active') as SessionRow | undefined
-    if (oldSession !== undefined) {
-      rotatedFrom = oldSession.session_id
-      db.prepare(
-        "UPDATE sessions SET status = 'revoked', revoked_at = ? WHERE session_id = ?",
-      ).run(nowText, oldSession.session_id)
-    }
-  }
-
+  // 旧会话撤销与新会话创建同事务；任何一步失败都不会留下“只撤销旧会话”的状态。
   const session = transaction(db, () => {
     db.prepare('UPDATE users SET last_login_at = ?, updated_at = ? WHERE user_id = ?').run(
       nowText,
       nowText,
       row.user_id,
     )
-    return createSession(db, row.user_id, now, runtime, rotatedFrom)
+    return rotateAndCreateSession(db, runtime, row.user_id, now, nowText, req)
   })
 
-  loginLimiter.reset(clientKey(req, accountNormalized))
+  runtime.authLimiter.resetAccount(ip, accountNormalized)
+  noteUserId(req, row.user_id)
   setSessionCookie(res, session.token, runtime.secureCookies, SESSION_MAX_AGE_SECONDS)
 
   sendV3Json(res, 200, {

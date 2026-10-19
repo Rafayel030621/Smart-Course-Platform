@@ -131,7 +131,7 @@ async function prepare(
   auth: AuthContext,
   projectId: string,
   materialId: string,
-  options: { requireItem: boolean },
+  options: { requireItem: boolean; operation: string; resource: string; method: 'POST' | 'PATCH' },
 ): Promise<{ ctx: DraftContext; expectedRevision: number; itemId: string | null }> {
   const body = await readBody(req)
   requireContractVersion(body)
@@ -157,7 +157,12 @@ async function prepare(
   const db = runtime.getDb()
   const now = runtime.now()
   const nowText = now.toISOString()
-  const fingerprint = requestFingerprint(body)
+  const fingerprint = requestFingerprint({
+    method: options.method,
+    operation: options.operation,
+    resource: options.resource,
+    body,
+  })
 
   // 契约 20.6：幂等查询先于版本校验
   const replay = lookupIdempotent(db, auth.user.user_id, idempotencyKey, fingerprint, nowText)
@@ -280,7 +285,12 @@ export async function handleDraftItemAction(
       auth,
       projectId,
       materialId,
-      { requireItem: true },
+      {
+        requireItem: true,
+        method: action === 'edit' ? 'PATCH' : 'POST',
+        operation: `draft.${action}`,
+        resource: `${projectId}/${materialId}/${itemId}`,
+      },
     )
     if (bodyItemId !== itemId) throw new V3Error('RESOURCE_NOT_FOUND')
 
@@ -384,6 +394,9 @@ export async function handleConfirmAllDraft(
   try {
     const { ctx } = await prepare(req, runtime, auth, projectId, materialId, {
       requireItem: false,
+      method: 'POST',
+      operation: 'draft.confirm-all',
+      resource: `${projectId}/${materialId}`,
     })
     const entries = readConfirmItems(ctx.body)
 

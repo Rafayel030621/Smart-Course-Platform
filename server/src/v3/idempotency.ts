@@ -6,15 +6,23 @@ import { V3Error } from './errors.js'
  * 幂等记录
  * ----------------------------------------------------------------------------
  * 作用域：userId + idempotencyKey；保留 24 小时。
- * 同键同请求体：返回首次响应（`replayed: true`），不写库、不递增版本。
- * 同键不同请求体：409 IDEMPOTENCY_CONFLICT，不写库。
  *
- * 请求体哈希会剔除密码与邀请码明文，避免把敏感凭据的快速哈希落盘。
+ * 指纹 = 规范化 HTTP 方法 + 操作类别 + 资源目标 + 有效请求体。
+ * 同一个 key 被用于不同操作或不同资源时，必须先返回 409 IDEMPOTENCY_CONFLICT，
+ * 不能被当成上一次请求的重放。请求体中的密码、邀请码等敏感字段不参与哈希，
+ * 需要业务层用慢哈希/常量时间比较单独验证。
  */
 
 export const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000
 
-const REDACTED_FIELDS = new Set(['password', 'inviteCode', 'cookie', 'authorization'])
+const REDACTED_FIELDS = new Set([
+  'password',
+  'inviteCode',
+  'cookie',
+  'authorization',
+  'sessionToken',
+  'token',
+])
 
 function canonicalize(value: unknown): unknown {
   if (Array.isArray(value)) return value.map((item) => canonicalize(item))
@@ -33,8 +41,32 @@ function canonicalize(value: unknown): unknown {
   return value
 }
 
-export function requestFingerprint(body: unknown): string {
-  return createHash('sha256').update(JSON.stringify(canonicalize(body)), 'utf8').digest('hex')
+export interface FingerprintInput {
+  method: string
+  operation: string
+  resource: string
+  body: unknown
+}
+
+function normalizeToken(value: string): string {
+  return value.trim().toLowerCase()
+}
+
+/**
+ * 生成幂等指纹。
+ *
+ * `operation` 和 `resource` 由服务端路由固定提供，不读取客户端任意字段；
+ * `resource` 通常是 projectId 或 projectId/entityId。
+ */
+export function requestFingerprint(input: FingerprintInput): string {
+  const payload = {
+    v: 2,
+    method: normalizeToken(input.method),
+    operation: normalizeToken(input.operation),
+    resource: input.resource.trim(),
+    body: canonicalize(input.body),
+  }
+  return createHash('sha256').update(JSON.stringify(payload), 'utf8').digest('hex')
 }
 
 interface IdempotencyRow {
@@ -100,7 +132,7 @@ export function saveIdempotent(
   ).run(userId, key, fingerprint, statusCode, JSON.stringify(body), nowIso, expiresAt)
 }
 
-/** 清理过期记录；当前只在写请求成功后顺带执行，不启动后台任务 */
+/** 清理过期记录；写请求成功后顺带执行，不启动后台任务 */
 export function pruneIdempotent(db: V3Database, nowIso: string): void {
   db.prepare('DELETE FROM idempotency_records WHERE expires_at <= ?').run(nowIso)
 }
