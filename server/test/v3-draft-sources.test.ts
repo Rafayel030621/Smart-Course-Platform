@@ -286,6 +286,33 @@ test('迁移：空来源数组的 confirmed 条目降为 pending，并返回来�
   assert.equal(await projectRevision(migrated.projectId), 1)
 })
 
+test('历史 confirmed 条目若没有有效来源，单条确认也不能返回成功', async () => {
+  const project = await createProject(client, user)
+  seedMaterial(project.projectId, 'mat_legacy_confirmed')
+  seedItem({
+    projectId: project.projectId,
+    materialId: 'mat_legacy_confirmed',
+    itemId: 'item_legacy_confirmed',
+    status: 'confirmed',
+    sources: [],
+  })
+
+  const response = await client.request(
+    `/api/projects/${project.projectId}/materials/mat_legacy_confirmed/understanding/items/item_legacy_confirmed/confirm`,
+    {
+      method: 'POST',
+      cookie: user.cookie,
+      body: confirmBody(project.projectId, project.projectRevision, 'item_legacy_confirmed', 1),
+    },
+  )
+  assert.equal(response.status, 409)
+  assert.equal((await jsonOf(response)).code, 'DRAFT_SOURCE_MISSING')
+  const row = await itemRow('item_legacy_confirmed')
+  assert.equal(row.status, 'confirmed')
+  assert.equal(row.revision, 1)
+  assert.equal(await projectRevision(project.projectId), project.projectRevision)
+})
+
 test('迁移：全部来源失效的条目降为 pending，再次确认被拒绝', async () => {
   const payload = migrationPayload({
     materialId: 'mat_invalid_sources',

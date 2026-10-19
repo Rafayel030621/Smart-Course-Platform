@@ -329,9 +329,10 @@ export async function handleDraftItemAction(
       if (action !== 'undo') assertExpectedRevision(item, expectedRevision)
 
       if (action === 'confirm') {
-        if (item.status === 'confirmed') return finish(ctx, false, item)
-        // 学生点击确认不能补足来源：必须有数据库中真实存在的片段
+        // 学生点击确认不能补足来源：必须有数据库中真实存在的片段。
+        // 即使历史数据已是 confirmed，只要来源无效也拒绝返回成功。
         assertItemHasValidSource(ctx.db, item)
+        if (item.status === 'confirmed') return finish(ctx, false, item)
         ctx.db.prepare(
           `UPDATE understanding_items
               SET status = 'confirmed', confirmed_at = ?, confirmed_by_user_id = ?,
