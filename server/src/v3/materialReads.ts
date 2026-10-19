@@ -46,7 +46,7 @@ function decodeCursor(raw: string): Record<string, unknown> {
   }
 }
 
-interface LoadedMaterial {
+export interface LoadedMaterial {
   material: MaterialRow
   currentVersion: number
   isCurrent: boolean
@@ -54,7 +54,7 @@ interface LoadedMaterial {
   projectArchived: boolean
 }
 
-function isMaterialArchived(row: MaterialRow): boolean {
+export function isMaterialArchived(row: MaterialRow): boolean {
   return row.archived_at !== null || row.status === 'archived'
 }
 
@@ -101,7 +101,7 @@ function loadMaterial(
   }
 }
 
-function toMaterialDto(loaded: LoadedMaterial): Record<string, unknown> {
+export function toMaterialDto(loaded: LoadedMaterial): Record<string, unknown> {
   const { material, isCurrent, currentArchived, projectArchived } = loaded
   return {
     materialId: material.material_id,
@@ -222,7 +222,7 @@ export async function handleMaterialGet(
   })
 }
 
-interface SegmentRow {
+export interface SegmentRow {
   material_id: string
   material_version: number
   segment_id: string
@@ -232,6 +232,21 @@ interface SegmentRow {
   text: string
   char_count: number
   created_at: string
+}
+
+export function toSegmentDto(row: SegmentRow, isCurrent: boolean): Record<string, unknown> {
+  return {
+    segmentId: row.segment_id,
+    materialId: row.material_id,
+    materialVersion: row.material_version,
+    index: row.idx,
+    startLine: row.start_line,
+    endLine: row.end_line,
+    text: row.text,
+    charCount: row.char_count,
+    status: isCurrent ? 'active' : 'superseded',
+    createdAt: row.created_at,
+  }
 }
 
 export async function handleMaterialSegments(
@@ -309,18 +324,7 @@ export async function handleMaterialSegments(
         loaded.currentArchived ||
         loaded.projectArchived ||
         isMaterialArchived(loaded.material),
-      segments: items.map((row) => ({
-        segmentId: row.segment_id,
-        materialId: row.material_id,
-        materialVersion: row.material_version,
-        index: row.idx,
-        startLine: row.start_line,
-        endLine: row.end_line,
-        text: row.text,
-        charCount: row.char_count,
-        status: loaded.isCurrent ? 'active' : 'superseded',
-        createdAt: row.created_at,
-      })),
+      segments: items.map((row) => toSegmentDto(row, loaded.isCurrent)),
       nextCursor,
     },
   })

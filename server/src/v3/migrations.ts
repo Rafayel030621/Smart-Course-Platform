@@ -306,6 +306,15 @@ export const MIGRATIONS: readonly Migration[] = [
       );
     `,
   },
+  {
+    version: 2,
+    name: 'v3_material_content',
+    sql: `
+      ALTER TABLE materials ADD COLUMN content_text TEXT NULL;
+      CREATE INDEX idx_materials_project_sha256
+        ON materials(project_id, sha256) WHERE sha256 IS NOT NULL;
+    `,
+  },
 ]
 
 export function migrate(db: Database.Database): void {

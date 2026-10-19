@@ -1,6 +1,6 @@
 # 智慧课程平台 · 前后端接口契约
 
-> 文档修订：v3.7（只改文档、不改接口：第 0 节重写为 V2/V3 双代入口与四条通则；密码哈希改为如实描述 bcrypt cost 12；`PROJECT_MISMATCH` 标注为保留码、跨项目实体统一 404；Session 30 天保留标注为部署侧待实现）
+> 文档修订：v3.8（PR2 材料写链路：新增项目材料上传、归档、恢复、重新解析；新增 `materials.content_text` 迁移与 `MATERIAL_CONTENT_UNAVAILABLE`；V2 `POST /api/materials` 保持不变）
 > 编制日期：2026-09-25（v2.0：2026-10-12；v3.0：2026-10-19，PR1 冻结 V3/V4 账号、阶段、进展、AI 上下文与迁移）
 > owner：负责人（后端）
 > 地位：**本文件是前后端唯一契约。** 四名成员不得自行新增字段或创建第二套 DTO。
@@ -3025,10 +3025,87 @@ AI 候选确认规则见 23.7；**服务端不得因“项目为空”自动创�
 - 响应 `data.materialId`、`data.materialVersion`、`data.isCurrent`、`data.readOnly`、`data.items`、`data.nextCursor`；
 - 条目 DTO 复用 `itemId`、`kind`、`text`、`originalText`、`sources`、`status`、`revision`、`confirmedAt`、`confirmedByUserId`、`removedAt`。
 
-#### 共同读取规则
+#### POST /api/projects/{projectId}/materials
+
+上传并同步解析一份 md/txt 材料。V2 `POST /api/materials` 保持不变，不受本接口影响。
+
+请求：
+
+```json
+{
+  "contractVersion": "3.0",
+  "requestId": "9c1f0a6b-2c4d-4e77-9a3f-7b5e8d1c2043",
+  "idempotencyKey": "material-upload-01JBC9R7T3K8QW4M2N6P5X0ZYE",
+  "projectRevision": 12,
+  "name": "文献笔记.md",
+  "contentBase64": "5L2g5aW977yM5LiW55WM"
+}
+```
+
+- `projectId` 由路径提供；body 显式提供时必须与路径一致；
+- **不接受客户端 `materialId` / `materialVersion`**；两者由服务端生成，上传为新 `materialId` + `version=1`；
+- 请求体上限 2 MB；解码后文件上限 1 MB；
+- 校验顺序与 V2 一致：扩展名白名单 → base64 合法性 → 大小 → UTF-8 严格 → GBK 严格 → 含 NUL 拒绝 → 空/纯空白拒绝 → 分段；
+- `materials.content_text` 保存解码后的原文，供重新解析和后续 AI 上下文使用；
+- `sha256` 按解码后的原始字节计算；
+- 状态：分段成功为 `parsed`；分段阶段异常为 `parse_failed`，仍返回 200 并带 `failureReason`；
+- 成功写入 `materials` + `material_segments` + `content_text`，`projectRevision` 只 +1 一次。
+
+响应：
+
+```json
+{
+  "contractVersion": "3.0",
+  "requestId": "9c1f0a6b-2c4d-4e77-9a3f-7b5e8d1c2043",
+  "projectId": "prj_01JBC9R7T3K8QW4M2N6P5X0ZYA",
+  "projectRevision": 13,
+  "replayed": false,
+  "data": {
+    "material": {},
+    "segments": [],
+    "segmentCount": 0,
+    "deduplicated": false
+  }
+}
+```
+
+- `data.material` 复用 22.8 Material DTO；
+- `data.segments` 最多返回前 20 条，`segmentCount` 是真实总数；
+- 同项目内相同 `sha256`（不同 key）直接返回既有材料，`data.deduplicated=true`，不新增 `materials` / `material_segments` 行，不递增 `projectRevision`；
+- 同一 `idempotencyKey` + 相同请求体返回首次响应并 `replayed=true`；不同请求体 409 `IDEMPOTENCY_CONFLICT`；
+- 归档项目返回 409 `PROJECT_ARCHIVED`，且不产生任何材料行。
+
+#### POST /api/projects/{projectId}/materials/{materialId}/archive
+
+- 只归档当前版本行：写 `archived_at`、`status='archived'`、`revision+1`，并递增 `projectRevision`；
+- 需要 `idempotencyKey` + `projectRevision`；
+- 重复归档返回 409 `INVALID_STATE_TRANSITION`；
+- 归档项目本身不可写，返回 409 `PROJECT_ARCHIVED`；
+- 响应 `data.material`，不返回全部片段。
+
+#### POST /api/projects/{projectId}/materials/{materialId}/restore
+
+- 只恢复当前版本行：清空 `archived_at`，恢复状态为 `parsed` / `parse_failed` / `registered` / `unsupported` 中可推导的原状态，`revision+1`，并递增 `projectRevision`；
+- 重复恢复非归档材料返回 409 `INVALID_STATE_TRANSITION`；
+- 归档项目本身不可写，返回 409 `PROJECT_ARCHIVED`；
+- 响应 `data.material`。
+
+#### POST /api/projects/{projectId}/materials/{materialId}/reparse
+
+- 从当前版本的 `content_text` 重新分段，`materialId` 不变，生成 `materialVersion+1`；
+- 新版本继承 `name` / `type` / `encoding` / `size` / `sha256`，`revision` 重置为 1；
+- 旧版本自动成为只读历史，`isCurrent=false`；
+- 新版本分段成功 `parsed`，异常 `parse_failed`（200 + `failureReason`）；
+- `content_text IS NULL`（迁移旧材料）返回 409 `MATERIAL_CONTENT_UNAVAILABLE`，中文提示「这份材料没有保存原文，请重新上传」；
+- 当前版本已归档时返回 409 `INVALID_STATE_TRANSITION`，需先恢复；
+- 成功时单事务写入新版本及片段，`projectRevision` 只 +1；
+- 响应结构与上传相同，`deduplicated=false`。
+
+#### 共同规则
 
 - 所有接口要求登录，并先校验 `userId + projectId` 所有权；
 - 软删除项目 404 `PROJECT_NOT_FOUND`；归档项目仍可读，但所有领域写接口返回 409 `PROJECT_ARCHIVED`（项目 `restore`/`delete` 例外）；
+- 所有写接口在 `loadProject` 后校验项目状态与 `projectRevision`，在单事务内完成；
 - 材料、片段、理解草稿的 `readOnly` 由「历史版本、材料/条目归档或项目归档」派生；项目归档时 `readOnly=true` 而 `isCurrent` 仍按材料版本语义返回；
 - 跨用户 404 `PROJECT_NOT_FOUND`；同用户跨项目实体 404 `RESOURCE_NOT_FOUND`；
 - 读取不递增项目/实体 revision、不创建幂等记录、不改变任何业务状态；
@@ -3811,6 +3888,7 @@ v3 规则：
 | `EMPTY_MATERIAL` | 400 | false | 材料为空或仅空白 | 文件内容为空，请检查后再上传 |
 | `MATERIAL_ENCODING_UNREADABLE` | 400 | false | UTF-8 与 GBK 均无法解码 | 文件编码无法识别（已尝试 UTF-8 与 GBK），请另存为 UTF-8 后重试 |
 | `MATERIAL_PARSE_FAILED` | 400 | false | 分段失败 | 材料解析失败，请检查文件内容后重试 |
+| `MATERIAL_CONTENT_UNAVAILABLE` | 409 | false | 迁移旧材料没有 `content_text`，无法重新解析 | 这份材料没有保存原文，请重新上传 |
 | `MIGRATION_NOT_CONFIRMED` | 400 | false | 未带 `userConfirmed: true` | 请先在页面上确认迁移，再继续 |
 | `MIGRATION_CONFIRMATION_EXPIRED` | 400 | false | `userConfirmedAt` 超过 30 分钟 | 迁移确认已过期，请重新确认后重试 |
 | `MIGRATION_VERSION_UNSUPPORTED` | 409 | false | `schemaVersion > 3` | 本地数据来自更高版本，请刷新页面或升级后再迁移 |
@@ -3829,7 +3907,7 @@ v3 规则：
 
 - `RATE_LIMITED`：按 `retryAfterSeconds` 等待；
 - `INTERNAL`、`MODEL_TIMEOUT`、`INVALID_MODEL_OUTPUT`、`MODEL_UNAVAILABLE`：适配层最多自动重试 1 次；
-- `STALE_REVISION`、`IDEMPOTENCY_CONFLICT`、`CONTRACT_VERSION_MISMATCH`、`PROJECT_ARCHIVED`、`DRAFT_ITEM_ARCHIVED`、`DRAFT_SOURCE_MISSING`、`MIGRATION_*`、`AUTH_FAILED`、`REGISTER_REJECTED`：**不自动重试**；需要刷新、恢复项目、修正输入、升级客户端、重新生成草稿或重新确认；
+- `STALE_REVISION`、`IDEMPOTENCY_CONFLICT`、`CONTRACT_VERSION_MISMATCH`、`PROJECT_ARCHIVED`、`DRAFT_ITEM_ARCHIVED`、`DRAFT_SOURCE_MISSING`、`MATERIAL_CONTENT_UNAVAILABLE`、`MIGRATION_*`、`AUTH_FAILED`、`REGISTER_REJECTED`：**不自动重试**；需要刷新、恢复项目、修正输入、升级客户端、重新生成草稿或重新确认；
 - 前端不得因为 `retryable: true` 无限重试；写操作重试必须复用同一 `idempotencyKey`。
 
 ### 25.4 安全与隐私
@@ -3983,3 +4061,4 @@ git status / git diff --name-only 检查是否误改 server/src、src、部署�
 | v3.5 | 2026-10-19 | 仅修正表述，不改字段与语义：22.8 `readOnly` 明确只由历史版本与材料/条目归档派生、不含项目归档（项目级写保护留待后续切片）；22.3 明确 Task DTO 无 `readOnly` 字段；22.8 Material DTO 的 `type` 收紧为 `md`/`txt`，迁移旧材料可能保留其他类型 | 姜厚禄（后端） |
 | v3.6 | 2026-10-19 | 归档项目写保护：所有领域写接口返回 409 `PROJECT_ARCHIVED`（项目 restore/delete 例外）；材料/片段/草稿 `readOnly` 纳入项目归档；片段读取通过 `materials.project_id` 校验项目归属；不改字段名与响应结构 | 姜厚禄（后端） |
 | v3.7 | 2026-10-20 | 只改文档、不改接口：重写第 0 节为 V2/V3 双代入口、四条通则与章节导航，并明确实现进度由 `docs/v3-v4-pr2-status.md` 维护；密码哈希改为如实描述 bcrypt cost 12（Argon2id 仅列为可选升级）；`PROJECT_MISMATCH` 标注为保留码，跨项目实体统一 404；目标阶段不属于本项目由 409 改为 404；Session 30 天保留标注为部署侧尚未实现 | 姜厚禄（后端） |
+| v3.8 | 2026-10-20 | PR2 材料写链路：新增项目材料上传（同步解析、2 MB 请求体、1 MB 文件、服务端生成 ID/版本、sha256 去重）、归档/恢复、重新解析；迁移 v2 新增 `materials.content_text` 与项目 sha256 索引；新增 `MATERIAL_CONTENT_UNAVAILABLE` | 姜厚禄（后端） |

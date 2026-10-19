@@ -41,6 +41,7 @@ export type V3ErrorCode =
   | 'EMPTY_MATERIAL'
   | 'MATERIAL_ENCODING_UNREADABLE'
   | 'MATERIAL_PARSE_FAILED'
+  | 'MATERIAL_CONTENT_UNAVAILABLE'
   | 'MIGRATION_NOT_CONFIRMED'
   | 'MIGRATION_CONFIRMATION_EXPIRED'
   | 'MIGRATION_VERSION_UNSUPPORTED'
@@ -129,6 +130,11 @@ export const V3_ERROR_META: Record<V3ErrorCode, ErrorMeta> = {
     message: '文件编码无法识别（已尝试 UTF-8 与 GBK），请另存为 UTF-8 后重试',
   },
   MATERIAL_PARSE_FAILED: { status: 400, retryable: false, message: '材料解析失败，请检查文件内容后重试' },
+  MATERIAL_CONTENT_UNAVAILABLE: {
+    status: 409,
+    retryable: false,
+    message: '这份材料没有保存原文，请重新上传',
+  },
   MIGRATION_NOT_CONFIRMED: { status: 400, retryable: false, message: '请先在页面上确认迁移，再继续' },
   MIGRATION_CONFIRMATION_EXPIRED: {
     status: 400,
