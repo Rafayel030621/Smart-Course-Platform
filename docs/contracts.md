@@ -2774,7 +2774,7 @@ AI 候选确认规则见 23.7；**服务端不得因“项目为空”自动创�
 - `editDraftItem` 修改已确认条目时，必须立即清空 `confirmedAt` / `confirmedByUserId`，该条从 AI 可信上下文移除，直到再次确认；
 - `removeDraftItem` 只归档，不删除来源片段；同一 `itemId` 不能通过 `confirmAllDraft` 被恢复；
 - `undoDraftItem` 只撤销确认，不是删除；`pending` / `modified` 条目调用它是无操作；
-- **确认必须有可验证来源**：单条确认和整份确认在写入前，必须按条目的 `materialId + materialVersion` 查询 `material_segments`，至少解析到一个真实存在且正文非空的 `segmentId`；`sources_json` 中的材料 ID、版本、行号等元数据不可信，不能替代数据库校验；
+- **确认必须有可验证来源**：单条确认和整份确认在写入前，必须按条目的 `materialId + materialVersion` 查询 `material_segments`，至少解析到一个真实存在且 `text.trim().length > 0` 的 `segmentId`；空字符串、普通空格、Tab、换行、回车、全角空格等纯空白正文都不算有效来源；`sources_json` 中的材料 ID、版本、行号等元数据不可信，不能替代数据库校验；
 - 没有有效来源时返回 409 `DRAFT_SOURCE_MISSING`，不得把条目变为 `confirmed`；学生点击确认不能补足缺失来源；无来源手工事实不属于材料理解条目；
 - 已 `confirmed` 且来源有效的历史条目再次单条确认仍按幂等返回 `changed: false`；已 `confirmed` 但无有效来源的条目也返回 409 `DRAFT_SOURCE_MISSING`，不得返回成功；整份确认会校验所有提交条目，任一条无有效来源则整单失败；
 - `confirmAllDraft` 的 `items` 必须覆盖当前版本全部未归档条目，遗漏返回 400 `INVALID_INPUT`；任一条目 revision 不匹配返回 409 `STALE_REVISION`，整单不写入；
@@ -3511,8 +3511,10 @@ v3 规则：
 | `type` 为 `csv` / `xlsx` / `pdf` / `docx` / `zip` 或未知 | 保留材料元数据，`status: "unsupported"`，不迁移正文，返回 `UNSUPPORTED_MATERIAL_SKIPPED` 警告 |
 | 材料仅登记、无正文 | `status: "registered"`，保留文件名 |
 | 分段文本超过 2,000 字 | 拒绝该材料并返回 `MATERIAL_INVALID_SKIPPED` 警告，不丢项目其他数据 |
-| 来源数组为空 / 全部 `segmentId` 不存在 | 保留正文，状态降为 `pending`（`archived` 保持归档），返回 `UNDERSTANDING_SOURCE_MISSING` 警告，不能保留 `confirmed` |
-| 部分 `segmentId` 不存在 | 移除失效来源；剩余至少一个有效来源时保留原状态 |
+| 来源数组为空 / 全部 `segmentId` 不存在 / 全部片段正文 `trim` 后为空 | 保留正文，状态降为 `pending`（`archived` 保持归档），返回 `UNDERSTANDING_SOURCE_MISSING` 警告，不能保留 `confirmed` |
+| 部分 `segmentId` 不存在或正文为纯空白 | 移除失效来源；剩余至少一个有效来源时保留原状态 |
+
+材料片段正文必须原样写入，不得为了来源校验改写正文；校验只读取数据库文本并做 `text.trim().length > 0` 判断。
 | 单文件超过 1 MB | 保留元数据并标 `unsupported`，返回 `MATERIAL_TOO_LARGE_SKIPPED` 警告 |
 
 材料迁移 DTO 字段：
@@ -3856,4 +3858,4 @@ git status / git diff --name-only 检查是否误改 server/src、src、部署�
 | v3.0 | 2026-10-19 | PR1 冻结 V3/V4：新增领域模型文档（第 20 节入口）、账号契约（第 21 节）、项目/阶段/任务/证据/进展/时间线（第 22 节）、AI 阶段上下文与阶段候选（第 23 节）、本地迁移（第 24 节）、统一错误码（第 25 节）、V2 兼容方式（第 26 节）；V3 新接口 `contractVersion = "3.0"`，V2 接口保持 `"1.0"`；本 PR 不实现后端、不修改前端、不部署 | 姜厚禄（后端） |
 | v3.1 | 2026-10-19 | PR1 最终收尾：明确 `contractVersion` / `promptVersion` 组合并禁止静默降级；补充 Session 与材料草稿五动作、Milestone/Task 状态机、Cookie/CORS/CSRF 约定；按当前 `PROJECT_SCHEMA_VERSION = 3` 与 localStorage 实际字段修正迁移映射；澄清 `Project.short` 语义 | 姜厚禄（后端） |
 | v3.2 | 2026-10-19 | 明确 `undoDraftItem` 按 `text` 与 `originalText` 比较决定 `pending`/`modified`，清空确认信息且 `projectRevision` 只递增一次；明确 `confirmAllDraft` 不得包含或恢复 archived 条目、任一条目 archived 整单 409、所有 revision 校验通过后单事务写入、失败不递增版本；新增错误码 `DRAFT_ITEM_ARCHIVED` | 姜厚禄（后端） |
-| v3.3 | 2026-10-19 | 材料理解条目确认必须至少有一个能解析到当前材料版本真实片段的来源；迁移将空来源/全部失效来源降为 `pending` 并警告，`archived` 保持；单条确认与整份确认共用数据库来源校验，不信任 `sources_json` 元数据；新增错误码 `DRAFT_SOURCE_MISSING` | 姜厚禄（后端） |
+| v3.3 | 2026-10-19 | 材料理解条目确认必须至少有一个能解析到当前材料版本、且 `text.trim().length > 0` 的真实片段；迁移将空来源/全部失效来源降为 `pending` 并警告，`archived` 保持；单条确认与整份确认共用数据库来源校验，不信任 `sources_json` 元数据；新增错误码 `DRAFT_SOURCE_MISSING` | 姜厚禄（后端） |

@@ -565,7 +565,7 @@ archived ──×────────> pending / modified / confirmed（不�
 7. 移除不删除来源片段；已归档条目不能再确认，必须重新生成草稿；
 8. 编辑文本与当前 `text` 完全相同时是无操作，不改变状态、不递增版本；
 9. 本地迁移必须分别保留 `text` 与 `originalText`；旧数据缺少 `originalText` 时保留 `text`、返回 `UNDERSTANDING_ORIGINAL_TEXT_MISSING` 并置 `pending`（`archived` 保持不变），不得假装原文已完整保留；
-10. 确认（单条或整份）必须有至少一个能按 `materialId + materialVersion + segmentId` 查询到、且正文非空的真实片段；`sources_json` 中的材料 ID、版本和行号不可信；无有效来源返回 409 `DRAFT_SOURCE_MISSING`（包括历史已 `confirmed` 但来源无效的条目），整份确认任一条失败则整单不写入；迁移时空来源/全部失效来源降为 `pending` 并返回 `UNDERSTANDING_SOURCE_MISSING`，`archived` 不复活。
+10. 确认（单条或整份）必须有至少一个能按 `materialId + materialVersion + segmentId` 查询到、且 `text.trim().length > 0` 的真实片段（空字符串、普通空格、Tab、换行、全角空格均为无效正文）；`sources_json` 中的材料 ID、版本和行号不可信；无有效来源返回 409 `DRAFT_SOURCE_MISSING`（包括历史已 `confirmed` 但来源无效的条目），整份确认任一条失败则整单不写入；迁移时空来源/全部失效来源降为 `pending` 并返回 `UNDERSTANDING_SOURCE_MISSING`，`archived` 不复活；材料片段正文原样保留。
 
 `undoDraftItem` 的确定规则：
 

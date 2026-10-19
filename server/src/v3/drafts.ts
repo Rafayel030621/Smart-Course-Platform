@@ -3,6 +3,7 @@ import { transaction, type V3Database } from './db.js'
 import {
   assertProjectRevision,
   bumpProjectRevision,
+  isMeaningfulText,
   loadProject,
   requiredText,
   type MaterialRow,
@@ -103,8 +104,7 @@ function resolveValidSegments(db: V3Database, item: UnderstandingItemRow): Segme
   const statement = db.prepare(
     `SELECT segment_id, material_id, material_version, start_line, end_line, text
        FROM material_segments
-      WHERE material_id = ? AND material_version = ? AND segment_id = ?
-        AND length(trim(text)) > 0`,
+      WHERE material_id = ? AND material_version = ? AND segment_id = ?`,
   )
   const segments: SegmentRow[] = []
   for (const segmentId of requestedSegmentIds(item)) {
@@ -113,7 +113,7 @@ function resolveValidSegments(db: V3Database, item: UnderstandingItemRow): Segme
       item.material_version,
       segmentId,
     ) as SegmentRow | undefined
-    if (row !== undefined) segments.push(row)
+    if (row !== undefined && isMeaningfulText(row.text)) segments.push(row)
   }
   return segments
 }

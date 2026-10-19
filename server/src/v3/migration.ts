@@ -1,6 +1,12 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { transaction, type V3Database } from './db.js'
-import { loadProject, normalizeNameKey, parseProfile, recalcCurrentMilestone } from './domain.js'
+import {
+  isMeaningfulText,
+  loadProject,
+  normalizeNameKey,
+  parseProfile,
+  recalcCurrentMilestone,
+} from './domain.js'
 import { V3Error, V3_CONTRACT_VERSION } from './errors.js'
 import {
   bodyReadError,
@@ -396,6 +402,7 @@ function parseMaterials(
 
     const segments: SegmentInput[] = []
     const segmentIds = new Set<string>()
+    const contentfulSegmentIds = new Set<string>()
     let invalidSegment = false
     for (const rawSegment of rawSegments) {
       const segment = readRecord(rawSegment, 'materials.segments')
@@ -406,6 +413,7 @@ function parseMaterials(
         invalidSegment = true
         continue
       }
+      if (isMeaningfulText(segment.text)) contentfulSegmentIds.add(segmentId)
       segments.push({
         segmentId,
         index: readInteger(segment.index, segments.length),
@@ -467,7 +475,9 @@ function parseMaterials(
         item.originalText === undefined || item.originalText === null || item.originalText === ''
           ? null
           : readString(item.originalText, 'understandingItems.originalText', 300)
-      const validSourceSegmentIds = sourceSegmentIds.filter((id) => segmentIds.has(id))
+      const validSourceSegmentIds = sourceSegmentIds.filter((id) =>
+        contentfulSegmentIds.has(id),
+      )
       const sourceMissing = validSourceSegmentIds.length === 0
       if (sourceMissing) {
         warnings.add(

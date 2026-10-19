@@ -179,6 +179,14 @@ export function codePointLength(value: string): number {
   return [...value].length
 }
 
+/**
+ * 有效正文判断：必须是字符串且 trim 后非空。
+ * JS trim 覆盖普通空格、Tab、换行、回车、全角空格等 Unicode 空白。
+ */
+export function isMeaningfulText(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0
+}
+
 export function requiredText(value: unknown, max: number, field: string): string {
   if (typeof value !== 'string') throw invalidInput(`${field} 为必填项`)
   const trimmed = value.trim()

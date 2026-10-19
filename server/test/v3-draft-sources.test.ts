@@ -29,7 +29,20 @@ async function jsonOf(response: Response): Promise<Record<string, unknown>> {
   return (await response.json()) as Record<string, unknown>
 }
 
-function seedMaterial(projectId: string, materialId: string): void {
+interface SeedSegment {
+  segmentId: string
+  text: string
+  startLine?: number
+  endLine?: number
+}
+
+function seedMaterial(
+  projectId: string,
+  materialId: string,
+  segments: SeedSegment[] = [
+    { segmentId: 'seg_valid', text: '真实存在的材料片段', startLine: 3, endLine: 5 },
+  ],
+): void {
   const db = client.runtime.getDb()
   const now = new Date().toISOString()
   db.prepare(
@@ -38,11 +51,23 @@ function seedMaterial(projectId: string, materialId: string): void {
         status, revision, sha256, failure_reason, created_at, updated_at, archived_at)
      VALUES (?, 1, ?, ?, '来源测试.md', 'md', 100, 'utf-8', 'parsed', 1, NULL, NULL, ?, ?, NULL)`,
   ).run(materialId, projectId, user.userId, now, now)
-  db.prepare(
+  const insertSegment = db.prepare(
     `INSERT INTO material_segments
        (material_id, material_version, segment_id, idx, start_line, end_line, text, char_count, created_at)
-     VALUES (?, 1, 'seg_valid', 0, 3, 5, '真实存在的材料片段', 9, ?)`,
-  ).run(materialId, now)
+     VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?)`,
+  )
+  segments.forEach((segment, index) => {
+    insertSegment.run(
+      materialId,
+      segment.segmentId,
+      index,
+      segment.startLine ?? index + 1,
+      segment.endLine ?? index + 1,
+      segment.text,
+      [...segment.text].length,
+      now,
+    )
+  })
 }
 
 function seedItem(options: {
@@ -147,6 +172,7 @@ async function projectRevision(projectId: string): Promise<number> {
 
 function migrationPayload(options: {
   materialId: string
+  segments?: Array<{ segmentId: string; text: string }>
   items: Array<{
     clientId: string
     text: string
@@ -194,15 +220,15 @@ function migrationPayload(options: {
           version: 1,
           createdAt: '2026-10-19T00:00:00.000Z',
           updatedAt: '2026-10-19T00:00:00.000Z',
-          segments: [
-            {
-              segmentId: 'seg_migrated',
-              index: 0,
-              startLine: 1,
-              endLine: 2,
-              text: '迁移后的真实片段',
-            },
-          ],
+          segments: (options.segments ?? [
+            { segmentId: 'seg_migrated', text: '迁移后的真实片段' },
+          ]).map((segment, index) => ({
+            segmentId: segment.segmentId,
+            index,
+            startLine: index + 1,
+            endLine: index + 2,
+            text: segment.text,
+          })),
           understandingItems: options.items.map((item) => ({
             clientId: item.clientId,
             kind: 'goalCandidates',
@@ -508,6 +534,199 @@ test('整份确认：全部有真实来源时成功，重放不重复写入', as
   assert.equal(replayBody.projectRevision, firstBody.projectRevision)
   assert.equal((await itemRow('item_all_valid_a')).revision, 2)
   assert.equal((await itemRow('item_all_valid_b')).revision, 2)
+})
+
+test('迁移：空字符串、普通空格、Tab/换行/全角空格片段都不算有效来源', async () => {
+  const segments = [
+    { segmentId: 'seg_empty', text: '' },
+    { segmentId: 'seg_spaces', text: '   ' },
+    { segmentId: 'seg_whitespace', text: '\t\n\r\u3000' },
+    { segmentId: 'seg_valid', text: '真实存在的材料片段' },
+  ]
+  const payload = migrationPayload({
+    materialId: 'mat_blank_segments',
+    segments,
+    items: [
+      { clientId: 'item_empty_text', text: '空正文来源', sourceSegmentIds: ['seg_empty'], status: 'confirmed' },
+      { clientId: 'item_spaces_text', text: '普通空格来源', sourceSegmentIds: ['seg_spaces'], status: 'confirmed' },
+      { clientId: 'item_ws_text', text: '混合空白来源', sourceSegmentIds: ['seg_whitespace'], status: 'confirmed' },
+      {
+        clientId: 'item_mixed_source',
+        text: '混合有效来源',
+        sourceSegmentIds: ['seg_empty', 'seg_valid'],
+        status: 'confirmed',
+      },
+      {
+        clientId: 'item_archived_blank',
+        text: '归档条目',
+        sourceSegmentIds: ['seg_whitespace'],
+        status: 'archived',
+      },
+    ],
+  })
+  const migrated = await migrate(payload)
+
+  assert.equal((await itemRow(migrated.itemIds.item_empty_text as string)).status, 'pending')
+  assert.equal((await itemRow(migrated.itemIds.item_spaces_text as string)).status, 'pending')
+  assert.equal((await itemRow(migrated.itemIds.item_ws_text as string)).status, 'pending')
+  assert.equal((await itemRow(migrated.itemIds.item_archived_blank as string)).status, 'archived')
+
+  const mixed = await itemRow(migrated.itemIds.item_mixed_source as string)
+  assert.equal(mixed.status, 'confirmed')
+  const mixedSources = JSON.parse(mixed.sources_json) as Array<{ segmentId: string }>
+  assert.deepEqual(mixedSources.map((source) => source.segmentId), ['seg_valid'])
+  assert.equal(
+    migrated.warnings.some((warning) => warning.code === 'UNDERSTANDING_SOURCE_MISSING'),
+    true,
+  )
+
+  // 原始正文必须原样保留，不能为校验改写材料片段
+  const storedSegments = client.runtime
+    .getDb()
+    .prepare('SELECT text FROM material_segments WHERE material_id = ? ORDER BY idx')
+    .all(migrated.materialId) as Array<{ text: string }>
+  assert.deepEqual(
+    storedSegments.map((segment) => segment.text),
+    segments.map((segment) => segment.text),
+  )
+
+  const confirmEmpty = await client.request(
+    `/api/projects/${migrated.projectId}/materials/${migrated.materialId}/understanding/items/${migrated.itemIds.item_empty_text}/confirm`,
+    {
+      method: 'POST',
+      cookie: user.cookie,
+      body: confirmBody(migrated.projectId, 1, migrated.itemIds.item_empty_text as string, 1),
+    },
+  )
+  assert.equal(confirmEmpty.status, 409)
+  assert.equal((await jsonOf(confirmEmpty)).code, 'DRAFT_SOURCE_MISSING')
+})
+
+test('单条确认：空字符串、普通空格、Tab/换行/全角空格均拒绝，混合来源可确认', async () => {
+  const project = await createProject(client, user)
+  seedMaterial(project.projectId, 'mat_blank_confirm', [
+    { segmentId: 'seg_empty', text: '' },
+    { segmentId: 'seg_spaces', text: '   ' },
+    { segmentId: 'seg_whitespace', text: '\t\n\r\u3000' },
+    { segmentId: 'seg_valid', text: '真实存在的材料片段', startLine: 7, endLine: 9 },
+  ])
+  const invalidItems: Array<[string, string]> = [
+    ['item_empty', 'seg_empty'],
+    ['item_spaces', 'seg_spaces'],
+    ['item_whitespace', 'seg_whitespace'],
+  ]
+  for (const [itemId, segmentId] of invalidItems) {
+    seedItem({
+      projectId: project.projectId,
+      materialId: 'mat_blank_confirm',
+      itemId,
+      status: 'pending',
+      sources: [{ segmentId }],
+    })
+  }
+  seedItem({
+    projectId: project.projectId,
+    materialId: 'mat_blank_confirm',
+    itemId: 'item_mixed',
+    status: 'pending',
+    sources: [{ segmentId: 'seg_empty' }, { segmentId: 'seg_valid' }],
+  })
+
+  for (const [itemId] of invalidItems) {
+    const response = await client.request(
+      `/api/projects/${project.projectId}/materials/mat_blank_confirm/understanding/items/${itemId}/confirm`,
+      {
+        method: 'POST',
+        cookie: user.cookie,
+        body: confirmBody(project.projectId, 1, itemId, 1),
+      },
+    )
+    assert.equal(response.status, 409)
+    assert.equal((await jsonOf(response)).code, 'DRAFT_SOURCE_MISSING')
+    const row = await itemRow(itemId)
+    assert.equal(row.status, 'pending')
+    assert.equal(row.revision, 1)
+  }
+  assert.equal(await projectRevision(project.projectId), 1)
+
+  const mixed = await client.request(
+    `/api/projects/${project.projectId}/materials/mat_blank_confirm/understanding/items/item_mixed/confirm`,
+    {
+      method: 'POST',
+      cookie: user.cookie,
+      body: confirmBody(project.projectId, 1, 'item_mixed', 1),
+    },
+  )
+  const mixedBody = (await mixed.json()) as {
+    projectRevision: number
+    data: { item: { status: string; sources: Array<{ segmentId: string; startLine: number; endLine: number }> } }
+  }
+  assert.equal(mixed.status, 200)
+  assert.equal(mixedBody.data.item.status, 'confirmed')
+  assert.deepEqual(
+    mixedBody.data.item.sources.map((source) => source.segmentId),
+    ['seg_valid'],
+  )
+  assert.equal(mixedBody.data.item.sources[0]?.startLine, 7)
+  assert.equal(mixedBody.data.item.sources[0]?.endLine, 9)
+})
+
+test('整份确认：引用空正文/纯空白片段的条目导致整单失败，无部分写入', async () => {
+  const project = await createProject(client, user)
+  seedMaterial(project.projectId, 'mat_blank_confirm_all', [
+    { segmentId: 'seg_valid', text: '真实存在的材料片段' },
+    { segmentId: 'seg_blank', text: '\t\n\r\u3000' },
+  ])
+  seedItem({
+    projectId: project.projectId,
+    materialId: 'mat_blank_confirm_all',
+    itemId: 'item_all_normal',
+    status: 'pending',
+    sources: [{ segmentId: 'seg_valid' }],
+  })
+  seedItem({
+    projectId: project.projectId,
+    materialId: 'mat_blank_confirm_all',
+    itemId: 'item_all_blank',
+    status: 'pending',
+    sources: [{ segmentId: 'seg_blank' }],
+  })
+  const beforeIdempotency = (
+    client.runtime.getDb().prepare('SELECT COUNT(*) AS count FROM idempotency_records').get() as {
+      count: number
+    }
+  ).count
+
+  const response = await client.request(
+    `/api/projects/${project.projectId}/materials/mat_blank_confirm_all/understanding/confirm-all`,
+    {
+      method: 'POST',
+      cookie: user.cookie,
+      body: confirmAllBody(project.projectId, project.projectRevision, [
+        { itemId: 'item_all_normal', expectedRevision: 1 },
+        { itemId: 'item_all_blank', expectedRevision: 1 },
+      ]),
+    },
+  )
+  assert.equal(response.status, 409)
+  assert.equal((await jsonOf(response)).code, 'DRAFT_SOURCE_MISSING')
+
+  for (const itemId of ['item_all_normal', 'item_all_blank']) {
+    const row = await itemRow(itemId)
+    assert.equal(row.status, 'pending')
+    assert.equal(row.revision, 1)
+    assert.equal(row.confirmed_at, null)
+    assert.equal(row.confirmed_by_user_id, null)
+  }
+  assert.equal(await projectRevision(project.projectId), project.projectRevision)
+  assert.equal(
+    (
+      client.runtime.getDb().prepare('SELECT COUNT(*) AS count FROM idempotency_records').get() as {
+        count: number
+      }
+    ).count,
+    beforeIdempotency,
+  )
 })
 
 test('迁移：来源失效的 archived 条目保持 archived，确认与整份确认都不能复活', async () => {
