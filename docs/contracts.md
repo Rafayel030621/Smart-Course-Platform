@@ -1,6 +1,6 @@
 # 智慧课程平台 · 前后端接口契约
 
-> 文档修订：v3.4（新增 PR2B 第一阶段只读接口：任务列表/单任务、材料列表/单材料、片段与理解草稿读取；明确当前版本、归档和分页语义；新接口 `contractVersion = "3.0"`；V2 接口仍为 `"1.0"`）
+> 文档修订：v3.5（不改字段、不改接口语义，只修正三处会误导实现的表述：`readOnly` 不含项目归档、Task DTO 无 `readOnly` 字段、材料 `type` 白名单与实际迁移类型）
 > 编制日期：2026-09-25（v2.0：2026-10-12；v3.0：2026-10-19，PR1 冻结 V3/V4 账号、阶段、进展、AI 上下文与迁移）
 > owner：负责人（后端）
 > 地位：**本文件是前后端唯一契约。** 四名成员不得自行新增字段或创建第二套 DTO。
@@ -2394,7 +2394,7 @@ AI 候选确认规则见 23.7；**服务端不得因“项目为空”自动创�
 查询参数：`includeArchived=false|true`，默认 `false`。
 
 - 任务必须同时匹配 `taskId + projectId`；跨项目一律 404 `RESOURCE_NOT_FOUND`；
-- 归档任务或所属阶段归档的任务默认 404；`includeArchived=true` 返回只读详情；
+- 归档任务或所属阶段归档的任务默认 404；`includeArchived=true` 返回完整详情。Task DTO **没有** `readOnly` 字段，只读状态由前端依据 `archivedAt` 和项目状态自行判断；
 - 响应 `data.task`，不改变任务状态或 `projectRevision`。
 
 #### POST /api/projects/{projectId}/tasks
@@ -2959,7 +2959,7 @@ AI 候选确认规则见 23.7；**服务端不得因“项目为空”自动创�
 | `materialId` | string | 跨版本稳定 |
 | `materialVersion` | number | 内容版本，≥ 1 |
 | `name` | string | 原始文件名 |
-| `type` | `md` \| `txt` \| `xlsx` 等 | 迁移旧材料可能是其他类型 |
+| `type` | `md` \| `txt` | V3 上传白名单只有 md/txt（见 14.6 / 21 节）；迁移的旧材料可能保留 `csv`/`xlsx`/`pdf`/`docx` 等其他类型 |
 | `size` | number | 文件字节数 |
 | `encoding` | string | 实际解码编码 |
 | `status` | string | `registered` / `parsed` / `parse_failed` / `unsupported` / `archived` |
@@ -3016,7 +3016,7 @@ AI 候选确认规则见 23.7；**服务端不得因“项目为空”自动创�
 #### 共同读取规则
 
 - 所有接口要求登录，并先校验 `userId + projectId` 所有权；
-- 软删除项目 404 `PROJECT_NOT_FOUND`；归档项目仍可读，但所有材料/片段/草稿按只读语义返回；
+- 软删除项目 404 `PROJECT_NOT_FOUND`；归档项目仍可读。**`readOnly` 当前只由「历史版本」与「材料/条目归档」派生，不含项目归档**：项目级写保护与项目级 `readOnly` 留待后续切片，现阶段写入接口同样不校验项目是否归档，前端不得把归档项目视为服务端强制只读；
 - 跨用户 404 `PROJECT_NOT_FOUND`；同用户跨项目实体 404 `RESOURCE_NOT_FOUND`；
 - 读取不递增项目/实体 revision、不创建幂等记录、不改变任何业务状态；
 - 非法 `version`、`limit`、`cursor` 返回 400 `INVALID_INPUT`。
@@ -3966,3 +3966,4 @@ git status / git diff --name-only 检查是否误改 server/src、src、部署�
 | v3.2 | 2026-10-19 | 明确 `undoDraftItem` 按 `text` 与 `originalText` 比较决定 `pending`/`modified`，清空确认信息且 `projectRevision` 只递增一次；明确 `confirmAllDraft` 不得包含或恢复 archived 条目、任一条目 archived 整单 409、所有 revision 校验通过后单事务写入、失败不递增版本；新增错误码 `DRAFT_ITEM_ARCHIVED` | 姜厚禄（后端） |
 | v3.3 | 2026-10-19 | 材料理解条目确认必须至少有一个能解析到当前材料版本、且 `text.trim().length > 0` 的真实片段；迁移将空来源/全部失效来源降为 `pending` 并警告，`archived` 保持；单条确认与整份确认共用数据库来源校验，不信任 `sources_json` 元数据；新增错误码 `DRAFT_SOURCE_MISSING` | 姜厚禄（后端） |
 | v3.4 | 2026-10-19 | PR2B 第一阶段：新增任务列表/单任务、材料列表/单材料、片段与理解草稿只读接口；材料列表默认当前版本，历史版本通过 `version` 只读访问；任务默认排除归档任务与归档阶段任务；统一 `limit`/`cursor`；读取不递增版本、不写幂等记录 | 姜厚禄（后端） |
+| v3.5 | 2026-10-19 | 仅修正表述，不改字段与语义：22.8 `readOnly` 明确只由历史版本与材料/条目归档派生、不含项目归档（项目级写保护留待后续切片）；22.3 明确 Task DTO 无 `readOnly` 字段；22.8 Material DTO 的 `type` 收紧为 `md`/`txt`，迁移旧材料可能保留其他类型 | 姜厚禄（后端） |
