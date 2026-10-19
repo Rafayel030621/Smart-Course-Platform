@@ -1,12 +1,13 @@
 # 智慧课程平台 · 前后端接口契约
 
-> 文档修订：v2.1（接口 `contractVersion` 仍为 `"1.0"`）
-> 编制日期：2026-09-25（v2.0：2026-10-12，姜-1 冻结 M1：项目基本信息与材料）
+> 文档修订：v3.1（V3/V4 契约冻结最终收尾；新增 Session、材料草稿确认接口与版本组合规则；新接口 `contractVersion = "3.0"`；V2 接口仍为 `"1.0"`）
+> 编制日期：2026-09-25（v2.0：2026-10-12；v3.0：2026-10-19，PR1 冻结 V3/V4 账号、阶段、进展、AI 上下文与迁移）
 > owner：负责人（后端）
-> 地位：**本文件是前后端唯一契约。** 三位成员不得自行新增字段或创建第二套 DTO。
-> 适用范围：`POST /api/advisor/recommendations`、`POST /api/advisor/chat`、`POST /api/materials`、`POST /api/materials/understanding`、前端 store action 契约、任务 / 证据 / 疑问 / 建议 / 材料 / 理解草稿的最小字段。
+> 地位：**本文件是前后端唯一契约。** 四名成员不得自行新增字段或创建第二套 DTO。
+> 适用范围：V2 的 `POST /api/advisor/recommendations`、`POST /api/advisor/chat`、`POST /api/materials`、`POST /api/materials/understanding`；V3/V4 的账号、项目、阶段、任务、证据、进展、时间线、阶段候选、本地迁移与 AI 阶段上下文。
 > v2 章节（第 12–18 节）是 M1 冻结内容：本轮只支持 `md` / `txt`（M2-A）；CSV/XLSX 属 M2-B，PDF/DOCX/ZIP 属 M4。
-> 节号说明：原第 11 节“变更记录”已移到文末第 19 节；为避免破坏既有引用，其余旧节号不重排。
+> v3 章节（第 20–27 节）是 PR1 冻结内容：**只冻结模型与接口，不实现后端、不修改前端、不部署**。实体字段与生命周期详见 `docs/architecture/v3-v4-domain-model.md`。
+> 节号说明：原第 11 节“变更记录”已移到文末第 28 节；为避免破坏既有引用，其余旧节号不重排；V3 章节从第 20 节开始。
 > **本文定义接口，不能替代部署验证。** 当前线上验证结果与仍需复验的事项见第 7 节。
 
 本文引用并取代《首轮 MVP 任务分配与智能体提示词》第 4 节的草案；差异逐条列在第 9 节。
@@ -45,7 +46,7 @@
 | 论文相关接口 | `src/services/papers.ts` 本轮保持现状，不在契约范围 |
 | 附件上传 | 只保留证据里的文件名字段，不定义上传协议 |
 
-### 1.3 三位成员各自需要什么
+### 1.3 各成员各自需要什么
 
 | 成员 | 只看这些 | 要交付的东西 |
 | --- | --- | --- |
@@ -73,11 +74,11 @@
 | --- | --- | --- | --- |
 | `projectId` | string | 是 | 项目稳定 ID |
 | `name` | string | 是 | 项目完整名称 |
-| `short` | string | 是 | 短名，用于标签与地图中心 |
+| `short` | string | 是 | 项目短名/标签名（不是描述）；1～20 字；用于标签与地图中心；完整名称用 `name` |
 | `projectRevision` | number | 是 | 见 2.6 |
 | `currentMilestone` | string \| null | 是 | 当前里程碑名称；无则 `null` |
 | `milestones` | Milestone[] | 是 | 里程碑列表（`{ name, status, progress }`，`status ∈ done/cur/todo`，`progress: 0..100`） |
-| `schemaVersion` | number | 是 | localStorage 结构版本，只有李焰彬使用，**不进请求体** |
+| `schemaVersion` | number | 是 | localStorage 结构版本；V2 业务请求不发送，迁移时放在 `source.schemaVersion` |
 
 ### 2.2 Task
 
@@ -727,13 +728,15 @@ Content-Type: application/json
 | 项 | 约定 |
 | --- | --- |
 | 允许来源 | 允许生产来源 `https://course.xinxian-music.xyz` 与本地开发来源 `http://localhost:5173`、`http://127.0.0.1:5173`；其他带 `Origin` 的来源返回 403 |
-| 方法 | `POST`、`OPTIONS`（预检必须显式处理） |
-| 请求头 | `Content-Type`；MVP 不使用 Cookie，因此 `Access-Control-Allow-Credentials` 保持关闭 |
+| 方法 | V2：`POST`、`OPTIONS`；V3：`GET`、`POST`、`PATCH`、`DELETE`、`OPTIONS`（预检必须显式处理） |
+| 请求头 | `Content-Type`、`X-Request-Id`；V2 不使用 Cookie，`Access-Control-Allow-Credentials` 关闭；V3 启用 Cookie，必须为 `true` |
 | 缓存 | API 响应禁止公共边缘缓存（`Cache-Control: no-store`）；当前未实现服务端建议缓存，`cached` 固定为 `false` |
 | 限流 | 当前部署尚未启用 IP 限流；`RATE_LIMITED` 保留为契约错误码，启用限流后才返回 |
 | 预算 | 单日调用上限与单次 token 上限尚未在本轮部署中启用；启用后超限应走 `fallback`，不返回 5xx 给前端 |
 
 > v2 新增的 `POST /api/materials`、`POST /api/materials/understanding` 路径沿用本节 CORS 策略（同一份白名单与预检处理），不新增第二套跨域规则。
+>
+> **V2/V3 凭据策略不同**：V2 建议/聊天/材料接口仍不带 Cookie，`Access-Control-Allow-Credentials` 保持关闭；V3 账号与项目接口必须带 Cookie，返回 `Access-Control-Allow-Credentials: true`、精确回显 `Origin` 并设置 `Vary: Origin`，禁止 `*`。两套策略按路径族切换，不能全局放开。详细约定见 21.2.3。
 
 ### 7.5 超时与重试（约定）
 
@@ -755,8 +758,8 @@ Content-Type: application/json
 
 | 字段 | 本轮 | 用途 |
 | --- | --- | --- |
-| `contractVersion` | `"1.0"` | 契约结构版本；不兼容变更时 +1，服务端对不支持的版本返回 400 |
-| `promptVersion` | 建议 / 聊天：`"mvp-prompt-v1"`、`"advisor-chat-v1"`（兼容保留）与 `"mvp-prompt-v2"`、`"advisor-chat-v2"`（M2-A 启用）；材料理解：`"material-understanding-v1"` | 提示词版本，由吴佳璐在 `docs/ai/prompt-spec.md` 维护；服务端支持列表必须以本契约为准同步更新。取值与切换规则见第 17.4 节 |
+| `contractVersion` | V2 建议 / 聊天 / 材料接口：`"1.0"`；V3 新接口：`"3.0"` | 契约结构版本；不兼容变更时 +1，服务端对不支持的版本返回 400。组合规则见 20.1.1 |
+| `promptVersion` | 建议 / 聊天：`mvp-prompt-v1` / `mvp-prompt-v2` / `mvp-prompt-v3`、`advisor-chat-v1` / `advisor-chat-v2` / `advisor-chat-v3`；材料理解：`material-understanding-v1`；阶段候选：`milestone-candidate-v1` | 提示词版本，由吴佳璐在 `docs/ai/prompt-spec.md` 维护；服务端支持列表必须以本契约为准同步更新。取值与切换规则见第 17.4、23.4 节；v3 必须与 `milestoneContext` 成对使用 |
 
 ### 8.2 预留键名（本轮不发送、不定义结构，服务端必须忽略）
 
@@ -911,6 +914,8 @@ Content-Type: application/json
 
 前端本地另需保存“已读状态”（仅登记文件名 / 待确认草稿 / 已确认）：这是界面展示口径，不进接口。
 
+> V3 持久化使用 `status`（`registered` / `parsed` / `parse_failed` / `unsupported` / `archived`）和 `revision`；V2 线格式字段仍是 `state`。服务端内部映射 `state → status`，`POST /api/materials` 响应不新增字段，旧客户端不受影响。`needsReupload` 是本地展示字段，不进接口、不迁移。
+
 ### 14.2 MaterialSegment（分段）
 
 | 字段 | 类型 | 说明 |
@@ -919,6 +924,8 @@ Content-Type: application/json
 | `index` | number | 从 0 开始的稳定序号 |
 | `startLine` / `endLine` | number | 1 起始、包含两端；同一行内被切分时两段都指向该行 |
 | `text` | string | 分段正文，1～2,000 字 |
+
+> V3 扩展：`MaterialSegment` 增加派生 `status`（`active` / `superseded`）与 `charCount`；V2 线格式字段不变。片段不可变，旧版本只读。
 
 ### 14.3 MaterialUnderstandingDraft（理解草稿）
 
@@ -955,6 +962,10 @@ MaterialSourceRef：
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `status` | `'pending' \| 'confirmed' \| 'modified'` | 待确认 / 已确认 / 已修改；单块确认、修改、删除与整份确认都只改本地状态，并按 2.6 递增 `projectRevision` |
+| `originalContent` | string | 服务端原始文本；修改后仍保留，用于撤销确认时判断回到 `pending` 还是 `modified` |
+| `id` | string | 项目内本地唯一键；V3 确认接口使用服务端 `itemId`，不使用该本地键 |
+
+> V3 扩展（第 22.7 节）：草稿条目新增 `archived` 状态、`removedAt`、`originalText` 与服务端稳定 `itemId`；V2 的 `pending/confirmed/modified` 语义不变。`pending` 与 `modified` 都**不是**已确认，只有 `confirmed` 进入 AI 上下文。
 
 ### 14.4 分段规则（必须确定性）
 
@@ -1560,7 +1571,2206 @@ model 响应：
 
 前端应对每个 code 映射中文提示（沿用 `src/domain/recommendation.ts` 的 `describeAdvisorFailure()` 思路扩充）。
 
-## 19. 变更记录
+## 20. V3/V4 契约冻结总则
+
+> 本节是 V3/V4 的入口。实体字段、状态机、删除/归档规则和未来扩展位以 `docs/architecture/v3-v4-domain-model.md` 为准；本节只定义线格式、错误行为和兼容边界。
+
+### 20.1 两个版本面
+
+| 版本面 | `contractVersion` | 接口 | 本次处理 |
+| --- | --- | --- | --- |
+| V2 稳定面 | `"1.0"` | 建议、聊天、材料上传、材料理解 | **不改字段、不改行为**；AI 阶段上下文只做向后兼容的可选扩展 |
+| V3 新面 | `"3.0"` | 账号、项目、阶段、任务、证据、进展、时间线、材料草稿确认、阶段候选、本地迁移 | 本次冻结，后续 PR 实现 |
+
+规则：
+
+1. V3 接口收到非 `"3.0"` 的 `contractVersion` 返回 400 `CONTRACT_VERSION_MISMATCH`，不做静默降级；
+2. V2 接口继续只接受 `"1.0"`；携带其他版本返回 400 `CONTRACT_VERSION_MISMATCH`；V3 前端调用 V2 接口时仍带 `"1.0"`；
+3. 同一请求不得混用两套信封字段；
+4. 未知字段按 8.4 忽略；缺少必填字段返回 400 `INVALID_INPUT`。
+
+#### 20.1.1 接口与版本组合（必须成对使用）
+
+| 接口 | `contractVersion` | `promptVersion` | `milestoneContext` |
+| --- | --- | --- | --- |
+| `POST /api/advisor/recommendations`（v1/v2） | `"1.0"` | `mvp-prompt-v1` / `mvp-prompt-v2` | 必须不出现 |
+| `POST /api/advisor/recommendations`（v3） | `"1.0"` | `mvp-prompt-v3` | 必须出现 |
+| `POST /api/advisor/chat`（v1/v2） | `"1.0"` | `advisor-chat-v1` / `advisor-chat-v2` | 必须不出现 |
+| `POST /api/advisor/chat`（v3） | `"1.0"` | `advisor-chat-v3` | 必须出现 |
+| `POST /api/materials` | `"1.0"` | 不适用 | 不适用 |
+| `POST /api/materials/understanding` | `"1.0"` | `material-understanding-v1` | 不适用 |
+| `POST /api/projects/{projectId}/milestones/candidates` | `"3.0"` | `milestone-candidate-v1` | 不适用 |
+| 账号、项目、阶段、任务、进展、证据、时间线、材料草稿确认、迁移 | `"3.0"` | 不适用 | 不适用 |
+
+组合规则：
+
+1. V2 的四个 AI/材料接口**只接受** `contractVersion: "1.0"`；携带 `"3.0"` 返回 400 `CONTRACT_VERSION_MISMATCH`，不得为了“兼容”而接受；
+2. V3 新接口**只接受** `contractVersion: "3.0"`；携带 `"1.0"` 返回 400 `CONTRACT_VERSION_MISMATCH`；
+3. 建议/聊天使用 `mvp-prompt-v3` / `advisor-chat-v3` 时，`contractVersion` 仍是 `"1.0"`（这是 V2 接口的向后兼容扩展），但 `milestoneContext` 必填；缺少返回 400 `CONTRACT_VERSION_MISMATCH`；
+4. 建议/聊天使用 v1/v2 提示词时，`milestoneContext` 必须不出现；出现即返回 400 `CONTRACT_VERSION_MISMATCH`，**不得静默忽略**；
+5. 未知 `promptVersion` 返回 400 `INVALID_INPUT`，不做静默降级；
+6. 材料接口不接受 `milestoneContext`；阶段候选接口不接受建议/聊天提示词版本；
+7. **禁止前端静默降级**：收到版本组合 400 后，前端不得自动改用低版本 `contractVersion`、不得丢弃 `milestoneContext` 重发 v2、不得把 v3 请求降级为 v1/v2；只能显示中文提示、记录 `requestId`，由用户刷新页面或升级应用后重试；
+8. 版本组合错误不重试、不切换本地规则；它不是网络失败，不得触发 `local-rule`。
+
+### 20.2 通用写请求信封
+
+除注册、登录、退出、创建项目、本地迁移外，所有 V3 写接口都使用以下信封。创建项目与迁移的目标项目尚不存在，因此不带 `projectId` / `projectRevision`，但 `contractVersion`、`requestId`、`idempotencyKey` 仍必填：
+
+```json
+{
+  "contractVersion": "3.0",
+  "requestId": "1b7c9e40-6c2f-4f18-8d5a-0e2b7c4a9f31",
+  "idempotencyKey": "ms-create-01JBC9R7T3K8QW4M2N6P5X0ZYC",
+  "projectId": "prj_01JBC9R7T3K8QW4M2N6P5X0ZYA",
+  "projectRevision": 12
+}
+```
+
+| 字段 | 类型 | 必填 | 约束 | 说明 |
+| --- | --- | --- | --- | --- |
+| `contractVersion` | string | 是 | 固定 `"3.0"` | 契约版本 |
+| `requestId` | string | 是 | UUID v4，36 字符 | 响应原样回显 |
+| `idempotencyKey` | string | 是 | 8～64 个可打印 ASCII | 幂等键；同一用户内唯一 |
+| `projectId` | string | 是 | `prj_` 前缀，≤ 64 | 必须与路径参数一致 |
+| `projectRevision` | number | 是 | ≥ 1 的整数 | 客户端已知的项目版本 |
+| `expectedRevision` | number | 条件必填 | ≥ 1 的整数 | 更新/完成/归档单个实体时必填 |
+| `expectedTaskRevision` | number | 条件必填 | ≥ 1 的整数 | 证据提交同时完成任务时必填 |
+
+补充：
+
+- 创建类操作不需要 `expectedRevision`；排序操作只校验 `projectRevision`；
+- `projectId` 只允许出现在路径和顶层信封，子实体不重复携带；
+- 客户端不得在请求体里传 `userId`、`ownerUserId`、`createdAt`、`updatedAt` 或服务端生成的 ID。
+
+### 20.3 通用成功响应
+
+```json
+{
+  "contractVersion": "3.0",
+  "requestId": "1b7c9e40-6c2f-4f18-8d5a-0e2b7c4a9f31",
+  "projectId": "prj_01JBC9R7T3K8QW4M2N6P5X0ZYA",
+  "projectRevision": 13,
+  "replayed": false,
+  "data": {
+    "milestoneId": "ms_01JBC9R7T3K8QW4M2N6P5X0ZYB",
+    "revision": 1
+  }
+}
+```
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `contractVersion` | string | `"3.0"` |
+| `requestId` | string | 与请求一致 |
+| `projectId` | string | 与请求一致 |
+| `projectRevision` | number | 本次写入后的项目版本；幂等重放时为首次响应中的版本 |
+| `replayed` | boolean | `true` 表示命中幂等键，未重复写入 |
+| `data` | object | 各接口定义的实体或结果 |
+
+成功统一返回 HTTP 200（包括创建），不使用 201/204，避免幂等重放时状态码不一致。
+
+### 20.4 通用失败响应
+
+```json
+{
+  "contractVersion": "3.0",
+  "requestId": "1b7c9e40-6c2f-4f18-8d5a-0e2b7c4a9f31",
+  "projectId": "prj_01JBC9R7T3K8QW4M2N6P5X0ZYA",
+  "code": "STALE_REVISION",
+  "message": "项目内容已更新，请刷新后重试",
+  "retryable": false,
+  "retryAfterSeconds": null,
+  "currentProjectRevision": 14,
+  "currentEntityRevision": 5,
+  "details": null
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `contractVersion` | string | 是 | `"3.0"` |
+| `requestId` | string \| null | 是 | 请求体可解析时回显，否则 `null` |
+| `projectId` | string \| null | 是 | 可确定项目时回显，否则 `null` |
+| `code` | string | 是 | 第 25 节错误码 |
+| `message` | string | 是 | 中文，可展示给用户；不含路径、密钥、SQL、堆栈、模型原文 |
+| `retryable` | boolean | 是 | 见 25.2 |
+| `retryAfterSeconds` | number \| null | 是 | 仅 `RATE_LIMITED` 给整数 |
+| `currentProjectRevision` | number \| null | 是 | `STALE_REVISION` / `PROJECT_MISMATCH` 时给当前值 |
+| `currentEntityRevision` | number \| null | 是 | 实体版本冲突时给当前值 |
+| `details` | object \| null | 是 | 只允许字段名、数量、类别；不得含用户正文、路径、密钥、模型原文 |
+
+### 20.5 写操作字段矩阵
+
+| 操作 | `idempotencyKey` | `projectRevision` | `expectedRevision` | 其他必要字段 |
+| --- | --- | --- | --- | --- |
+| 创建项目 | 必填 | 不需要 | 不需要 | `name`、`short`、`profile` |
+| 编辑项目 | 必填 | 必填 | 不需要 | `name`/`short`/`profile` |
+| 创建阶段 | 必填 | 必填 | 不需要 | `name`、`goal`、`doneCriteria`、`dueAt` |
+| 编辑阶段 | 必填 | 必填 | 必填 | 至少一个可编辑字段 |
+| 阶段排序 | 必填 | 必填 | 不需要 | `order` 全量有序 ID |
+| 完成/重开/归档/恢复阶段 | 必填 | 必填 | 必填 | — |
+| 创建任务 | 必填 | 必填 | 不需要 | `title`、`milestoneId` |
+| 编辑/移动/开始/完成/重开/归档/恢复任务 | 必填 | 必填 | 必填 | 目标状态或字段 |
+| 提交进展 | 必填 | 必填 | 不需要 | `summary`、`milestoneId`、`taskId` |
+| 提交证据 | 必填 | 必填 | `expectedTaskRevision`（完成时） | `didWhat`、`taskId`、`milestoneId` |
+| 证据关联 | 必填 | 必填 | 必填 | `taskId`、`milestoneId` |
+| 材料草稿确认/编辑/移除/撤销 | 必填 | 必填 | 必填 | `materialVersion`、`itemId` |
+| 材料草稿整份确认 | 必填 | 必填 | 逐条 `expectedRevision` | `materialVersion`、`items` 全量 |
+| 阶段候选生成 | 必填 | 必填 | 不需要 | `promptVersion`、可选的已确认材料 |
+| 本地迁移 | 必填 | 不需要 | 不需要 | `migrationId`、`userConfirmed`、`localProject` |
+
+### 20.6 幂等、并发与过期
+
+1. 幂等键作用域 `(userId, idempotencyKey)`，保留 24 小时；同一键 + 相同请求体返回首次响应并置 `replayed: true`，不递增版本；
+2. 同一键 + 不同请求体返回 409 `IDEMPOTENCY_CONFLICT`，不写入任何数据；
+3. 幂等查询先于版本校验；重放响应可能带旧版本号，客户端必须按 20.7 丢弃；
+4. `projectRevision` 不匹配返回 409 `STALE_REVISION`，响应带 `currentProjectRevision`，不执行部分写入；
+5. `expectedRevision` 不匹配返回 409 `STALE_REVISION`，响应带 `currentEntityRevision`；
+6. 服务端在事务内重新读取当前版本并加锁；并发写只有一个成功；
+7. 客户端收到 `STALE_REVISION` 后刷新项目，提示“内容已更新，请确认后重试”，不得自动重放破坏性写操作；
+8. 旧响应按 `requestId + projectId + projectRevision + 实体 revision` 丢弃；切换项目时取消在途请求。
+
+### 20.7 项目切换与响应丢弃
+
+收到响应后依次校验，任一不通过整份丢弃：
+
+| 顺序 | 条件 | 处理 |
+| --- | --- | --- |
+| 1 | `response.projectId !== activeProjectId` | 丢弃 |
+| 2 | `response.projectRevision < activeProjectRevision` | 丢弃 |
+| 3 | 实体 revision 小于本地同实体 revision | 丢弃该实体 |
+| 4 | 请求发出后已切换项目、退出登录或进入其他页面 | 丢弃 |
+| 5 | 响应 `requestId` 与本次请求不一致 | 丢弃并记录日志 |
+
+切换项目必须清理旧项目的 loading 状态；旧请求只能静默结束，不能把新项目置为永久 loading。
+
+### 20.8 权限、Cookie 与 CORS 前置
+
+1. 除 `GET /health`、`POST /api/auth/register`、`POST /api/auth/login` 外，所有 V3 接口必须带有效会话 Cookie；
+2. 浏览器请求必须使用 `credentials: "include"`；
+3. CORS 只允许明确白名单来源，返回 `Access-Control-Allow-Credentials: true`，禁止 `*`；
+4. 写请求必须校验 `Origin`；缺失或不在白名单返回 403 `FORBIDDEN_ORIGIN`；
+5. 响应一律 `Cache-Control: no-store`；
+6. 服务端只从会话读取 `userId`，忽略请求体或查询参数中的用户标识。
+
+---
+
+## 21. 账号契约
+
+### 21.1 账号、密码与邀请码规则
+
+| 项 | 规则 |
+| --- | --- |
+| 账号 | 用户名或学号；3～32 字符；允许 `[A-Za-z0-9_]`，或 6～20 位纯数字；大小写不敏感 |
+| 昵称 | 1～30 字，去除首尾空白后非空；允许中文 |
+| 密码 | 8～64 个字符；按 UTF-8 字节数 ≤ 72（兼容 bcrypt）；不去除首尾空格 |
+| 密码哈希 | 优先 Argon2id（memory ≥ 64 MiB、iterations ≥ 3、parallelism ≥ 1）；兼容 bcrypt（cost ≥ 12） |
+| 邀请码 | 8～64 个可打印字符；只保存哈希；常量时间比较；不写日志 |
+| 注册凭据 | 账号 + 密码 + 昵称 + 邀请码，四者缺一不可 |
+| 登录标识 | 账号 + 密码 |
+| 会话 | 服务端会话，不签发可被前端读取的 token |
+
+密码规则：
+
+1. 密码只以哈希形式保存，响应、日志、错误信息、审计记录中**永远不出现**密码或哈希；
+2. 登录时如果哈希参数低于当前标准，在验证成功后透明重算并更新；
+3. 不支持邮箱、短信、社交登录、密码找回、邮箱验证；
+4. 账号不存在与密码错误使用同一错误码 `AUTH_FAILED`、同一文案、相近耗时；内部可记录不同原因，但日志不含密码。
+
+### 21.2 会话 Cookie
+
+| 项 | 约定 |
+| --- | --- |
+| Cookie 名 | `scp_session` |
+| 值 | 256 位随机令牌的 base64url，43 字符；服务端只保存 SHA-256 哈希 |
+| `HttpOnly` | 必须 |
+| `Secure` | 生产环境必须；仅本地 `http://localhost` 开发可省略 |
+| `SameSite` | `Lax` |
+| `Path` | `/` |
+| `Domain` | 不设置（host-only） |
+| `Max-Age` | 604800 秒（7 天） |
+| 续期 | 绝对过期，不滑动；`GET /api/auth/me` 返回 `sessionExpiresAt` |
+| 登录 | 成功时轮换会话 ID，旧会话立即失效 |
+| 退出 | 服务端撤销会话并清除 Cookie |
+| 过期 | 返回 401 `UNAUTHORIZED`，前端清理内存态并跳转登录；不得清理 `localStorage` 旧项目 |
+| 存储位置 | **禁止**把会话令牌放进 `localStorage`、`sessionStorage`、IndexedDB 或 URL |
+| CSRF | `SameSite=Lax` + 写请求 `Origin` 白名单校验；不额外下发 CSRF token |
+| 响应体 | 不返回 Cookie 值、token 或哈希 |
+
+#### 21.2.1 服务端 Session 记录
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `sessionId` | string | `ses_` 前缀，服务端生成 |
+| `userId` | string | 所属用户 |
+| `tokenHash` | string | 会话令牌的 SHA-256 哈希；**不保存明文令牌** |
+| `status` | `active` \| `expired` \| `revoked` | 会话状态 |
+| `createdAt` | string | 创建时间 |
+| `lastSeenAt` | string | 最近校验时间 |
+| `expiresAt` | string | 绝对过期时间（创建后 7 天） |
+| `revokedAt` | string \| null | 撤销时间 |
+| `rotatedFromSessionId` | string \| null | 登录轮换前旧会话 ID |
+
+规则：
+
+- 登录成功创建新 Session 并撤销旧 Session；退出撤销当前 Session；
+- `expiresAt` 到期即 `expired`；用户禁用时全部 Session 置 `revoked`；
+- Session 不参与项目 `projectRevision`；过期/撤销记录保留 30 天用于审计。
+
+#### 21.2.2 前端请求约定
+
+所有需要登录的请求必须显式携带 Cookie：
+
+```ts
+await fetch(`${API_BASE}/api/projects`, {
+  method: 'GET',
+  credentials: 'include',
+  headers: { 'Content-Type': 'application/json' },
+})
+```
+
+约定：
+
+1. 统一使用 `credentials: "include"`；不得依赖浏览器默认值；
+2. 不设置 `Authorization` 头，不把 token 放进请求体、URL、`localStorage`、`sessionStorage` 或 IndexedDB；
+3. 不手工读写 `document.cookie`；Cookie 由浏览器与服务端管理；
+4. 收到 401 `UNAUTHORIZED`：清理**内存中的用户态**，跳转登录页；保留 `localStorage` 旧项目和用户已输入内容；服务端可同时下发 `Set-Cookie: scp_session=; Max-Age=0`，但前端必须以 401 状态码为准，不能依赖 Cookie 是否被清除；
+5. 收到 403 `FORBIDDEN_ORIGIN`：不重试，提示“请求来源不受信任”，记录 `requestId`；
+6. 网络失败与 401 分开处理：网络失败不能当作“未登录”，不能清空项目状态。
+
+#### 21.2.3 CORS、Origin 与 CSRF
+
+| 项 | 约定 |
+| --- | --- |
+| 允许来源 | 生产 `https://course.xinxian-music.xyz`；本地开发 `http://localhost:5173`、`http://127.0.0.1:5173`；其他来源拒绝 |
+| `Access-Control-Allow-Origin` | 回显精确来源，禁止 `*` |
+| `Access-Control-Allow-Credentials` | `true` |
+| `Vary` | `Origin` |
+| 预检 | `OPTIONS` 返回 204；允许 `GET, POST, PATCH, DELETE, OPTIONS` 与 `Content-Type, X-Request-Id` |
+| 写请求 Origin | 必须存在且在允许列表内；缺失或非法返回 403 `FORBIDDEN_ORIGIN` |
+| CSRF 防护 | `SameSite=Lax` + 精确 Origin 校验 + `Content-Type: application/json`；不提供 GET 写操作；不把令牌放 URL |
+| 额外校验 | 若浏览器提供 `Sec-Fetch-Site`，只接受 `same-origin` / `same-site`；`cross-site` 一律 403 |
+| CSRF token | 本阶段不额外下发；若未来需要跨站嵌入，再评审 double-submit token |
+| 缓存 | 所有认证与业务响应 `Cache-Control: no-store` |
+
+说明：`SameSite=Lax` 阻止大多数跨站表单提交；JSON 请求会触发预检；服务端仍必须校验 `Origin`，不能只依赖 Cookie。
+
+### 21.3 POST /api/auth/register
+
+请求：
+
+```json
+{
+  "contractVersion": "3.0",
+  "requestId": "9c1f0a6b-2c4d-4e77-9a3f-7b5e8d1c2043",
+  "idempotencyKey": "register-01JBC9R7T3K8QW4M2N6P5X0ZYA",
+  "account": "2023123456",
+  "password": "correct-horse-battery-staple",
+  "displayName": "张同学",
+  "inviteCode": "INVITE-2026-ABCD"
+}
+```
+
+| 字段 | 类型 | 必填 | 约束 |
+| --- | --- | --- | --- |
+| `contractVersion` | string | 是 | `"3.0"` |
+| `requestId` | string | 是 | UUID v4 |
+| `idempotencyKey` | string | 是 | 8～64 个可打印字符 |
+| `account` | string | 是 | 见 21.1 |
+| `password` | string | 是 | 见 21.1 |
+| `displayName` | string | 是 | 1～30 字 |
+| `inviteCode` | string | 是 | 8～64 个字符 |
+
+成功响应（HTTP 200，并 `Set-Cookie: scp_session=...`）：
+
+```json
+{
+  "contractVersion": "3.0",
+  "requestId": "9c1f0a6b-2c4d-4e77-9a3f-7b5e8d1c2043",
+  "user": {
+    "userId": "usr_01JBC9R7T3K8QW4M2N6P5X0ZYE",
+    "account": "2023123456",
+    "displayName": "张同学",
+    "status": "active",
+    "revision": 1,
+    "createdAt": "2026-10-19T02:30:00.000Z",
+    "updatedAt": "2026-10-19T02:30:00.000Z"
+  },
+  "sessionExpiresAt": "2026-10-26T02:30:00.000Z"
+}
+```
+
+重复注册与邀请码错误：
+
+- 统一返回 409 `REGISTER_REJECTED`，文案固定为“注册未完成，请检查用户名、密码和邀请码”；
+- 不区分“账号已存在”“邀请码错误”“账号被禁用”；
+- 不覆盖已有账号，不返回已有用户信息；
+- 重复使用同一 `idempotencyKey` + 相同请求体：返回首次响应，不重复创建；不同请求体返回 409 `IDEMPOTENCY_CONFLICT`。
+
+### 21.4 POST /api/auth/login
+
+请求：
+
+```json
+{
+  "contractVersion": "3.0",
+  "requestId": "1b7c9e40-6c2f-4f18-8d5a-0e2b7c4a9f31",
+  "account": "2023123456",
+  "password": "correct-horse-battery-staple"
+}
+```
+
+成功响应与注册相同（HTTP 200，设置新 Cookie，轮换会话）。
+
+失败：
+
+- 账号不存在、密码错误、账号禁用统一 401 `AUTH_FAILED`，文案“用户名或密码不正确”；
+- 不返回“账号不存在”“密码错误”“剩余尝试次数”等可枚举信息；
+- 连续失败按 IP + 账号限流，超限 429 `RATE_LIMITED`，`retryAfterSeconds` 为正整数；
+- 登录请求不要求 `idempotencyKey`；每次成功登录都生成新会话。
+
+### 21.5 POST /api/auth/logout
+
+请求：
+
+```json
+{
+  "contractVersion": "3.0",
+  "requestId": "5f2c1d0a-8a3e-4b7c-9f21-2d6e5a4c8b90"
+}
+```
+
+成功响应：
+
+```json
+{
+  "contractVersion": "3.0",
+  "requestId": "5f2c1d0a-8a3e-4b7c-9f21-2d6e5a4c8b90",
+  "loggedOut": true
+}
+```
+
+规则：
+
+- 无论 Cookie 是否存在、是否已过期，都返回 200 并清除 Cookie；
+- 服务端撤销当前会话；重复退出幂等；
+- 退出不删除项目、材料、证据或聊天；
+- 退出不清理浏览器本地旧项目数据；前端清理云端内存态即可。
+
+### 21.6 GET /api/auth/me
+
+请求：无请求体，依赖 Cookie。
+
+成功响应：
+
+```json
+{
+  "contractVersion": "3.0",
+  "requestId": null,
+  "user": {
+    "userId": "usr_01JBC9R7T3K8QW4M2N6P5X0ZYE",
+    "account": "2023123456",
+    "displayName": "张同学",
+    "status": "active",
+    "revision": 1,
+    "createdAt": "2026-10-19T02:30:00.000Z",
+    "updatedAt": "2026-10-19T02:30:00.000Z"
+  },
+  "sessionExpiresAt": "2026-10-26T02:30:00.000Z"
+}
+```
+
+未登录或会话过期：401 `UNAUTHORIZED`，文案“登录状态已失效，请重新登录”。前端只能依据 HTTP 状态判断，不能靠响应体里的用户字段判断。
+
+### 21.7 账号错误行为总表
+
+| 场景 | HTTP | code | 中文 message | 前端行为 |
+| --- | --- | --- | --- | --- |
+| 字段格式错误 | 400 | `INVALID_INPUT` | 请求内容不合法：<字段说明> | 高亮字段 |
+| 重复注册 / 邀请码错误 | 409 | `REGISTER_REJECTED` | 注册未完成，请检查用户名、密码和邀请码 | 停留在注册页 |
+| 账号或密码错误 | 401 | `AUTH_FAILED` | 用户名或密码不正确 | 不提示账号是否存在 |
+| 未登录 / 会话过期 | 401 | `UNAUTHORIZED` | 登录状态已失效，请重新登录 | 清理内存态，跳登录 |
+| 来源不合法 | 403 | `FORBIDDEN_ORIGIN` | 请求来源不受信任 | 不重试 |
+| 尝试过多 | 429 | `RATE_LIMITED` | 尝试次数过多，请稍后再试 | 按秒数等待 |
+| 服务异常 | 500 | `INTERNAL` | 服务内部错误，请稍后重试 | 保留输入，允许重试 |
+
+安全底线：
+
+1. 错误信息不含账号是否存在、密码、哈希、Cookie、邀请码、服务器路径、SQL、堆栈或上游原文；
+2. 日志记录 `requestId`、`userId`（如已登录）、结果码、耗时；不记录密码、Cookie、邀请码、材料正文；
+3. 注册与登录响应不得包含 `passwordHash`、`passwordAlgo` 之外的任何密码派生信息；实际上 `passwordAlgo` 也不返回。
+
+---
+
+## 22. V3 项目、阶段、任务、证据与进展接口
+
+### 22.0 公共约定
+
+| 项 | 约定 |
+| --- | --- |
+| 前缀 | 所有项目接口以 `/api/projects/{projectId}` 开头 |
+| 认证 | 必须登录；项目必须属于当前用户 |
+| 信封 | 写接口使用 20.2；读接口返回 `contractVersion` / `projectId` / `projectRevision` / `data` |
+| 幂等 | 所有写接口必须带 `idempotencyKey` |
+| 并发 | 所有写接口按 `projectRevision` 校验；单实体更新加 `expectedRevision` |
+| 错误 | 使用第 25 节错误码；跨用户 404，同用户跨项目 409 `PROJECT_MISMATCH` |
+| 时间 | 服务端生成 `createdAt`/`updatedAt`；客户端只传业务时间 |
+| 空值 | 缺失值一律 `null`，不省略字段 |
+| 疑问 | 本 PR 只冻结 `Doubt` 模型与读取语义；手工创建/解决/归档写接口留给后续 PR；证据自动创建疑问、迁移导入疑问，AI 继续使用顶层 `doubts` |
+
+### 22.1 项目列表与创建
+
+#### GET /api/projects
+
+查询参数：`includeArchived=false|true`，默认 `false`。
+
+响应：
+
+```json
+{
+  "contractVersion": "3.0",
+  "projectId": null,
+  "projectRevision": null,
+  "data": {
+    "projects": [
+      {
+        "projectId": "prj_01JBC9R7T3K8QW4M2N6P5X0ZYA",
+        "name": "面向海洋环境安全保障的极端风和浪事件的智能分析系统",
+        "short": "极端风浪",
+        "status": "active",
+        "projectRevision": 12,
+        "currentMilestoneId": "ms_01JBC9R7T3K8QW4M2N6P5X0ZYB",
+        "currentMilestone": "数据获取与预处理",
+        "milestoneCount": 3,
+        "taskCount": 8,
+        "doneTaskCount": 3,
+        "updatedAt": "2026-10-19T02:30:00.000Z"
+      }
+    ]
+  }
+}
+```
+
+规则：
+
+- 只返回当前用户的项目；不返回其他用户的项目数量或名称；
+- 归档项目默认不返回；
+- 项目列表不返回材料正文、证据正文或聊天内容；
+- 列表接口没有单一项目，顶层 `projectId` / `projectRevision` 为 `null`，客户端以每个列表项的 `projectRevision` 为准。
+
+#### POST /api/projects
+
+请求：
+
+```json
+{
+  "contractVersion": "3.0",
+  "requestId": "1b7c9e40-6c2f-4f18-8d5a-0e2b7c4a9f31",
+  "idempotencyKey": "project-create-01JBC9R7T3K8QW4M2N6P5X0ZYC",
+  "name": "面向海洋环境安全保障的极端风和浪事件的智能分析系统",
+  "short": "极端风浪",
+  "profile": {
+    "goal": "构建极端风浪事件识别与预警的原型系统",
+    "expectedOutcome": "可交互原型 + 会议论文",
+    "memberNames": ["张同学", "李同学"],
+    "researchPeriod": "第 3 周至第 14 周",
+    "scope": "先做西北太平洋",
+    "outOfScope": "不做实时业务系统"
+  }
+}
+```
+
+请求字段：
+
+| 字段 | 类型 | 必填 | 约束 |
+| --- | --- | --- | --- |
+| `name` | string | 是 | 1～120 字 |
+| `short` | string | 否 | 项目短名/标签名，**不是描述**；1～20 字；缺失时服务端取名称前 12 个字，超出加 `…`（最长 13 字） |
+| `profile` | ProjectProfile | 是 | 字段同 13.1；缺失字段补 `null`，`memberNames` 缺失补 `[]` |
+
+成功响应：
+
+```json
+{
+  "contractVersion": "3.0",
+  "requestId": "1b7c9e40-6c2f-4f18-8d5a-0e2b7c4a9f31",
+  "projectId": "prj_01JBC9R7T3K8QW4M2N6P5X0ZYA",
+  "projectRevision": 1,
+  "replayed": false,
+  "data": {
+    "project": {
+      "projectId": "prj_01JBC9R7T3K8QW4M2N6P5X0ZYA",
+      "ownerUserId": "usr_01JBC9R7T3K8QW4M2N6P5X0ZYE",
+      "name": "面向海洋环境安全保障的极端风和浪事件的智能分析系统",
+      "short": "极端风浪",
+      "profile": {
+        "goal": "构建极端风浪事件识别与预警的原型系统",
+        "expectedOutcome": "可交互原型 + 会议论文",
+        "memberNames": ["张同学", "李同学"],
+        "researchPeriod": "第 3 周至第 14 周",
+        "scope": "先做西北太平洋",
+        "outOfScope": "不做实时业务系统"
+      },
+      "status": "active",
+      "visibility": "private",
+      "projectRevision": 1,
+      "currentMilestoneId": null,
+      "currentMilestone": null,
+      "createdAt": "2026-10-19T02:30:00.000Z",
+      "updatedAt": "2026-10-19T02:30:00.000Z",
+      "milestones": [],
+      "taskStats": {
+        "total": 0,
+        "done": 0,
+        "doing": 0,
+        "todo": 0,
+        "archived": 0,
+        "progress": 0
+      }
+    }
+  }
+}
+```
+
+规则：
+
+- **空白项目**：`milestones` 必须为 `[]`，不得注入模板阶段、模板任务、示例证据或示例聊天；
+- `projectRevision` 初始为 1；
+- `currentMilestoneId` / `currentMilestone` 初始为 `null`；
+- `short` 未提供时由服务端取名称前 12 个字，超出加 `…`，但不得为空；
+- `short` 的语义是“项目短名/标签名”，只用于项目切换器、地图中心和空间有限的标签；不是项目描述，不承载目标、范围或摘要。完整名称用 `name`，目标/范围用 `profile.goal` / `profile.scope`；
+- 创建项目只写项目本身，不触发 AI。
+
+#### GET /api/projects/{projectId}
+
+返回项目基本信息、阶段列表和任务统计（结构同 22.1 创建响应中的 `data.project`）。不存在或不属于当前用户：404 `PROJECT_NOT_FOUND`。
+
+#### PATCH /api/projects/{projectId}
+
+可编辑 `name`、`short`、`profile`。请求带 `projectRevision` 与 `idempotencyKey`，不需要 `expectedRevision`。成功返回更新后的项目，`projectRevision + 1`。
+
+#### POST /api/projects/{projectId}/archive|restore|delete|restore-deleted
+
+| 路径 | 语义 | 可恢复 |
+| --- | --- | --- |
+| `POST /api/projects/{projectId}/archive` | `active → archived` | 是，调用 `/restore` |
+| `POST /api/projects/{projectId}/restore` | `archived → active` | — |
+| `POST /api/projects/{projectId}/delete` | `active/archived → deleted`，软删除 30 天 | 30 天内调用 `/restore-deleted` |
+| `POST /api/projects/{projectId}/restore-deleted` | `deleted → active` | — |
+
+四个操作都要求 `projectRevision` 与 `idempotencyKey`；重复调用幂等，不重复递增版本。软删除不立即删除材料、证据或聊天。
+
+### 22.2 阶段（Milestone）接口
+
+#### GET /api/projects/{projectId}/milestones
+
+查询参数：
+
+| 参数 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `includeArchived` | boolean | `false` | 是否包含已归档阶段 |
+| `includeTaskStats` | boolean | `true` | 是否返回任务统计 |
+
+响应：
+
+```json
+{
+  "contractVersion": "3.0",
+  "projectId": "prj_01JBC9R7T3K8QW4M2N6P5X0ZYA",
+  "projectRevision": 12,
+  "data": {
+    "currentMilestoneId": "ms_01JBC9R7T3K8QW4M2N6P5X0ZYB",
+    "milestones": [
+      {
+        "milestoneId": "ms_01JBC9R7T3K8QW4M2N6P5X0ZYB",
+        "name": "数据获取与预处理",
+        "goal": "拿到可复现的样例数据并确认字段口径",
+        "doneCriteria": "样例数据可下载，字段说明与缺失率记录完整",
+        "dueAt": "2026-11-02T15:59:59.000Z",
+        "status": "active",
+        "orderIndex": 1,
+        "revision": 4,
+        "source": "manual",
+        "createdAt": "2026-10-15T08:00:00.000Z",
+        "updatedAt": "2026-10-18T09:20:00.000Z",
+        "completedAt": null,
+        "archivedAt": null,
+        "taskStats": {
+          "total": 3,
+          "done": 1,
+          "doing": 1,
+          "todo": 1,
+          "archived": 0,
+          "progress": 33
+        }
+      }
+    ],
+    "projectStats": {
+      "milestoneCount": 1,
+      "activeMilestoneCount": 1,
+      "completedMilestoneCount": 0,
+      "taskTotal": 3,
+      "taskDone": 1,
+      "taskDoing": 1,
+      "taskTodo": 1,
+      "taskArchived": 0,
+      "progress": 33
+    }
+  }
+}
+```
+
+规则：
+
+- 默认按 `orderIndex` 升序；
+- `taskStats.total` 不含归档任务；`progress = floor(done * 100 / total)`，`total = 0` 时为 0；
+- 归档阶段默认不返回；`includeArchived=true` 时返回，并带 `archivedAt`；
+- `currentMilestoneId` 由服务端按“第一个 `active`；否则第一个 `planned`；否则 `null`”推导，客户端不能直接设置；
+- 响应不包含任务正文，只包含统计。
+
+#### POST /api/projects/{projectId}/milestones
+
+请求：
+
+```json
+{
+  "contractVersion": "3.0",
+  "requestId": "1b7c9e40-6c2f-4f18-8d5a-0e2b7c4a9f31",
+  "idempotencyKey": "ms-create-01JBC9R7T3K8QW4M2N6P5X0ZYC",
+  "projectId": "prj_01JBC9R7T3K8QW4M2N6P5X0ZYA",
+  "projectRevision": 12,
+  "name": "数据获取与预处理",
+  "goal": "拿到可复现的样例数据并确认字段口径",
+  "doneCriteria": "样例数据可下载，字段说明与缺失率记录完整",
+  "dueAt": "2026-11-02T15:59:59.000Z",
+  "status": "planned",
+  "source": "manual"
+}
+```
+
+| 字段 | 类型 | 必填 | 约束 |
+| --- | --- | --- | --- |
+| `name` | string | 是 | 1～60 字，同项目未归档阶段内唯一 |
+| `goal` | string \| null | 是 | ≤ 300 字 |
+| `doneCriteria` | string \| null | 是 | ≤ 300 字 |
+| `dueAt` | string \| null | 是 | ISO 8601 |
+| `status` | `planned` \| `active` | 否 | 默认 `planned` |
+| `source` | `manual` \| `ai-candidate` | 否 | 默认 `manual` |
+| `candidateId` | string | 条件必填 | `source: "ai-candidate"` 时必填 |
+| `confirmedByUser` | boolean | 条件必填 | `source: "ai-candidate"` 时必须为 `true` |
+
+成功响应：`data.milestone`（结构同列表项，`taskStats` 全为 0），`projectRevision + 1`。
+
+错误：
+
+| 场景 | code | HTTP |
+| --- | --- | --- |
+| 阶段重名 | `MILESTONE_NAME_CONFLICT` | 409 |
+| 候选过期 | `CANDIDATE_EXPIRED` | 409 |
+| 未确认候选 | `CONFIRMATION_REQUIRED` | 400 |
+| 项目版本过期 | `STALE_REVISION` | 409 |
+| 项目不存在 / 非本人 | `PROJECT_NOT_FOUND` | 404 |
+
+AI 候选确认规则见 23.7；**服务端不得因“项目为空”自动创建模板阶段**。
+
+#### PATCH /api/projects/{projectId}/milestones/{milestoneId}
+
+请求字段：`name`、`goal`、`doneCriteria`、`dueAt`，至少一个；必须带 `expectedRevision`。
+
+```json
+{
+  "contractVersion": "3.0",
+  "requestId": "9c1f0a6b-2c4d-4e77-9a3f-7b5e8d1c2043",
+  "idempotencyKey": "ms-update-01JBC9R7T3K8QW4M2N6P5X0ZYD",
+  "projectId": "prj_01JBC9R7T3K8QW4M2N6P5X0ZYA",
+  "projectRevision": 12,
+  "expectedRevision": 4,
+  "goal": "拿到可复现的样例数据，并确认字段口径和缺失率"
+}
+```
+
+成功返回更新后的阶段，`projectRevision + 1`，实体 `revision + 1`。`name` 冲突返回 `MILESTONE_NAME_CONFLICT`；版本冲突返回 `STALE_REVISION` 并带 `currentEntityRevision`。
+
+#### POST /api/projects/{projectId}/milestones/reorder
+
+请求：
+
+```json
+{
+  "contractVersion": "3.0",
+  "requestId": "5f2c1d0a-8a3e-4b7c-9f21-2d6e5a4c8b90",
+  "idempotencyKey": "ms-reorder-01JBC9R7T3K8QW4M2N6P5X0ZYF",
+  "projectId": "prj_01JBC9R7T3K8QW4M2N6P5X0ZYA",
+  "projectRevision": 12,
+  "order": [
+    "ms_01JBC9R7T3K8QW4M2N6P5X0ZYB",
+    "ms_01JBC9R7T3K8QW4M2N6P5X0ZYG",
+    "ms_01JBC9R7T3K8QW4M2N6P5X0ZYH"
+  ]
+}
+```
+
+规则：
+
+- `order` 必须包含当前项目**全部未归档阶段**，恰好一次，不允许遗漏、重复或包含归档阶段；
+- 不满足返回 400 `INVALID_ORDER`；
+- 服务端在一个事务内重写 `orderIndex = 0..N-1`，`projectRevision + 1`；
+- 同一顺序重复提交幂等，不重复递增；
+- 成功返回全部阶段列表。
+
+#### 阶段状态动作
+
+| 路径 | 请求 | 成功语义 | 幂等 |
+| --- | --- | --- | --- |
+| `POST .../milestones/{id}/activate` | 信封 + `expectedRevision` | `planned → active` | 已 `active` 时返回当前状态，不递增 |
+| `POST .../milestones/{id}/complete` | 信封 + `expectedRevision` | `planned/active → completed`，写 `completedAt` | 已 `completed` 时返回当前状态 |
+| `POST .../milestones/{id}/reopen` | 信封 + `expectedRevision` | `completed → active`，清 `completedAt` | 已 `active` 时返回当前状态 |
+| `POST .../milestones/{id}/archive` | 信封 + `expectedRevision` | 任意非归档 → `archived`，记录 `archivedFromStatus` | 已归档时返回当前状态 |
+| `POST .../milestones/{id}/restore` | 信封 + `expectedRevision` | `archived → archivedFromStatus` | 非归档时返回当前状态 |
+
+补充规则：
+
+- **删除 = 归档**；V3 不暴露阶段硬删除接口，避免误删历史证据；
+- 完成阶段不要求所有任务 `done`，但响应必须返回 `taskStats`，页面提示未完成任务数；
+- 给 `completed` 阶段新增任务或移入任务，必须带 `reopenMilestone: true`，否则 409 `MILESTONE_COMPLETED`；
+- 归档阶段不能新增任务、不能提交关联证据、不能作为 AI 当前阶段；违反返回 409 `MILESTONE_ARCHIVED`，历史证据仍保留。
+
+合法状态转换：
+
+| 当前状态 | `activate` | `complete` | `reopen` | `archive` | `restore` |
+| --- | --- | --- | --- | --- | --- |
+| `planned` | `active` | `completed`（允许直接完成） | 不合法 | `archived` | 不合法 |
+| `active` | `active`（幂等） | `completed` | 不合法 | `archived` | 不合法 |
+| `completed` | 不合法 | `completed`（幂等） | `active`，清 `completedAt` | `archived` | 不合法 |
+| `archived` | 不合法 | 不合法 | 不合法 | 幂等 | `archivedFromStatus` |
+
+必须明确：
+
+1. **阶段不强制显式 `activate`**：`planned` 可以创建任务，也可以直接 `complete`；`activate` 只表示“当前推进中”，并影响 `currentMilestoneId` 的选择；
+2. `completed → active` 是唯一 reopen 路径；任务状态不变，进度重新计算；
+3. 归档记录 `archivedFromStatus`；恢复回到该状态，不重置 revision；
+4. 归档阶段新增任务/证据返回 409 `MILESTONE_ARCHIVED`；必须先 `restore`；
+5. `active → planned`、`completed → planned`、`archived` 直接 `complete` 返回 409 `INVALID_STATE_TRANSITION`。
+
+### 22.3 任务（Task）接口
+
+#### POST /api/projects/{projectId}/tasks
+
+请求：
+
+```json
+{
+  "contractVersion": "3.0",
+  "requestId": "1b7c9e40-6c2f-4f18-8d5a-0e2b7c4a9f31",
+  "idempotencyKey": "task-create-01JBC9R7T3K8QW4M2N6P5X0ZYJ",
+  "projectId": "prj_01JBC9R7T3K8QW4M2N6P5X0ZYA",
+  "projectRevision": 13,
+  "title": "跑通 ERA5 与浮标数据的下载链路",
+  "doneCriteria": "下载一段样例数据，并能用 Python 读出关键变量",
+  "milestoneId": "ms_01JBC9R7T3K8QW4M2N6P5X0ZYB",
+  "status": "todo"
+}
+```
+
+| 字段 | 类型 | 必填 | 约束 |
+| --- | --- | --- | --- |
+| `title` | string | 是 | 1～60 字 |
+| `doneCriteria` | string \| null | 是 | ≤ 200 字 |
+| `milestoneId` | string \| null | 是 | 同项目；`null` 表示项目待办 |
+| `status` | `todo` \| `doing` | 否 | 默认 `todo` |
+| `reopenMilestone` | boolean | 否 | 目标阶段为 `completed` 时必须为 `true`；为 `true` 时同一事务把阶段改回 `active` 并清除 `completedAt`，`projectRevision` 只 +1 |
+
+成功响应：
+
+```json
+{
+  "contractVersion": "3.0",
+  "requestId": "1b7c9e40-6c2f-4f18-8d5a-0e2b7c4a9f31",
+  "projectId": "prj_01JBC9R7T3K8QW4M2N6P5X0ZYA",
+  "projectRevision": 14,
+  "replayed": false,
+  "data": {
+    "task": {
+      "taskId": "tsk_01JBC9R7T3K8QW4M2N6P5X0ZYK",
+      "projectId": "prj_01JBC9R7T3K8QW4M2N6P5X0ZYA",
+      "milestoneId": "ms_01JBC9R7T3K8QW4M2N6P5X0ZYB",
+      "milestoneName": "数据获取与预处理",
+      "title": "跑通 ERA5 与浮标数据的下载链路",
+      "doneCriteria": "下载一段样例数据，并能用 Python 读出关键变量",
+      "status": "todo",
+      "assigneeUserId": null,
+      "orderIndex": 2,
+      "source": "manual",
+      "revision": 1,
+      "createdAt": "2026-10-19T02:30:00.000Z",
+      "updatedAt": "2026-10-19T02:30:00.000Z",
+      "startedAt": null,
+      "completedAt": null,
+      "archivedAt": null
+    },
+    "milestoneStats": {
+      "milestoneId": "ms_01JBC9R7T3K8QW4M2N6P5X0ZYB",
+      "total": 4,
+      "done": 1,
+      "doing": 1,
+      "todo": 2,
+      "archived": 0,
+      "progress": 25
+    }
+  }
+}
+```
+
+错误：目标阶段归档 `MILESTONE_ARCHIVED`；目标阶段完成且未重开 `MILESTONE_COMPLETED`；阶段不属于本项目 `PROJECT_MISMATCH`。
+
+#### PATCH /api/projects/{projectId}/tasks/{taskId}
+
+可编辑 `title`、`doneCriteria`；必须带 `expectedRevision`。返回更新后的任务；如果任务所属阶段进度受影响（仅标题/完成标准不影响），不重算时也要返回当前 `milestoneStats`。
+
+#### POST /api/projects/{projectId}/tasks/{taskId}/link-milestone
+
+请求：
+
+```json
+{
+  "contractVersion": "3.0",
+  "requestId": "5f2c1d0a-8a3e-4b7c-9f21-2d6e5a4c8b90",
+  "idempotencyKey": "task-link-01JBC9R7T3K8QW4M2N6P5X0ZYM",
+  "projectId": "prj_01JBC9R7T3K8QW4M2N6P5X0ZYA",
+  "projectRevision": 14,
+  "expectedRevision": 2,
+  "milestoneId": "ms_01JBC9R7T3K8QW4M2N6P5X0ZYG"
+}
+```
+
+规则：
+
+- `milestoneId` 可为 `null`（移回项目待办）；
+- 目标阶段必须同项目、未归档；`completed` 阶段需 `reopenMilestone: true`，为 `true` 时同一事务把阶段改回 `active` 并清除 `completedAt`；
+- 源阶段和目标阶段的进度同时重算，响应返回两个阶段的 `milestoneStats`；
+- 任务的既有证据不重新归属，证据保留提交时的 `milestoneId` 快照；
+- 重复关联到同一阶段幂等，不递增 revision。
+
+#### 任务状态动作
+
+| 路径 | 请求 | 语义 | 幂等 |
+| --- | --- | --- | --- |
+| `POST .../tasks/{id}/start` | 信封 + `expectedRevision` | `todo → doing`，写 `startedAt` | `doing` 时返回当前状态 |
+| `POST .../tasks/{id}/complete` | 信封 + `expectedRevision` | `todo/doing → done`，写 `completedAt` | `done` 时返回当前状态 |
+| `POST .../tasks/{id}/reopen` | 信封 + `expectedRevision` + `targetStatus` | `done → doing`（默认）或 `done → todo`，清 `completedAt` | 目标状态已满足时幂等 |
+| `POST .../tasks/{id}/archive` | 信封 + `expectedRevision` | 任意状态 → 归档 | 已归档时幂等 |
+| `POST .../tasks/{id}/restore` | 信封 + `expectedRevision` | 清除 `archivedAt`，恢复原状态 | 未归档时幂等 |
+
+所有动作成功都返回任务与所属阶段 `milestoneStats`；任务无阶段时 `milestoneStats: null`。
+
+合法状态转换：
+
+| 当前状态 | `start` | `complete` | `reopen` | `archive` | `restore` |
+| --- | --- | --- | --- | --- | --- |
+| `todo` | `doing` | `done`（允许直接完成） | 不合法 | `archivedAt` 非空 | 不合法 |
+| `doing` | `doing`（幂等） | `done` | 不合法 | `archivedAt` 非空 | 不合法 |
+| `done` | 不合法 | `done`（幂等） | `doing`（默认）或 `todo` | `archivedAt` 非空 | 不合法 |
+| `archived` | 不合法 | 不合法 | 不合法 | 幂等 | 恢复归档前状态 |
+
+规则：
+
+1. 归档任务不能开始、完成、重开、提交证据或进展；必须先 `restore`；
+2. `done → todo` 只能通过 `reopen` 的 `targetStatus`，不能通过普通字段更新；
+3. 任务完成不自动改变阶段状态；阶段进度按 `done / total` 重算；
+4. 在 `planned` 阶段开始任务不会自动激活阶段；激活仍是显式动作；
+5. 归档任务不计入进度分母，历史证据仍可查询。
+
+### 22.4 进展（ProgressRecord）接口
+
+#### POST /api/projects/{projectId}/progress
+
+请求：
+
+```json
+{
+  "contractVersion": "3.0",
+  "requestId": "9c1f0a6b-2c4d-4e77-9a3f-7b5e8d1c2043",
+  "idempotencyKey": "progress-01JBC9R7T3K8QW4M2N6P5X0ZYN",
+  "projectId": "prj_01JBC9R7T3K8QW4M2N6P5X0ZYA",
+  "projectRevision": 14,
+  "summary": "完成样例数据下载，确认了 4 个关键字段和缺失率口径",
+  "milestoneId": "ms_01JBC9R7T3K8QW4M2N6P5X0ZYB",
+  "taskId": "tsk_01JBC9R7T3K8QW4M2N6P5X0ZYJ",
+  "evidenceIds": ["evd_01JBC9R7T3K8QW4M2N6P5X0ZYP"],
+  "occurredAt": "2026-10-19T02:20:00.000Z"
+}
+```
+
+| 字段 | 类型 | 必填 | 约束 |
+| --- | --- | --- | --- |
+| `summary` | string | 是 | 1～1,000 字 |
+| `milestoneId` | string \| null | 是 | 同项目；归档阶段拒绝 |
+| `taskId` | string \| null | 是 | 同项目；归档任务拒绝 |
+| `evidenceIds` | string[] | 是 | ≤ 10，同项目 |
+| `occurredAt` | string \| null | 否 | 不传则用服务端当前时间 |
+
+规则：
+
+- 如果同时传 `milestoneId` 和 `taskId`，任务的当前阶段必须等于 `milestoneId`，否则 400 `INVALID_INPUT`（字段级冲突，不执行写入）；
+- 提交进展**不改变任务状态**；完成任务必须调用任务完成动作；
+- 成功返回 `data.progress` 与 `data.milestoneStats`（可空）；
+- 进展只追加；更正通过 `POST /api/projects/{projectId}/progress/{progressId}/supersede` 创建新记录，旧记录置 `superseded`，正文保留；
+- 重复提交同一 `idempotencyKey` 返回同一条进展。
+
+#### GET /api/projects/{projectId}/progress
+
+查询参数：`milestoneId`、`taskId`、`limit`（默认 50，最大 100）、`cursor`、`includeArchived`。
+
+响应按 `occurredAt` 倒序，字段：`progressId`、`summary`、`milestoneId`、`taskId`、`evidenceIds`、`occurredAt`、`status`、`revision`、`createdAt`、`nextCursor`。
+
+### 22.5 证据（Evidence）接口
+
+#### POST /api/projects/{projectId}/evidence
+
+请求：
+
+```json
+{
+  "contractVersion": "3.0",
+  "requestId": "1b7c9e40-6c2f-4f18-8d5a-0e2b7c4a9f31",
+  "idempotencyKey": "evidence-01JBC9R7T3K8QW4M2N6P5X0ZYQ",
+  "projectId": "prj_01JBC9R7T3K8QW4M2N6P5X0ZYA",
+  "projectRevision": 14,
+  "submissionId": "6e2b8c07-f1d3-490a-8c5e-2b7f0d3a9186",
+  "taskId": "tsk_01JBC9R7T3K8QW4M2N6P5X0ZYJ",
+  "milestoneId": "ms_01JBC9R7T3K8QW4M2N6P5X0ZYB",
+  "didWhat": "下载了 2024 年 1 月的 ERA5 样例数据",
+  "foundWhat": "有效波高与风速字段完整，缺失率低于 1%",
+  "stillUnsure": "0.5 度分辨率是否满足公里级判断",
+  "attachmentName": "era5-sample-202401.csv",
+  "completeTask": false
+}
+```
+
+| 字段 | 类型 | 必填 | 约束 |
+| --- | --- | --- | --- |
+| `submissionId` | string | 否 | 8～64 可打印字符；不传由服务端生成；同项目内唯一 |
+| `taskId` | string \| null | 是 | 同项目；归档任务拒绝 |
+| `milestoneId` | string \| null | 是 | 同项目；归档阶段拒绝；与任务当前阶段可以不同（历史快照） |
+| `didWhat` | string | 是 | 1～300 字 |
+| `foundWhat` | string \| null | 是 | ≤ 500 字 |
+| `stillUnsure` | string \| null | 是 | ≤ 500 字；非空时创建疑问 |
+| `attachmentName` | string \| null | 是 | ≤ 200 字；不上传文件 |
+| `completeTask` | boolean | 否 | 默认 `false` |
+| `expectedTaskRevision` | number | 条件必填 | `completeTask: true` 时必填 |
+
+成功响应：
+
+```json
+{
+  "contractVersion": "3.0",
+  "requestId": "1b7c9e40-6c2f-4f18-8d5a-0e2b7c4a9f31",
+  "projectId": "prj_01JBC9R7T3K8QW4M2N6P5X0ZYA",
+  "projectRevision": 15,
+  "replayed": false,
+  "data": {
+    "evidence": {
+      "evidenceId": "evd_01JBC9R7T3K8QW4M2N6P5X0ZYP",
+      "projectId": "prj_01JBC9R7T3K8QW4M2N6P5X0ZYA",
+      "taskId": "tsk_01JBC9R7T3K8QW4M2N6P5X0ZYJ",
+      "milestoneId": "ms_01JBC9R7T3K8QW4M2N6P5X0ZYB",
+      "milestoneNameSnapshot": "数据获取与预处理",
+      "submissionId": "6e2b8c07-f1d3-490a-8c5e-2b7f0d3a9186",
+      "didWhat": "下载了 2024 年 1 月的 ERA5 样例数据",
+      "foundWhat": "有效波高与风速字段完整，缺失率低于 1%",
+      "stillUnsure": "0.5 度分辨率是否满足公里级判断",
+      "attachmentName": "era5-sample-202401.csv",
+      "status": "active",
+      "revision": 1,
+      "createdAt": "2026-10-19T02:30:00.000Z"
+    },
+    "doubt": {
+      "doubtId": "dbt_01JBC9R7T3K8QW4M2N6P5X0ZYR",
+      "text": "0.5 度分辨率是否满足公里级判断",
+      "status": "open",
+      "sourceEvidenceId": "evd_01JBC9R7T3K8QW4M2N6P5X0ZYP",
+      "createdAt": "2026-10-19T02:30:00.000Z"
+    },
+    "task": null,
+    "milestoneStats": {
+      "milestoneId": "ms_01JBC9R7T3K8QW4M2N6P5X0ZYB",
+      "total": 3,
+      "done": 1,
+      "doing": 1,
+      "todo": 1,
+      "archived": 0,
+      "progress": 33
+    }
+  }
+}
+```
+
+规则：
+
+- 证据正文不可修改；`stillUnsure` 非空自动创建一条 `Doubt`，重复 `submissionId` 不重复创建；
+- `completeTask: true` 时在同一事务中把任务置 `done`、写 `completedAt`、重算阶段进度、创建证据与疑问、`projectRevision` 只 +1；
+- `completeTask` 对 `done` 任务幂等；对归档任务返回 `TASK_ARCHIVED`；
+- 证据不因阶段归档而删除；`milestoneNameSnapshot` 固定为提交时名称；
+- 不提供证据删除接口。
+
+#### POST /api/projects/{projectId}/evidence/{evidenceId}/links
+
+请求：
+
+```json
+{
+  "contractVersion": "3.0",
+  "requestId": "5f2c1d0a-8a3e-4b7c-9f21-2d6e5a4c8b90",
+  "idempotencyKey": "evidence-link-01JBC9R7T3K8QW4M2N6P5X0ZYS",
+  "projectId": "prj_01JBC9R7T3K8QW4M2N6P5X0ZYA",
+  "projectRevision": 15,
+  "expectedRevision": 1,
+  "taskId": "tsk_01JBC9R7T3K8QW4M2N6P5X0ZYJ",
+  "milestoneId": "ms_01JBC9R7T3K8QW4M2N6P5X0ZYB"
+}
+```
+
+规则：
+
+- `taskId` / `milestoneId` 可为 `null`，表示解除关联；
+- 两者必须同项目；归档任务/阶段拒绝；
+- 更新证据关联使证据 `revision + 1`、`projectRevision + 1`；
+- 阶段名称变化时同时更新 `milestoneNameSnapshot`；
+- 重复设置相同关联幂等，不递增版本。
+
+#### GET /api/projects/{projectId}/evidence
+
+查询参数：`taskId`、`milestoneId`、`limit`（默认 50，最大 100）、`cursor`、`includeArchived`。返回证据列表，不含材料正文。
+
+### 22.6 项目时间线
+
+`GET /api/projects/{projectId}/timeline`
+
+| 参数 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `limit` | number | 50 | 1～100 |
+| `cursor` | string \| null | `null` | 上一页返回的不透明游标 |
+| `types` | string | 全部 | 逗号分隔：`milestone,task,evidence,progress,material,doubt,chat` |
+| `includeArchived` | boolean | `false` | 是否包含归档实体事件 |
+
+响应：
+
+```json
+{
+  "contractVersion": "3.0",
+  "projectId": "prj_01JBC9R7T3K8QW4M2N6P5X0ZYA",
+  "projectRevision": 15,
+  "data": {
+    "items": [
+      {
+        "timelineItemId": "evt_01JBC9R7T3K8QW4M2N6P5X0ZYT",
+        "type": "evidence",
+        "occurredAt": "2026-10-19T02:30:00.000Z",
+        "title": "提交证据：下载了 2024 年 1 月的 ERA5 样例数据",
+        "summary": "有效波高与风速字段完整，缺失率低于 1%",
+        "milestoneId": "ms_01JBC9R7T3K8QW4M2N6P5X0ZYB",
+        "milestoneNameSnapshot": "数据获取与预处理",
+        "taskId": "tsk_01JBC9R7T3K8QW4M2N6P5X0ZYJ",
+        "evidenceId": "evd_01JBC9R7T3K8QW4M2N6P5X0ZYP",
+        "progressId": null,
+        "materialId": null,
+        "chatId": null,
+        "actorUserId": "usr_01JBC9R7T3K8QW4M2N6P5X0ZYE",
+        "entityRevision": 1,
+        "archived": false
+      }
+    ],
+    "nextCursor": null
+  }
+}
+```
+
+规则：
+
+- 按 `occurredAt` 倒序；同一时间按 `timelineItemId` 倒序；
+- 归档阶段/任务的事件仍保留，`archived: true`；
+- 时间线只返回当前用户当前项目的事件；跨项目 ID 不出现；
+- `summary` 截断到 200 字，不返回完整材料正文或模型原文；
+- 非法游标返回 400 `INVALID_INPUT`。
+
+---
+
+
+### 22.7 材料理解草稿确认接口
+
+材料理解草稿的确认状态属于项目领域数据；本节冻结五个写动作。V2 的本地 action 名称与 HTTP 路由映射如下：
+
+| 前端 action | HTTP | 说明 |
+| --- | --- | --- |
+| `confirmDraftItem` | `POST .../items/{itemId}/confirm` | 确认单条 |
+| `editDraftItem` | `PATCH .../items/{itemId}` | 修改正文，退回 `modified` |
+| `removeDraftItem` | `POST .../items/{itemId}/remove` | 移除（归档），不物理删除 |
+| `undoDraftItem` | `POST .../items/{itemId}/undo` | 撤销确认 |
+| `confirmAllDraft` | `POST .../confirm-all` | 整份确认当前版本全部条目 |
+
+路径前缀：`/api/projects/{projectId}/materials/{materialId}/understanding`。
+
+#### 22.7.1 公共请求字段
+
+```json
+{
+  "contractVersion": "3.0",
+  "requestId": "1b7c9e40-6c2f-4f18-8d5a-0e2b7c4a9f31",
+  "idempotencyKey": "draft-confirm-01JBC9R7T3K8QW4M2N6P5X0ZZB",
+  "projectId": "prj_01JBC9R7T3K8QW4M2N6P5X0ZYA",
+  "projectRevision": 16,
+  "materialVersion": 1,
+  "itemId": "cnd_01JBC9R7T3K8QW4M2N6P5X0ZZC",
+  "expectedRevision": 2
+}
+```
+
+| 字段 | 类型 | 必填 | 规则 |
+| --- | --- | --- | --- |
+| `contractVersion` | string | 是 | `"3.0"` |
+| `requestId` | string | 是 | UUID v4 |
+| `idempotencyKey` | string | 是 | 8～64 可打印字符 |
+| `projectId` | string | 是 | 必须与路径一致 |
+| `projectRevision` | number | 是 | 必须等于服务端当前项目版本 |
+| `materialVersion` | number | 是 | 必须等于该材料当前版本；否则 409 `MATERIAL_VERSION_OUTDATED` |
+| `itemId` | string | 条件必填 | 单条动作必填；必须是服务端稳定 `itemId`，不接受本地 `blockId` |
+| `expectedRevision` | number | 条件必填 | 单条动作必填；必须等于条目当前 `revision` |
+| `text` | string | 条件必填 | 仅 `editDraftItem`；1～300 字 |
+| `items` | array | 条件必填 | 仅 `confirmAllDraft`；`[{ itemId, expectedRevision }]`，1～50 条 |
+
+规则：
+
+1. 单条动作必须校验 `materialId + materialVersion + itemId` 三者同时匹配；跨材料/跨项目返回 404 `RESOURCE_NOT_FOUND`；
+2. 已归档条目不接受确认、修改、撤销；返回 409 `INVALID_STATE_TRANSITION`；
+3. 所有写操作在同一事务内递增 `projectRevision` 一次；无状态变化时返回 `changed: false`，不递增任何版本；
+4. 同一 `idempotencyKey` + 相同请求体返回首次响应；不同请求体返回 409 `IDEMPOTENCY_CONFLICT`；
+5. 版本冲突返回 409 `STALE_REVISION`，带 `currentProjectRevision` / `currentEntityRevision`，不执行部分写入。
+
+#### 22.7.2 五个动作的语义
+
+| 动作 | 合法前置状态 | 结果状态 | `revision` / `projectRevision` | 幂等行为 |
+| --- | --- | --- | --- | --- |
+| `confirmDraftItem` | `pending` / `modified` | `confirmed` | 各 +1 | 已 `confirmed`：`changed: false`，不递增 |
+| `editDraftItem` | `pending` / `modified` / `confirmed` | `modified`，清空确认信息 | 各 +1 | 文本与当前 `text` 相同：`changed: false`，状态不变 |
+| `removeDraftItem` | `pending` / `modified` / `confirmed` | `archived`，写 `removedAt` | 各 +1 | 已 `archived`：`changed: false` |
+| `undoDraftItem` | `confirmed` | `text == originalText` → `pending`；否则 `modified` | 各 +1 | 非 `confirmed`：`changed: false` |
+| `confirmAllDraft` | 当前版本全部未归档条目 | 全部变为 `confirmed` | 每条变化的条目 `revision +1`；`projectRevision` 只 +1 一次 | 全部已确认：`changed: false`，不递增 |
+
+补充：
+
+- `editDraftItem` 修改已确认条目时，必须立即清空 `confirmedAt` / `confirmedByUserId`，该条从 AI 可信上下文移除，直到再次确认；
+- `removeDraftItem` 只归档，不删除来源片段；同一 `itemId` 不能通过 `confirmAllDraft` 被恢复；
+- `undoDraftItem` 只撤销确认，不是删除；`pending` / `modified` 条目调用它是无操作；
+- `confirmAllDraft` 的 `items` 必须覆盖当前版本全部未归档条目，遗漏返回 400 `INVALID_INPUT`；任一条目 revision 不匹配返回 409 `STALE_REVISION`，整单不写入；
+- `confirmAllDraft` 只把 `pending` / `modified` 改为 `confirmed`；已确认条目跳过，`skippedCount` 计数；响应 `items` 返回本次提交的全部条目最终状态，`confirmedCount` 只统计本次实际变更的条目。
+
+#### 22.7.3 成功响应
+
+单条动作：
+
+```json
+{
+  "contractVersion": "3.0",
+  "requestId": "1b7c9e40-6c2f-4f18-8d5a-0e2b7c4a9f31",
+  "projectId": "prj_01JBC9R7T3K8QW4M2N6P5X0ZYA",
+  "projectRevision": 17,
+  "replayed": false,
+  "data": {
+    "materialId": "mat_01JBC9R7T3K8QW4M2N6P5X0ZYV",
+    "materialVersion": 1,
+    "changed": true,
+    "item": {
+      "itemId": "cnd_01JBC9R7T3K8QW4M2N6P5X0ZZC",
+      "kind": "goalCandidates",
+      "text": "使用 ERA5 海浪场数据复现极端风浪事件识别流程",
+      "originalText": "使用 ERA5 海浪场数据复现极端风浪事件识别流程",
+      "sources": [
+        {
+          "materialId": "mat_01JBC9R7T3K8QW4M2N6P5X0ZYV",
+          "materialName": "实验手册.md",
+          "materialVersion": 1,
+          "segmentId": "seg_0",
+          "startLine": 1,
+          "endLine": 8
+        }
+      ],
+      "status": "confirmed",
+      "revision": 3,
+      "confirmedAt": "2026-10-19T02:35:00.000Z",
+      "confirmedByUserId": "usr_01JBC9R7T3K8QW4M2N6P5X0ZYE",
+      "removedAt": null
+    }
+  }
+}
+```
+
+整份确认：
+
+```json
+{
+  "contractVersion": "3.0",
+  "requestId": "5f2c1d0a-8a3e-4b7c-9f21-2d6e5a4c8b90",
+  "projectId": "prj_01JBC9R7T3K8QW4M2N6P5X0ZYA",
+  "projectRevision": 17,
+  "replayed": false,
+  "data": {
+    "materialId": "mat_01JBC9R7T3K8QW4M2N6P5X0ZYV",
+    "materialVersion": 1,
+    "changed": true,
+    "confirmedCount": 2,
+    "skippedCount": 1,
+    "items": [
+      {
+        "itemId": "cnd_01JBC9R7T3K8QW4M2N6P5X0ZZC",
+        "status": "confirmed",
+        "revision": 3
+      },
+      {
+        "itemId": "cnd_01JBC9R7T3K8QW4M2N6P5X0ZZD",
+        "status": "confirmed",
+        "revision": 2
+      }
+    ]
+  }
+}
+```
+
+#### 22.7.4 失败与中文提示
+
+| 场景 | code | HTTP | 中文 message |
+| --- | --- | --- | --- |
+| 材料版本已更新 | `MATERIAL_VERSION_OUTDATED` | 409 | 材料已更新，请重新生成理解草稿 |
+| 条目版本/项目版本过期 | `STALE_REVISION` | 409 | 内容已更新，请刷新后重试 |
+| 条目不存在或不属于该材料 | `RESOURCE_NOT_FOUND` | 404 | 这条理解不存在或已失效 |
+| 条目已归档 | `INVALID_STATE_TRANSITION` | 409 | 这条理解已移除，请重新生成 |
+| 文本为空或超长 | `INVALID_INPUT` | 400 | 理解内容需为 1～300 字 |
+| 整份确认遗漏条目 | `INVALID_INPUT` | 400 | 整份确认需要包含当前版本的全部理解条目 |
+| 同键不同内容 | `IDEMPOTENCY_CONFLICT` | 409 | 重复请求的内容不一致，请刷新后重试 |
+
+---
+
+## 23. AI 阶段上下文契约
+
+### 23.1 兼容面
+
+`POST /api/advisor/recommendations` 与 `POST /api/advisor/chat` 的路径、`contractVersion: "1.0"`、既有必填字段、失败结构、超时和兜底规则**全部不变**。本节只新增：
+
+1. 可选 `milestoneContext`；
+2. 新的提示词版本 `mvp-prompt-v3` / `advisor-chat-v3`；
+3. 可选的已确认材料来源引用；
+4. 阶段候选生成接口（只生成候选，不写项目）。
+
+不携带 `milestoneContext` 的 v1/v2 请求行为与第 4、6.4、17 节完全一致。v3 提示词必须与 `milestoneContext` 成对使用；版本组合不成立时返回 400 `CONTRACT_VERSION_MISMATCH`，前端不得自动降级到 v1/v2。
+
+### 23.2 `milestoneContext` 字段
+
+```json
+{
+  "milestoneContext": {
+    "milestoneId": "ms_01JBC9R7T3K8QW4M2N6P5X0ZYB",
+    "currentMilestone": "数据获取与预处理",
+    "milestoneRevision": 4,
+    "milestoneGoal": "拿到可复现的样例数据并确认字段口径",
+    "milestoneDoneCriteria": "样例数据可下载，字段说明与缺失率记录完整",
+    "milestoneStatus": "active",
+    "milestoneTasks": [],
+    "recentProgress": [],
+    "milestoneEvidence": []
+  }
+}
+```
+
+| 字段 | 类型 | 必填 | 约束 | 说明 |
+| --- | --- | --- | --- | --- |
+| `milestoneId` | string \| null | 是 | `ms_` 前缀或 `null` | 空白项目为 `null` |
+| `currentMilestone` | string \| null | 是 | ≤ 60 字 | 必须与顶层 `currentMilestone` 一致（两者都非空时） |
+| `milestoneRevision` | number \| null | 是 | ≥ 1 整数 | 客户端已知的阶段版本 |
+| `milestoneGoal` | string \| null | 是 | ≤ 300 字 | 阶段目标 |
+| `milestoneDoneCriteria` | string \| null | 是 | ≤ 300 字 | 阶段完成标准 |
+| `milestoneStatus` | `planned` \| `active` \| null | 是 | — | 当前阶段只允许 `planned` / `active`；`completed` / `archived` 不作为当前阶段 |
+| `milestoneTasks` | MilestoneTaskSnapshot[] | 是 | ≤ 50 条 | 该阶段全部任务（含已完成），用于避免重复建议 |
+| `recentProgress` | ProgressSnapshot[] | 是 | ≤ 20 条，按 `occurredAt` 倒序 | 最近进展摘要 |
+| `milestoneEvidence` | EvidenceSnapshot[] | 是 | ≤ 20 条，按 `createdAt` 倒序 | 该阶段最近证据 |
+
+快照字段：
+
+| 快照 | 字段 |
+| --- | --- |
+| `MilestoneTaskSnapshot` | `taskId`、`title`、`status`、`doneCriteria`、`owner`、`milestone`、`updatedAt` |
+| `ProgressSnapshot` | `progressId`、`summary`、`milestoneId`、`taskId`、`occurredAt` |
+| `EvidenceSnapshot` | 沿用 4.1：`evidenceId`、`submissionId`、`taskId`、`didWhat`、`foundWhat`、`stillUnsure`、`author`、`createdAt` |
+
+规则：
+
+1. `milestoneId` 非空时，`milestoneTasks`、`milestoneEvidence`、`recentProgress` 中出现的实体必须属于该项目和该阶段；服务端校验失败返回 400 `INVALID_INPUT`，不把跨项目内容放入提示词；
+2. `milestoneId` 为空时，三个数组必须为空；`currentMilestone`、`milestoneGoal`、`milestoneDoneCriteria`、`milestoneRevision`、`milestoneStatus` 必须为 `null`；
+3. `milestoneTasks` 必须包含已完成任务，服务端据此执行“不得重复推荐已完成任务”；
+4. 只有未归档阶段的上下文可以发送；归档阶段返回 400 `INVALID_INPUT`；
+5. `milestoneContext` 与顶层 `currentMilestone` 不一致时返回 400 `INVALID_INPUT`；
+6. 请求体总上限仍为 256 KB；`milestoneContext` 中的文本也计入该上限。
+
+### 23.3 已确认材料上下文与确认门禁
+
+V3 继续使用 `confirmedMaterials` 字段（结构同 17.1），但增加服务端复核：
+
+| 提示词版本 | 行为 |
+| --- | --- |
+| `mvp-prompt-v1` / `mvp-prompt-v2` | 与 17.1 完全一致：服务端校验结构与上限，信任客户端已确认 |
+| `mvp-prompt-v3` / `advisor-chat-v3` | 服务端按 `materialId + version + segmentId` 重新读取数据库；只接受 `MaterialUnderstandingItem.status = "confirmed"` 的片段；`pending` 与 `modified` 均视为未确认 |
+
+v3 规则：
+
+1. 客户端传来的 `name`、`startLine`、`endLine`、`text` **不作为可信内容**；服务端一律用数据库值覆盖；
+2. 片段未确认、属于待确认草稿、属于归档材料或旧版本：返回 400 `UNCONFIRMED_MATERIAL` 或 409 `MATERIAL_VERSION_OUTDATED`；
+3. 模型只能返回 `segmentId`；材料名、版本、行号由服务端回填；
+4. 响应中的 `basisMaterialRefs` / `citations` 只允许包含本次请求中已确认的片段；
+5. 未确认材料不得进入系统提示词、用户消息或任何缓存键；
+6. 旧客户端继续使用 v1/v2，行为不变；v3 前端不得再依赖客户端自报的材料名和行号。
+
+### 23.4 提示词版本
+
+| 接口 | 兼容保留 | V3 启用 | 要求 |
+| --- | --- | --- | --- |
+| 建议 | `mvp-prompt-v1`、`mvp-prompt-v2` | `mvp-prompt-v3` | v3 必须携带 `milestoneContext` |
+| 聊天 | `advisor-chat-v1`、`advisor-chat-v2` | `advisor-chat-v3` | v3 必须携带 `milestoneContext` |
+| 阶段候选 | — | `milestone-candidate-v1` | 只使用已确认材料，不写项目 |
+| 材料理解 | `material-understanding-v1` | 不变 | 沿用第 15 节 |
+
+规则：
+
+1. 服务端支持列表包含全部取值，不删除旧值；
+2. 接口与版本不匹配（例如建议接口收到 `advisor-chat-v3`）返回 400 `INVALID_INPUT`；
+3. v3 提示词缺少 `milestoneContext` 返回 400 `CONTRACT_VERSION_MISMATCH`，不做静默降级；
+4. v1/v2 请求携带 `milestoneContext` 时返回 400 `CONTRACT_VERSION_MISMATCH`，**不静默忽略**；
+5. 版本取值同步四处：本契约、`server/src/advisor/types.ts`、`src/domain/recommendation.ts`、`docs/ai/prompt-spec.md`。
+
+### 23.5 建议接口 v3 请求示例
+
+```json
+{
+  "contractVersion": "1.0",
+  "promptVersion": "mvp-prompt-v3",
+  "requestId": "9c1f0a6b-2c4d-4e77-9a3f-7b5e8d1c2043",
+  "projectId": "prj_01JBC9R7T3K8QW4M2N6P5X0ZYA",
+  "projectRevision": 15,
+  "projectName": "面向海洋环境安全保障的极端风和浪事件的智能分析系统",
+  "currentMilestone": "数据获取与预处理",
+  "milestoneContext": {
+    "milestoneId": "ms_01JBC9R7T3K8QW4M2N6P5X0ZYB",
+    "currentMilestone": "数据获取与预处理",
+    "milestoneRevision": 4,
+    "milestoneGoal": "拿到可复现的样例数据并确认字段口径",
+    "milestoneDoneCriteria": "样例数据可下载，字段说明与缺失率记录完整",
+    "milestoneStatus": "active",
+    "milestoneTasks": [
+      {
+        "taskId": "tsk_01JBC9R7T3K8QW4M2N6P5X0ZYJ",
+        "title": "跑通 ERA5 与浮标数据的下载链路",
+        "status": "doing",
+        "doneCriteria": "下载一段样例数据，并能用 Python 读出关键变量",
+        "owner": null,
+        "milestone": "数据获取与预处理",
+        "updatedAt": "2026-10-18T09:20:00.000Z"
+      }
+    ],
+    "recentProgress": [
+      {
+        "progressId": "prg_01JBC9R7T3K8QW4M2N6P5X0ZYN",
+        "summary": "完成样例数据下载，确认了 4 个关键字段和缺失率口径",
+        "milestoneId": "ms_01JBC9R7T3K8QW4M2N6P5X0ZYB",
+        "taskId": "tsk_01JBC9R7T3K8QW4M2N6P5X0ZYJ",
+        "occurredAt": "2026-10-19T02:20:00.000Z"
+      }
+    ],
+    "milestoneEvidence": [
+      {
+        "evidenceId": "evd_01JBC9R7T3K8QW4M2N6P5X0ZYP",
+        "submissionId": "6e2b8c07-f1d3-490a-8c5e-2b7f0d3a9186",
+        "taskId": "tsk_01JBC9R7T3K8QW4M2N6P5X0ZYJ",
+        "didWhat": "下载了 2024 年 1 月的 ERA5 样例数据",
+        "foundWhat": "有效波高与风速字段完整，缺失率低于 1%",
+        "stillUnsure": "0.5 度分辨率是否满足公里级判断",
+        "author": null,
+        "createdAt": "2026-10-19T02:30:00.000Z"
+      }
+    ]
+  },
+  "confirmedMaterials": [
+    {
+      "materialId": "mat_01JBC9R7T3K8QW4M2N6P5X0ZYV",
+      "name": "实验手册.md",
+      "type": "md",
+      "version": 1,
+      "segments": [
+        {
+          "segmentId": "seg_1",
+          "startLine": 10,
+          "endLine": 24,
+          "text": "## 数据说明\n主要字段：有效波高、风速、时间、经纬度。"
+        }
+      ]
+    }
+  ],
+  "tasks": [
+    {
+      "taskId": "tsk_01JBC9R7T3K8QW4M2N6P5X0ZYJ",
+      "title": "跑通 ERA5 与浮标数据的下载链路",
+      "status": "doing",
+      "doneCriteria": "下载一段样例数据，并能用 Python 读出关键变量",
+      "owner": null,
+      "milestone": "数据获取与预处理",
+      "updatedAt": "2026-10-18T09:20:00.000Z"
+    }
+  ],
+  "evidence": [],
+  "doubts": [],
+  "forceRefresh": false
+}
+```
+
+### 23.6 建议接口 v3 响应示例
+
+```json
+{
+  "contractVersion": "1.0",
+  "requestId": "9c1f0a6b-2c4d-4e77-9a3f-7b5e8d1c2043",
+  "projectId": "prj_01JBC9R7T3K8QW4M2N6P5X0ZYA",
+  "projectRevision": 15,
+  "source": "model",
+  "fallbackReason": null,
+  "cached": false,
+  "promptVersion": "mvp-prompt-v3",
+  "milestoneRevision": 4,
+  "suggestions": [
+    {
+      "title": "把 0.5 度分辨率的缺口写成待确认事项并向助教核实",
+      "whyNow": "当前阶段的完成标准要求确认字段口径，而现有证据已经指出分辨率与公里级判断存在差距；现在不确认，后续阈值结果都要重算。",
+      "doneCriteria": "一页说明：0.5 度对应的实际距离、缺口量化、两个可选替代数据源、一句换或不换的结论",
+      "existingTaskId": "tsk_01JBC9R7T3K8QW4M2N6P5X0ZYJ",
+      "basisEvidenceIds": ["evd_01JBC9R7T3K8QW4M2N6P5X0ZYP"],
+      "basisDoubtIds": [],
+      "basisMaterialRefs": [
+        {
+          "materialId": "mat_01JBC9R7T3K8QW4M2N6P5X0ZYV",
+          "materialName": "实验手册.md",
+          "materialVersion": 1,
+          "segmentId": "seg_1",
+          "startLine": 10,
+          "endLine": 24,
+          "itemId": null
+        }
+      ]
+    }
+  ]
+}
+```
+
+字段规则：
+
+- `milestoneRevision`：v3 响应新增，回显请求中的阶段版本；v1/v2 响应不返回该字段；
+- `basisMaterialRefs`：v3 建议新增，0～3 条；每条只允许引用本次请求中已确认的 `segmentId`；材料名、版本、行号由服务端回填；
+- `basisMaterialRefs` 缺失时前端按空数组处理，但 v3 服务端必须返回该字段（可为 `[]`）；
+- 既有字段名、类型和语义不变。
+
+### 23.7 聊天接口 v3 与阶段候选
+
+聊天请求在 6.4 基础上增加 `milestoneContext`，响应增加 `milestoneRevision` 与 `citations`：
+
+```json
+{
+  "contractVersion": "1.0",
+  "requestId": "1b7c9e40-6c2f-4f18-8d5a-0e2b7c4a9f31",
+  "projectId": "prj_01JBC9R7T3K8QW4M2N6P5X0ZYA",
+  "projectRevision": 15,
+  "source": "model",
+  "fallbackReason": null,
+  "promptVersion": "advisor-chat-v3",
+  "milestoneRevision": 4,
+  "answer": "先完成当前阶段的两件事：一是把 0.5 度分辨率的缺口写成待确认事项并向助教核实；二是补齐样例数据的字段说明和缺失率记录。两步都完成后，再进入阈值方法对比。",
+  "citations": [
+    {
+      "materialId": "mat_01JBC9R7T3K8QW4M2N6P5X0ZYV",
+      "materialName": "实验手册.md",
+      "materialVersion": 1,
+      "segmentId": "seg_1",
+      "startLine": 10,
+      "endLine": 24,
+      "itemId": null
+    }
+  ]
+}
+```
+
+规则：
+
+- `citations` 0～5 条，只允许已确认片段；v3 必须返回该字段（可为 `[]`）；
+- 模型只返回 `segmentId`，服务端回填名称、版本、行号；
+- 模型返回未知 `segmentId`：剔除该条引用并记日志；不把未知引用写入历史消息；
+- 模型声称有材料依据但没有返回任何合法引用：仍可保留回答，但 `citations` 为空，前端不得展示“依据来自某材料”；
+- v3 聊天响应不返回模型原始文本、内部字段名、错误码或路径。
+
+阶段候选接口：
+
+`POST /api/projects/{projectId}/milestones/candidates`
+
+请求：
+
+```json
+{
+  "contractVersion": "3.0",
+  "requestId": "5f2c1d0a-8a3e-4b7c-9f21-2d6e5a4c8b90",
+  "idempotencyKey": "ms-candidates-01JBC9R7T3K8QW4M2N6P5X0ZYW",
+  "projectId": "prj_01JBC9R7T3K8QW4M2N6P5X0ZYA",
+  "projectRevision": 15,
+  "promptVersion": "milestone-candidate-v1",
+  "maxCandidates": 3,
+  "focus": "围绕数据获取和预处理生成阶段"
+}
+```
+
+成功响应：
+
+```json
+{
+  "contractVersion": "3.0",
+  "requestId": "5f2c1d0a-8a3e-4b7c-9f21-2d6e5a4c8b90",
+  "projectId": "prj_01JBC9R7T3K8QW4M2N6P5X0ZYA",
+  "projectRevision": 15,
+  "promptVersion": "milestone-candidate-v1",
+  "source": "model",
+  "fallbackReason": null,
+  "notice": null,
+  "candidates": [
+    {
+      "candidateId": "cand_01JBC9R7T3K8QW4M2N6P5X0ZYX",
+      "name": "数据获取与预处理",
+      "goal": "拿到可复现的样例数据并确认字段口径",
+      "doneCriteria": "样例数据可下载，字段说明与缺失率记录完整",
+      "suggestedTasks": [
+        {
+          "title": "跑通 ERA5 与浮标数据的下载链路",
+          "doneCriteria": "下载一段样例数据，并能用 Python 读出关键变量"
+        }
+      ],
+      "risks": ["0.5 度分辨率可能不满足公里级判断"],
+      "sources": [
+        {
+          "materialId": "mat_01JBC9R7T3K8QW4M2N6P5X0ZYV",
+          "materialName": "实验手册.md",
+          "materialVersion": 1,
+          "segmentId": "seg_1",
+          "startLine": 10,
+          "endLine": 24,
+          "itemId": null
+        }
+      ],
+      "expiresAt": "2026-10-19T03:00:00.000Z"
+    }
+  ]
+}
+```
+
+规则：
+
+- 候选**不写入项目**，不递增 `projectRevision`，不进入时间线；
+- 候选缓存 30 分钟；`expiresAt` 到期后确认返回 409 `CANDIDATE_EXPIRED`；
+- `candidates` 0～3 条；模型失败时返回 `source: "fallback"`、`fallbackReason`、中文 `notice`，候选可为空；
+- 候选只能引用已确认材料片段；服务端从数据库读取当前项目已确认条目，不信任客户端传来的草稿，并回填材料名、版本、行号；
+- 用户确认后调用 22.2 的创建阶段接口，带 `source: "ai-candidate"`、`candidateId`、`confirmedByUser: true`；
+- 服务端不得把候选直接写成阶段，也不得在空白项目自动生成候选。
+
+### 23.8 模型输出校验与用户可见文本
+
+在 4.6 / 15.3 基础上增加：
+
+| 检查 | 规则 | 不通过时 |
+| --- | --- | --- |
+| 阶段上下文引用 | 候选/建议引用的 `milestoneId`、`taskId` 必须在本次请求范围内 | 剔除引用；候选无来源则丢弃该条 |
+| 材料引用 | `segmentId` 必须在本次已确认片段内 | 剔除该引用并记日志 |
+| 阶段候选数量 | 0～3 条 | 超出丢弃 |
+| 候选任务数量 | 每条候选 ≤ 5 个建议任务 | 超出丢弃 |
+| 用户可见文本 | 自然中文，不含字段名、状态名、错误码、路径、堆栈、模型原文 | 判非法输出，走安全中文 fallback |
+
+模型超时、上游不可用、输出非法、未配置密钥继续走现有安全兜底：
+
+- 建议/聊天：HTTP 200 + `source: "fallback"` + `fallbackReason`，不返回 4xx/5xx（除非兜底本身失败）；
+- 阶段候选：HTTP 200 + `source: "fallback"` + 中文 `notice`，可为空候选；
+- 用户可见文本不得出现 `milestoneContext`、`milestoneGoal`、`milestoneDoneCriteria`、`recentProgress`、`milestoneEvidence`、`basisMaterialRefs`、`citations`、`materialId`、`segmentId` 等内部词；
+- 前端只展示中文 `message` / `notice` / `answer`，不展示 `code`、堆栈、服务器路径或模型原文。
+
+---
+
+## 24. 本地项目迁移契约
+
+### 24.1 迁移流程
+
+```text
+登录成功
+→ 检测浏览器 localStorage 旧项目
+→ 用户看到迁移说明并明确点击“确认迁移”
+→ 前端生成并持久化 migrationId
+→ POST /api/projects/migrate-local
+→ 成功：保存 idMap，标记 migrated，保留本地原始数据
+→ 失败：保留本地数据，允许用同一 migrationId 重试
+→ 重复点击：同一 migrationId 幂等，不创建第二个项目
+```
+
+硬性规则：
+
+1. 迁移前必须由用户明确确认；请求必须带 `userConfirmed: true` 和 `userConfirmedAt`；
+2. 迁移成功前，前端**不得**删除或覆盖 `scp.mvp.projects` / `scp.mvp.currentProjectId`；
+3. 迁移成功后，本地原始数据至少保留 7 天，或由用户手动清理；服务端永远不删除浏览器本地数据；
+4. 迁移失败可重试；失败不得留下半迁移项目；
+5. 重复迁移必须幂等；同一 `clientProjectId` 不产生第二个项目；
+6. 项目、阶段、任务、证据、进展、材料、草稿、疑问和聊天保持原有关系；
+7. 迁移时校验 `source.schemaVersion`；不合法或过期数据给中文提示。
+
+### 24.2 POST /api/projects/migrate-local
+
+> 迁移是唯一不携带 `projectId` / `projectRevision` 的 V3 写接口：目标项目尚不存在，版本由服务端在创建时初始化为 1。
+
+请求：
+
+```json
+{
+  "contractVersion": "3.0",
+  "requestId": "9c1f0a6b-2c4d-4e77-9a3f-7b5e8d1c2043",
+  "idempotencyKey": "migrate-01JBC9R7T3K8QW4M2N6P5X0ZYZ",
+  "migrationId": "mig_01JBC9R7T3K8QW4M2N6P5X0ZZ0",
+  "userConfirmed": true,
+  "userConfirmedAt": "2026-10-19T02:30:00.000Z",
+  "source": {
+    "schemaVersion": 3,
+    "clientProjectId": "prj_local_01JBC9R7T3K8QW4M2N6P5X0ZZ1",
+    "appVersion": "v2.2",
+    "exportedAt": "2026-10-19T02:25:00.000Z"
+  },
+  "localProject": {
+    "name": "面向海洋环境安全保障的极端风和浪事件的智能分析系统",
+    "short": "极端风浪",
+    "projectRevision": 12,
+    "profile": {
+      "goal": "构建极端风浪事件识别与预警的原型系统",
+      "expectedOutcome": "可交互原型 + 会议论文",
+      "memberNames": ["张同学", "李同学"],
+      "researchPeriod": "第 3 周至第 14 周",
+      "scope": "先做西北太平洋",
+      "outOfScope": "不做实时业务系统"
+    },
+    "milestones": [
+      {
+        "clientId": "ms_local_1",
+        "name": "数据获取与预处理",
+        "goal": "拿到可复现的样例数据并确认字段口径",
+        "doneCriteria": "样例数据可下载，字段说明与缺失率记录完整",
+        "dueAt": "2026-11-02T15:59:59.000Z",
+        "status": "active",
+        "orderIndex": 0
+      }
+    ],
+    "tasks": [
+      {
+        "clientId": "tsk_local_1",
+        "milestoneClientId": "ms_local_1",
+        "title": "跑通 ERA5 与浮标数据的下载链路",
+        "doneCriteria": "下载一段样例数据，并能用 Python 读出关键变量",
+        "status": "doing",
+        "createdAt": "2026-10-15T08:00:00.000Z",
+        "updatedAt": "2026-10-18T09:20:00.000Z"
+      }
+    ],
+    "evidence": [
+      {
+        "clientId": "evd_local_1",
+        "submissionId": "6e2b8c07-f1d3-490a-8c5e-2b7f0d3a9186",
+        "taskClientId": "tsk_local_1",
+        "milestoneClientId": "ms_local_1",
+        "didWhat": "下载了 2024 年 1 月的 ERA5 样例数据",
+        "foundWhat": "有效波高与风速字段完整，缺失率低于 1%",
+        "stillUnsure": "0.5 度分辨率是否满足公里级判断",
+        "attachmentName": null,
+        "createdAt": "2026-10-19T02:30:00.000Z"
+      }
+    ],
+    "progress": [
+      {
+        "clientId": "prg_local_1",
+        "summary": "完成样例数据下载，确认了 4 个关键字段和缺失率口径",
+        "milestoneClientId": "ms_local_1",
+        "taskClientId": "tsk_local_1",
+        "occurredAt": "2026-10-19T02:20:00.000Z"
+      }
+    ],
+    "doubts": [
+      {
+        "clientId": "dbt_local_1",
+        "text": "0.5 度分辨率是否满足公里级判断",
+        "status": "open",
+        "sourceEvidenceClientId": "evd_local_1",
+        "createdAt": "2026-10-19T02:30:00.000Z"
+      }
+    ],
+    "materials": [
+      {
+        "clientId": "mat_local_1",
+        "name": "实验手册.md",
+        "type": "md",
+        "size": 2048,
+        "encoding": "utf-8",
+        "status": "parsed",
+        "version": 1,
+        "createdAt": "2026-10-15T08:00:00.000Z",
+        "updatedAt": "2026-10-15T08:00:00.000Z",
+        "segments": [
+          {
+            "segmentId": "seg_0",
+            "index": 0,
+            "startLine": 1,
+            "endLine": 8,
+            "text": "# 实验手册\n本实验使用 ERA5 海浪场数据。"
+          }
+        ],
+        "understandingItems": [
+          {
+            "clientId": "cnd_local_1",
+            "clientItemId": "cnd_goal_0",
+            "kind": "goalCandidates",
+            "text": "使用 ERA5 海浪场数据复现极端风浪事件识别流程",
+            "sourceSegmentIds": ["seg_0"],
+            "status": "confirmed"
+          }
+        ]
+      }
+    ],
+    "chats": [
+      {
+        "clientId": "msg_local_1",
+        "role": "user",
+        "text": "我下一步应该做什么？"
+      }
+    ]
+  }
+}
+```
+
+字段说明：
+
+| 字段 | 类型 | 必填 | 约束 |
+| --- | --- | --- | --- |
+| `contractVersion` | string | 是 | `"3.0"` |
+| `requestId` | string | 是 | UUID v4 |
+| `idempotencyKey` | string | 是 | 8～64 可打印字符 |
+| `migrationId` | string | 是 | `mig_` 前缀，8～64；重试必须复用 |
+| `userConfirmed` | boolean | 是 | 必须为 `true` |
+| `userConfirmedAt` | string | 是 | 与服务端时间差 ≤ 30 分钟；未来时间 > 5 分钟拒绝 |
+| `source.schemaVersion` | number | 是 | 1～3；当前 `PROJECT_SCHEMA_VERSION = 3` |
+| `source.clientProjectId` | string | 是 | 本地项目 ID，用于去重 |
+| `source.appVersion` | string | 否 | 诊断用 |
+| `source.exportedAt` | string | 否 | 本地数据导出时间 |
+| `localProject` | object | 是 | 见 24.3 |
+
+### 24.3 `localProject` 结构与关系映射
+
+> `localProject` 是前端按本节 DTO **归一化后**生成的迁移载荷，不是直接上传原始 localStorage。24.3.1 给出与 `src/stores/persistence.ts` 实际字段的逐项映射；不得把 `ms[].t`、`materialRecords[].state`、`understandingBlocks[].content` 等实际字段名直接写成契约字段名。
+
+| 字段 | 类型 | 必填 | 映射 |
+| --- | --- | --- | --- |
+| `name` | string | 是 | 项目名称，1～120 字 |
+| `short` | string \| null | 是 | 项目短名/标签名，1～20 字；空则服务端截取；不是描述 |
+| `projectRevision` | number | 是 | 只写入 `migratedFromRevision`；新项目从 1 开始 |
+| `profile` | ProjectProfile | 是 | 字段同 13.1；缺失字段补 `null` |
+| `milestones` | array | 是 | `clientId`、`name`、`goal`、`doneCriteria`、`dueAt`、`status`、`orderIndex` |
+| `tasks` | array | 是 | `clientId`、`milestoneClientId`、`title`、`doneCriteria`、`status`、`createdAt`、`updatedAt` |
+| `evidence` | array | 是 | `clientId`、`submissionId`、`taskClientId`、`milestoneClientId`、`didWhat`、`foundWhat`、`stillUnsure`、`attachmentName`、`createdAt` |
+| `progress` | array | 否 | `clientId`、`summary`、`milestoneClientId`、`taskClientId`、`occurredAt`；缺省 `[]`；当前 localStorage 没有独立进展字段，不得伪造 |
+| `doubts` | array | 是 | `clientId`、`text`、`status`、`sourceEvidenceClientId`、`createdAt` |
+| `materials` | array | 是 | 见 24.4 |
+| `chats` | array | 是 | `clientId`、`role`、`text`、可选 `createdAt`、可选 `source` / `fallbackReason`；迁移到项目默认会话 |
+
+映射规则：
+
+1. 旧 `ms` 展示阶段与 `tasks[].milestone` 名称合并为阶段：规范化名称（去首尾空白、合并连续空白）后匹配；同名只建一个阶段；
+2. 旧任务没有 `milestoneId`，按名称匹配；任务有 `milestone` 但阶段列表中没有同名项时，创建一个 `source: "migration"`、`status: "planned"` 的阶段，保证任务不丢；这属于保留用户数据，不是模板注入；
+3. 旧项目完全没有阶段且任务没有 `milestone` 时，迁移结果必须为 0 个阶段；
+4. 旧 `steps`、`evidence`、`doubts` 若只是展示投影，忽略；以 `tasks`、`evidenceRecords`、`doubtRecords` 为准；
+5. 旧 `chat` 迁移为一个默认 `ChatSession`，按数组顺序保留；本地 `chat` 没有可靠时间戳，服务端按导入顺序补 `sequence` 与 `importedAt`；超过 500 条保留最近 500 条并返回 `CHAT_HISTORY_TRUNCATED` 警告；
+6. 旧 `materialRecords` / `materialSegments` / `understandingBlocks` 迁移到 Material / Segment / UnderstandingItem；确认状态原样保留，不得把 `pending` 提升为 `confirmed`；
+7. 旧 `projectRevision` 不继承；新项目 `projectRevision = 1`，`migratedFromRevision` 保存旧值；
+8. 所有服务端新 ID 由服务端生成；响应 `idMap` 用于更新本地引用。
+
+### 24.3.1 当前 localStorage 实际结构核对（2026-10-19）
+
+核对基准：
+
+- `src/types/platform.ts`：`PROJECT_SCHEMA_VERSION = 3`；
+- `src/stores/persistence.ts`：存储键 `scp.mvp.projects` / `scp.mvp.currentProjectId`，外层信封 `{ schemaVersion, projects }`；
+- `src/stores/workbench.ts`：材料草稿确认动作使用 `blockId`（本地 `UnderstandingBlock.id`），不是服务端 `itemId`。
+
+实际字段 → 迁移 DTO 映射：
+
+| 实际字段（localStorage） | 实际类型/取值 | 迁移 DTO | 规则 |
+| --- | --- | --- | --- |
+| `projectId` | string | `source.clientProjectId` | 用于去重；不直接作为云端 `projectId` |
+| `name` | string | `localProject.name` | 1～120 字 |
+| `short` | string | `localProject.short` | 1～20 字，项目短名/标签名；不是描述 |
+| `projectRevision` | number | `localProject.projectRevision` | 只写入 `migratedFromRevision`，新项目从 1 开始 |
+| `profile` | ProjectProfile | `localProject.profile` | 字段一一对应；缺失补 `null` |
+| `ms[]` | `{ t, s, p, sub }[]` | `localProject.milestones[]` | `t → name`；`done/cur/todo → completed/active/planned`；`goal` / `doneCriteria` / `dueAt` 在 `ms` 中不存在，迁移为 `null`；`p` 进度重算、`sub` 展示文案忽略；数组顺序 → `orderIndex` |
+| `tasks[]` | `Task[]` | `localProject.tasks[]` | `id → clientId`；`milestone`（名称）→ `milestoneClientId`；`doneCriteria` / `createdAt` / `updatedAt` 原样；`owner → assigneeUserId: null`；`suggestedOwner` / `why` / `draftKey` 为展示或本地幂等字段，不迁移 |
+| `evidenceRecords[]` | `Evidence[]` | `localProject.evidence[]` | `id → clientId`；`submissionId` 保留；`taskId → taskClientId`；`milestoneClientId` 由该任务当前 `milestone` 推导，无任务或未匹配时为 `null`；`author` 不迁移 |
+| `doubtRecords[]` | `Doubt[]` | `localProject.doubts[]` | `id → clientId`；`sourceEvidenceId → sourceEvidenceClientId`；`resolvedAt` 保留 |
+| `materialRecords[]` | `Material[]` | `localProject.materials[]` | `materialId → clientId`；`state → status`（`null → registered`）；`needsReupload` 是本地展示字段，不迁移；`version`、时间保留 |
+| `materialSegments[]` | `MaterialSegment[]` | `localProject.materials[].segments[]` | 用 `materialId + materialVersion` 归组；`segmentId/index/startLine/endLine/text` 原样；不再重复 `materialId/materialVersion` |
+| `understandingBlocks[]` | `UnderstandingBlock[]` | `localProject.materials[].understandingItems[]` | `id → clientId`；`itemId → clientItemId`；`kind` 原样（`goalCandidates` 等五值）；`content → text`；`originalContent → originalText`；`sources → sourceSegmentIds`；`status` 原样；**不得把 `pending`/`modified` 提升为 `confirmed`** |
+| `chat[]` | `{ who, text, me, source?, fallbackReason? }[]` | `localProject.chats[]` | `me: true → role: "user"`，`me: false → role: "assistant"`；`text` 原样；`who` 仅展示、不迁移；`source` / `fallbackReason` 保留；本地无 `createdAt`，按数组顺序补 `sequence` |
+| `progress`（无独立字段） | 当前 `Project` 没有 `progress` / `progressRecords` | `localProject.progress` | 缺省 `[]`；不得从证据或聊天猜测生成；只有未来导出显式提供时才迁移 |
+| `steps` / `evidence` / `doubts` | 兼容投影 | 不读取 | 由 `syncProjectView()` 重建；迁移以 `tasks` / `evidenceRecords` / `doubtRecords` 为准 |
+| `materials`（旧 `MaterialItem[]`） | 展示占位 | 不读取 | 以 `materialRecords` 为准；避免把“实验手册/数据集”占位标签当成真实材料 |
+| `group` / `members` / `updated` / `banner` / `papers` / `weekly` / `aiPapers` | 展示字段 | 不迁移 | 不属于 V3 领域模型；不得写入不存在的契约字段 |
+
+版本规则：
+
+1. `PROJECT_SCHEMA_VERSION = 3` 已核对；`source.schemaVersion` 取 1 / 2 / 3 时按当前迁移逻辑补齐；
+2. `schemaVersion` 缺失、为 0 或无法识别 → 409 `MIGRATION_DATA_OUTDATED`；
+3. `schemaVersion > 3` → 409 `MIGRATION_VERSION_UNSUPPORTED`；
+4. 迁移 DTO 中不得出现 `state`、`content`、`originalContent`、`ms`、`t`、`s`、`p`、`sub`、`materialRecords`、`understandingBlocks`、`chat`、`me`、`who` 等原始字段名；这些只出现在本映射表的左侧。
+
+### 24.4 材料迁移规则
+
+| 情形 | 处理 |
+| --- | --- |
+| `type` 为 `md` / `txt`，内容完整 | 正常迁移，保留分段、来源行号和确认状态 |
+| `type` 为 `csv` / `xlsx` / `pdf` / `docx` / `zip` 或未知 | 保留材料元数据，`status: "unsupported"`，不迁移正文，返回 `UNSUPPORTED_MATERIAL_SKIPPED` 警告 |
+| 材料仅登记、无正文 | `status: "registered"`，保留文件名 |
+| 分段文本超过 2,000 字 | 拒绝该材料并返回 `MATERIAL_INVALID_SKIPPED` 警告，不丢项目其他数据 |
+| 来源 `segmentId` 不存在 | 该理解条目置 `pending` 或丢弃，并返回 `UNDERSTANDING_SOURCE_MISSING` 警告 |
+| 单文件超过 1 MB | 保留元数据并标 `unsupported`，返回 `MATERIAL_TOO_LARGE_SKIPPED` 警告 |
+
+材料迁移 DTO 字段：
+
+- `materials[]`：`clientId`（本地 `materialId`）、`name`、`type`、`size`、`encoding`、`status`（本地 `state` 映射）、`version`、`createdAt`、`updatedAt`；
+- `materials[].segments[]`：`segmentId`、`index`、`startLine`、`endLine`、`text`；
+- `materials[].understandingItems[]`：`clientId`（本地 `UnderstandingBlock.id`）、`clientItemId`（本地 `itemId`）、`kind`（五值原样）、`text`（本地 `content`）、`sourceSegmentIds`（本地 `sources[].segmentId`）、`status`（原样）。
+
+迁移是**单事务**：除上述明确的“跳过并警告”外，任何结构错误都整单失败，不产生半迁移项目。
+
+### 24.5 成功响应与 idMap
+
+```json
+{
+  "contractVersion": "3.0",
+  "requestId": "9c1f0a6b-2c4d-4e77-9a3f-7b5e8d1c2043",
+  "projectId": "prj_01JBC9R7T3K8QW4M2N6P5X0ZZ2",
+  "projectRevision": 1,
+  "migrationId": "mig_01JBC9R7T3K8QW4M2N6P5X0ZZ0",
+  "status": "completed",
+  "replayed": false,
+  "deduplicated": false,
+  "appliedChanges": true,
+  "idMap": {
+    "milestones": {
+      "ms_local_1": "ms_01JBC9R7T3K8QW4M2N6P5X0ZZ3"
+    },
+    "tasks": {
+      "tsk_local_1": "tsk_01JBC9R7T3K8QW4M2N6P5X0ZZ4"
+    },
+    "evidence": {
+      "evd_local_1": "evd_01JBC9R7T3K8QW4M2N6P5X0ZZ5"
+    },
+    "progress": {
+      "prg_local_1": "prg_01JBC9R7T3K8QW4M2N6P5X0ZZ6"
+    },
+    "materials": {
+      "mat_local_1": "mat_01JBC9R7T3K8QW4M2N6P5X0ZZ7"
+    },
+    "understandingItems": {
+      "cnd_local_1": "cnd_01JBC9R7T3K8QW4M2N6P5X0ZZ8"
+    },
+    "doubts": {
+      "dbt_local_1": "dbt_01JBC9R7T3K8QW4M2N6P5X0ZZ9"
+    },
+    "chats": {
+      "msg_local_1": "msg_01JBC9R7T3K8QW4M2N6P5X0ZZA"
+    }
+  },
+  "counts": {
+    "milestones": 1,
+    "tasks": 1,
+    "evidence": 1,
+    "progress": 1,
+    "materials": 1,
+    "materialSegments": 1,
+    "understandingItems": 1,
+    "doubts": 1,
+    "chatMessages": 1
+  },
+  "warnings": [],
+  "importedAt": "2026-10-19T02:30:05.000Z"
+}
+```
+
+规则：
+
+- `projectRevision` 为 1；迁移不继承本地版本；
+- `idMap` 只包含实际迁移的实体；被跳过的材料不出现在 `materials`，但会出现在 `warnings`；
+- `warnings` 每项包含 `code`、中文 `message`、`count`；不含正文；
+- 成功前前端不得删除本地数据；成功后可保留本地数据至少 7 天。
+
+### 24.6 幂等、重复迁移与失败重试
+
+| 场景 | 行为 |
+| --- | --- |
+| 同一 `migrationId` + 相同请求体 | 200，`replayed: true`，返回首次 `idMap`，不重复创建 |
+| 同一 `migrationId` + 不同请求体 | 409 `IDEMPOTENCY_CONFLICT`，不写入 |
+| 同一 `(userId, clientProjectId)` + 不同 `migrationId` | 200，`deduplicated: true`，`appliedChanges: false`，返回已有 `projectId` 和 `idMap`；如内容不同，附 `LOCAL_CHANGES_NOT_APPLIED` 警告 |
+| 网络超时后重试 | 使用同一 `migrationId`；或调用 `GET /api/projects/migrations/{migrationId}` 查询状态 |
+| 服务端 5xx | 事务回滚，无半迁移；本地数据不动；可重试 |
+| 数据非法 | 400 `MIGRATION_INVALID_DATA`；本地数据不动；修正或导出后重试 |
+| 版本过高/过旧 | 409 `MIGRATION_VERSION_UNSUPPORTED` / `MIGRATION_DATA_OUTDATED`；给出中文提示 |
+
+`GET /api/projects/migrations/{migrationId}` 响应：
+
+```json
+{
+  "contractVersion": "3.0",
+  "migrationId": "mig_01JBC9R7T3K8QW4M2N6P5X0ZZ0",
+  "status": "completed",
+  "projectId": "prj_01JBC9R7T3K8QW4M2N6P5X0ZZ2",
+  "importedAt": "2026-10-19T02:30:05.000Z"
+}
+```
+
+未找到返回 404 `RESOURCE_NOT_FOUND`；该接口只查当前用户的迁移记录。
+
+### 24.7 数据校验与中文提示
+
+| 检查 | 失败码 | 中文提示 |
+| --- | --- | --- |
+| `userConfirmed !== true` | `MIGRATION_NOT_CONFIRMED` | 请先在页面上确认迁移，再继续 |
+| `userConfirmedAt` 超过 30 分钟 | `MIGRATION_CONFIRMATION_EXPIRED` | 迁移确认已过期，请重新确认后重试 |
+| `schemaVersion` 缺失 / 0 / 无法识别 | `MIGRATION_DATA_OUTDATED` | 本地数据版本过旧，无法自动迁移；请先导出备份，再联系管理员 |
+| `schemaVersion > 3` | `MIGRATION_VERSION_UNSUPPORTED` | 本地数据来自更高版本，请刷新页面或升级后再迁移 |
+| 缺项目名、clientId 重复、引用不存在 | `MIGRATION_INVALID_DATA` | 本地数据不完整或存在重复记录，迁移未执行；请导出备份后重试 |
+| 请求体超过 8 MB 或条目超上限 | `MIGRATION_TOO_LARGE` | 本地数据超过迁移上限，请先清理聊天或材料后重试 |
+| 同一键不同内容 | `IDEMPOTENCY_CONFLICT` | 重复请求的内容不一致，请刷新后重试 |
+| 未登录 | `UNAUTHORIZED` | 登录状态已失效，请重新登录 |
+
+上限：
+
+| 项 | 上限 |
+| --- | --- |
+| 请求体 | 8 MB |
+| 阶段 | 50 |
+| 任务 | 500 |
+| 证据 | 1,000 |
+| 进展 | 500 |
+| 材料 | 50 |
+| 单材料分段 | 200 |
+| 理解条目 | 500 |
+| 疑问 | 500 |
+| 聊天消息 | 500（超出保留最近 500 条并警告） |
+
+---
+
+## 25. 统一错误码与中文提示
+
+### 25.1 命名与使用规则
+
+1. `code` 使用大写下划线，稳定不变；前端只根据 `code` 做逻辑判断，不解析 `message`；
+2. `message` 是可直接展示给用户的中文；不得包含英文错误码、字段名、SQL、路径、堆栈、密钥、模型原文；
+3. 同一语义只用一个错误码，不新增同义码；
+4. 开发日志可以记录 `code`、`requestId`、`userId`、`projectId`、耗时和数量；不得记录密码、Cookie、邀请码、材料正文、聊天正文或模型原文；
+5. 跨用户访问统一 404，不返回 403 或“存在但无权访问”。
+
+### 25.2 错误码总表
+
+| code | HTTP | retryable | 触发条件 | 对外中文 message |
+| --- | --- | --- | --- | --- |
+| `INVALID_INPUT` | 400 | false | 缺字段、类型/长度/数量超限、未知 `promptVersion`、字段冲突 | 请求内容不合法：<第一条具体问题> |
+| `CONTRACT_VERSION_MISMATCH` | 400 | false | `contractVersion` 与接口族不匹配，或 `promptVersion` 与 `milestoneContext` 组合不成立 | 请求版本与接口不匹配，请刷新页面后重试 |
+| `UNAUTHORIZED` | 401 | false | 未登录、会话过期、会话被撤销 | 登录状态已失效，请重新登录 |
+| `AUTH_FAILED` | 401 | false | 账号不存在、密码错误、账号禁用 | 用户名或密码不正确 |
+| `REGISTER_REJECTED` | 409 | false | 重复注册、邀请码错误、账号不可用 | 注册未完成，请检查用户名、密码和邀请码 |
+| `FORBIDDEN_ORIGIN` | 403 | false | 写请求 Origin 缺失或不在白名单 | 请求来源不受信任 |
+| `RATE_LIMITED` | 429 | true | 登录/注册/写接口触发频率限制 | 尝试次数过多，请稍后再试 |
+| `PROJECT_NOT_FOUND` | 404 | false | 项目不存在或不属于当前用户 | 项目不存在或无权访问 |
+| `RESOURCE_NOT_FOUND` | 404 | false | 阶段/任务/证据/材料/进展/聊天不存在或不属于当前用户 | 请求的内容不存在或无权访问 |
+| `PROJECT_MISMATCH` | 409 | false | 同一用户下，实体属于另一个项目 | 请求内容与当前项目不匹配 |
+| `STALE_REVISION` | 409 | false | `projectRevision` 或实体 revision 落后 | 项目内容已更新，请刷新后重试 |
+| `IDEMPOTENCY_CONFLICT` | 409 | false | 同一幂等键对应不同请求体 | 重复请求的内容不一致，请刷新后重试 |
+| `INVALID_ORDER` | 400 | false | 排序列表遗漏、重复、包含归档阶段或不是全量 | 阶段顺序不完整，请刷新后重试 |
+| `MILESTONE_NAME_CONFLICT` | 409 | false | 同项目未归档阶段重名 | 同一项目中已有同名阶段 |
+| `MILESTONE_ARCHIVED` | 409 | false | 对归档阶段新增任务/证据或作为当前阶段 | 该阶段已归档，请先恢复 |
+| `MILESTONE_COMPLETED` | 409 | false | 未重开就向已完成阶段新增/移入任务 | 该阶段已完成，请先重新打开 |
+| `MILESTONE_NOT_EMPTY` | 409 | false | 尝试硬删除仍有任务/证据/进展的阶段 | 该阶段下仍有内容，不能直接删除，请改为归档 |
+| `INVALID_STATE_TRANSITION` | 409 | false | 状态机不允许的转换 | 当前状态不支持该操作 |
+| `TASK_ARCHIVED` | 409 | false | 对归档任务提交证据/进展/开始/完成 | 该任务已归档，请先恢复 |
+| `TASK_NOT_CLAIMABLE` | 409 | false | 旧客户端认领已完成任务 | 该任务已完成 |
+| `EVIDENCE_IMMUTABLE` | 409 | false | 尝试修改证据正文或删除证据 | 证据提交后不能修改正文 |
+| `CONFIRMATION_REQUIRED` | 400 | false | AI 候选创建阶段未带 `confirmedByUser: true` | 请先确认候选阶段，再创建 |
+| `CANDIDATE_EXPIRED` | 409 | false | 候选超过 30 分钟或不属于当前项目 | 候选阶段已过期，请重新生成 |
+| `UNCONFIRMED_MATERIAL` | 400 | false | v3 AI 请求包含未确认材料片段 | 所选材料尚未确认，不能作为 AI 依据 |
+| `MATERIAL_VERSION_OUTDATED` | 409 | false | v3 AI 请求引用的材料版本已过期 | 材料已更新，请重新确认后重试 |
+| `UNSUPPORTED_MATERIAL_TYPE` | 400 | false | 上传或迁移非 md/txt | 当前只支持 md、txt 文件；CSV、XLSX 将在下一批支持，PDF、DOCX、ZIP 将在后续版本支持 |
+| `MATERIAL_TOO_LARGE` | 400 | false | 材料超过 1 MB | 文件超过 1 MB 上限，请压缩或拆分后再上传 |
+| `EMPTY_MATERIAL` | 400 | false | 材料为空或仅空白 | 文件内容为空，请检查后再上传 |
+| `MATERIAL_ENCODING_UNREADABLE` | 400 | false | UTF-8 与 GBK 均无法解码 | 文件编码无法识别（已尝试 UTF-8 与 GBK），请另存为 UTF-8 后重试 |
+| `MATERIAL_PARSE_FAILED` | 400 | false | 分段失败 | 材料解析失败，请检查文件内容后重试 |
+| `MIGRATION_NOT_CONFIRMED` | 400 | false | 未带 `userConfirmed: true` | 请先在页面上确认迁移，再继续 |
+| `MIGRATION_CONFIRMATION_EXPIRED` | 400 | false | `userConfirmedAt` 超过 30 分钟 | 迁移确认已过期，请重新确认后重试 |
+| `MIGRATION_VERSION_UNSUPPORTED` | 409 | false | `schemaVersion > 3` | 本地数据来自更高版本，请刷新页面或升级后再迁移 |
+| `MIGRATION_DATA_OUTDATED` | 409 | false | `schemaVersion` 缺失/0/无法识别 | 本地数据版本过旧，无法自动迁移；请先导出备份，再联系管理员 |
+| `MIGRATION_INVALID_DATA` | 400 | false | 项目名缺失、clientId 重复、引用不存在 | 本地数据不完整或存在重复记录，迁移未执行；请导出备份后重试 |
+| `MIGRATION_TOO_LARGE` | 413 | false | 请求体超过 8 MB 或条目超上限 | 本地数据超过迁移上限，请先清理聊天或材料后重试 |
+| `INTERNAL` | 500 | true | 未预期异常；日志保留 requestId，响应不含堆栈 | 服务内部错误，请稍后重试 |
+| `MODEL_TIMEOUT` | 504 | true | 模型超时且兜底也失败 | 模型调用超时，请稍后重试 |
+| `INVALID_MODEL_OUTPUT` | 502 | true | 模型输出非法且兜底也失败 | 模型返回内容不合法，请稍后重试 |
+| `MODEL_UNAVAILABLE` | 503 | true | 上游故障且兜底也失败 | 模型服务暂不可用，请稍后重试 |
+| `MODEL_NOT_CONFIGURED` | 503 | false | 未配置 URL/Key/模型名且兜底也失败 | 服务端未配置模型密钥，暂时无法生成内容 |
+
+### 25.3 `retryable` 语义
+
+`retryable: true` 只表示“用户不改变输入，稍后重试可能成功”：
+
+- `RATE_LIMITED`：按 `retryAfterSeconds` 等待；
+- `INTERNAL`、`MODEL_TIMEOUT`、`INVALID_MODEL_OUTPUT`、`MODEL_UNAVAILABLE`：适配层最多自动重试 1 次；
+- `STALE_REVISION`、`IDEMPOTENCY_CONFLICT`、`CONTRACT_VERSION_MISMATCH`、`MIGRATION_*`、`AUTH_FAILED`、`REGISTER_REJECTED`：**不自动重试**；需要刷新、修正输入、升级客户端或重新确认；
+- 前端不得因为 `retryable: true` 无限重试；写操作重试必须复用同一 `idempotencyKey`。
+
+### 25.4 安全与隐私
+
+1. 认证错误不泄露账号是否存在；注册错误不区分账号冲突与邀请码错误；
+2. 错误响应不含密码、哈希、Cookie、邀请码、API Key、数据库连接串、服务器路径、堆栈、SQL；
+3. 材料/证据/聊天错误只回显类别与数量，不回显正文；
+4. 日志中的 `detail` 只记录类别、数量、字段名；模型原始输出不得写入日志或响应；
+5. 任何响应都不得包含 `ownerUserId` 之外的其他用户标识；跨用户请求返回 404。
+
+### 25.5 错误响应示例
+
+```json
+{
+  "contractVersion": "3.0",
+  "requestId": "1b7c9e40-6c2f-4f18-8d5a-0e2b7c4a9f31",
+  "projectId": null,
+  "code": "AUTH_FAILED",
+  "message": "用户名或密码不正确",
+  "retryable": false,
+  "retryAfterSeconds": null,
+  "currentProjectRevision": null,
+  "currentEntityRevision": null,
+  "details": null
+}
+```
+
+```json
+{
+  "contractVersion": "3.0",
+  "requestId": "9c1f0a6b-2c4d-4e77-9a3f-7b5e8d1c2043",
+  "projectId": null,
+  "code": "MIGRATION_DATA_OUTDATED",
+  "message": "本地数据版本过旧，无法自动迁移；请先导出备份，再联系管理员",
+  "retryable": false,
+  "retryAfterSeconds": null,
+  "currentProjectRevision": null,
+  "currentEntityRevision": null,
+  "details": null
+}
+```
+
+---
+
+## 26. 与现有 V2 的兼容方式
+
+### 26.1 不变的部分
+
+| 项 | 兼容策略 |
+| --- | --- |
+| V2 接口 | `/api/advisor/recommendations`、`/api/advisor/chat`、`/api/materials`、`/api/materials/understanding` 路径、字段、错误码、`contractVersion: "1.0"` 全部不变 |
+| 本地存储 | 继续使用 `scp.mvp.projects` / `scp.mvp.currentProjectId`；`PROJECT_SCHEMA_VERSION = 3` 不变 |
+| 空白项目 | 继续不注入模板阶段/任务/证据；V3 云端创建同样为空白 |
+| MD/TXT | 继续使用现有上传、解析、分段和确认流程；`materialId`、`version`、`segmentId` 语义不变 |
+| 建议/聊天兜底 | 继续使用服务端规则兜底 + 前端本地规则；v1/v2 请求行为不变 |
+| 旧项目数据 | 通过迁移接口导入；导入前本地数据不动 |
+
+### 26.2 字段映射
+
+| V2 本地字段 | V3 字段 | 说明 |
+| --- | --- | --- |
+| `projectId` | `projectId` | 迁移时重写并返回 `idMap` |
+| `name` / `short` | `name` / `short` | 直接映射；`short` 是 1～20 字短名/标签名，不是描述 |
+| `projectRevision` | `migratedFromRevision` | 新项目版本从 1 开始 |
+| `profile` | `profile` | 字段一致 |
+| `ms[].t` / `ms[].s` | `milestones[].name` / `status` | `done/cur/todo → completed/active/planned`；`ms[].p` 重算、`ms[].sub` 忽略 |
+| `tasks[].milestone`（名称） | `tasks[].milestoneId` | 按规范化名称匹配；缺失时创建迁移阶段 |
+| `tasks[].id` | `tasks[].taskId` | 迁移时重写 |
+| `evidenceRecords[].id` | `evidence.evidenceId` | 迁移时重写 |
+| `evidenceRecords[].submissionId` | `evidence.submissionId` | 保留，继续作为幂等键 |
+| `doubtRecords` | `doubts` | 状态与来源证据保留 |
+| `materialRecords` | `materials` | 仅 md/txt 正文迁移；`state` → `status`；`needsReupload` 忽略；其他格式保留元数据并标 `unsupported` |
+| `materialSegments` | `materials[].segments` | 按 `materialId + materialVersion` 归组；`segmentId` 在材料版本内保留 |
+| `understandingBlocks` | `materials[].understandingItems` | `kind` 五值原样；`content → text`、`originalContent → originalText`、`id → clientId`；`pending`/`modified` 不得升级为 `confirmed` |
+| `chat` | `chats` / ChatMessage | `me → role`、`text → content`、`who` 忽略；本地无 `createdAt`，按数组顺序补 `sequence` |
+
+> 完整、逐字段的核对表见 24.3.1；该表是迁移实现的唯一对照基准。
+
+### 26.3 过渡期规则
+
+1. V3 后端未上线前，前端继续以本地模式运行，不伪造云端成功；
+2. 登录成功后，前端可以同时持有本地项目和云端项目；必须用 `projectId` + `projectRevision` 区分，禁止把云端响应写入本地项目；
+3. 迁移完成后，云端项目成为唯一可写来源；本地旧数据只读保留至少 7 天；
+4. V2 旧页面仍可调用 V2 接口；V3 页面调用 V3 接口，二者不得共享同一份未加版本的 DTO；
+5. 空白项目、未确认材料、AI 候选三条门禁在本地模式和云端模式一致；
+6. 不支持 CSV/XLSX/PDF/DOCX/ZIP 的提示在两种模式下一致，不得静默忽略；
+7. 收到 400 `CONTRACT_VERSION_MISMATCH` 时不得降级 `contractVersion`、不得丢弃 `milestoneContext` 重发旧提示词；只能提示用户刷新或升级客户端。
+
+### 26.4 明确不实现
+
+本 PR 不实现，也不在本契约中承诺：
+
+- 教师端、教师批注、班级总览；
+- 多人实时协作、成员邀请、角色管理；
+- CSV/XLSX/PDF/DOCX/ZIP 解析；
+- 邮箱、短信、社交登录、密码找回；
+- 生产部署、Nginx、Cloudflare 隧道、18080 或服务器文件修改；
+- 完整数据库 schema 与后端路由实现。
+
+---
+
+## 27. 验证与待决策
+
+### 27.1 本 PR 的验证
+
+```text
+git diff --check
+所有 fenced JSON 示例逐块 JSON.parse
+npm.cmd --prefix server run build（无代码改动时用于确认基线）
+git status / git diff --name-only 检查是否误改 server/src、src、部署配置或用户本地资料
+```
+
+### 27.2 仍需项目负责人决策的冲突
+
+| # | 冲突/问题 | 当前冻结选择 | 影响 |
+| --- | --- | --- | --- |
+| 1 | 阶段 `planned → active` 是否自动 | 必须用户显式激活；开始任务不自动改阶段状态 | 影响前端阶段卡片交互与“当前阶段”推导 |
+| 2 | 会话有效期 | 7 天绝对过期，不滑动 | 影响 `Max-Age` 与前端重新登录频率 |
+| 3 | 项目软删除保留期 | 30 天，期间可恢复 | 影响清理任务与用户提示 |
+| 4 | 聊天是否计入 `projectRevision` | 不计入，只维护 `chatRevision` | 影响 AI 响应过期判断与聊天写入并发 |
+| 5 | V3 材料上传/重新解析持久化接口 | 本 PR 已冻结五个草稿确认接口；上传仍复用 V2 `POST /api/materials`，V3 材料持久化写入接口留给材料 PR | 影响 v3 AI 上下文能否端到端联调 |
+| 6 | 迁移冲突策略 | 同一 `clientProjectId` 只迁移一次，不覆盖云端 | 影响“本地比云端新”时的用户选择 |
+| 7 | 邀请码发放与轮换 | 由环境变量哈希配置，本 PR 不定义管理后台 | 影响注册可用性与运维流程 |
+
+### 27.3 PR1 完成定义
+
+- 领域模型、关系、状态机、删除/归档规则已冻结；
+- 账号、项目、阶段、任务、证据、进展、时间线、候选、迁移接口字段已冻结；
+- 幂等、版本、权限、过期响应和错误码已冻结；
+- 所有 JSON 示例可解析；
+- 未修改后端/前端实现，未部署，未改生产配置。
+
+---
+
+## 28. 变更记录
 
 | 版本 | 日期 | 变更 | 作者 |
 | --- | --- | --- | --- |
@@ -1571,3 +3781,5 @@ model 响应：
 | v2.0 | 2026-10-12 | M1 冻结：新增项目基本信息（第 13 节）、材料元数据 / 分段 / 理解草稿（第 14 节）、`POST /api/materials` 与 `POST /api/materials/understanding`（第 15 节）、材料错误码（第 16 节）、建议与聊天的已确认材料接入与 `promptVersion` 取值（第 17 节）、mock JSON（第 18 节）；`contractVersion` 仍为 `"1.0"` | 姜厚禄（后端） |
 | v2.1 | 2026-10-12 | 补充 `segmentId` 唯一性（重复返回 400 `INVALID_INPUT`）与日志卫生边界（只记类别与数量，不记材料正文、模型原始文本与原始引用编号）；接口字段与 `contractVersion` 不变 | 姜厚禄（后端） |
 | v2.2 | 2026-10-14 | 澄清边界（不改字段）：新增 14.6「重新生成草稿与确认继承」，明确 `itemId` 只在单次响应内唯一、已确认继承需候选身份 + 文案 + 材料版本 + 规范化来源四项一致、确认集合变化才递增 `projectRevision`；同一时间确认空白项目语义与材料入口口径 | 集成修复（姜厚禄授权） |
+| v3.0 | 2026-10-19 | PR1 冻结 V3/V4：新增领域模型文档（第 20 节入口）、账号契约（第 21 节）、项目/阶段/任务/证据/进展/时间线（第 22 节）、AI 阶段上下文与阶段候选（第 23 节）、本地迁移（第 24 节）、统一错误码（第 25 节）、V2 兼容方式（第 26 节）；V3 新接口 `contractVersion = "3.0"`，V2 接口保持 `"1.0"`；本 PR 不实现后端、不修改前端、不部署 | 姜厚禄（后端） |
+| v3.1 | 2026-10-19 | PR1 最终收尾：明确 `contractVersion` / `promptVersion` 组合并禁止静默降级；补充 Session 与材料草稿五动作、Milestone/Task 状态机、Cookie/CORS/CSRF 约定；按当前 `PROJECT_SCHEMA_VERSION = 3` 与 localStorage 实际字段修正迁移映射；澄清 `Project.short` 语义 | 姜厚禄（后端） |
