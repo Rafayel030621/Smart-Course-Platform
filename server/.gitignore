@@ -1,0 +1,5 @@
+# 本地数据库与 WAL 文件：不提交到 git
+data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal

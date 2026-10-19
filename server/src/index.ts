@@ -18,6 +18,8 @@ import {
   createMaterialsUnderstandingHandler,
 } from './routes/materials.js'
 import { createMaterialsService, type MaterialsService } from './materials/understanding.js'
+import { handleV3Request } from './v3/router.js'
+import { createV3Runtime, type V3Runtime, type V3RuntimeOptions } from './v3/runtime.js'
 
 /**
  * HTTP 服务入口
@@ -43,6 +45,10 @@ export interface AppDependencies {
   /** 覆盖材料服务（v2 / M2-A），测试同理 */
   materialsService?: MaterialsService
   logger?: AdvisorLogger
+  /** V3/V4 数据库、CORS 与邀请码配置；不传时使用默认路径与环境变量 */
+  v3?: V3RuntimeOptions
+  /** 直接注入 V3 运行时（测试用，便于预置数据库） */
+  v3Runtime?: V3Runtime
 }
 
 const MOCK_PROVIDER_MODES: readonly string[] = ['ok', 'empty', 'invalid', 'throw', 'not-configured', 'slow']
@@ -129,7 +135,9 @@ export function createApp(serverConfig: ServerConfig = config, deps: AppDependen
     logger,
   })
 
-  return createServer((req, res) => {
+  const v3Runtime = deps.v3Runtime ?? createV3Runtime(deps.v3 ?? {})
+
+  const server = createServer((req, res) => {
     if (handleApiCors(req, res)) return
 
     // 同步路由
@@ -142,6 +150,7 @@ export function createApp(serverConfig: ServerConfig = config, deps: AppDependen
         if (await handleAdvisorChat(req, res)) return
         if (await handleMaterials(req, res)) return
         if (await handleMaterialsUnderstanding(req, res)) return
+        if (await handleV3Request(req, res, v3Runtime)) return
         sendJson(res, 404, { status: 'error', message: '接口不存在' })
       })
       .catch((error: unknown) => {
@@ -155,6 +164,9 @@ export function createApp(serverConfig: ServerConfig = config, deps: AppDependen
         }
       })
   })
+
+  server.on('close', () => v3Runtime.close())
+  return server
 }
 
 function start(): void {
