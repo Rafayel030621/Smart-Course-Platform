@@ -2,7 +2,7 @@
   "name": "course-platform-server",
   "version": "0.1.0",
   "private": true,
-  "description": "智慧课程平台后端服务：GET /health、POST /api/advisor/recommendations、POST /api/advisor/chat、POST /api/materials、POST /api/materials/understanding",
+  "description": "智慧课程平台后端服务：V2 AI/材料接口与 V3/V4 账号、项目、阶段、任务、证据、进展、材料草稿确认和本地迁移接口",
   "type": "module",
   "engines": {
     "node": ">=20.19"
@@ -15,8 +15,13 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.20.3",
     "tsx": "^4.23.15",
     "typescript": "^6.0.3"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.2",
+    "better-sqlite3": "^12.4.1"
   }
 }

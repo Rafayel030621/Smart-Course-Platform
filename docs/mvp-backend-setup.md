@@ -26,7 +26,7 @@ cd D:\智慧课程平台\server
 npm install
 ```
 
-后端**没有任何运行时依赖**（只用 Node 内置模块）。`devDependencies` 只有三个：`typescript`、`@types/node`、`tsx`（仅 `npm run dev` 用）。
+V2 只使用 Node 内置模块；V3/V4 新增运行时依赖 `bcryptjs` 和原生模块 `better-sqlite3`。生产部署不能只上传 `dist`，也不能复制 Windows 的 `node_modules`；SQLite 路径、原生依赖、迁移触发时机、WAL 备份与回滚见 `docs/deployment/backend-sqlite.md`。
 
 ## 3. 编译与启动
 

@@ -1,6 +1,6 @@
 # 智慧课程平台 · 前后端接口契约
 
-> 文档修订：v3.2（补充 `undoDraftItem` 与 `confirmAllDraft` 的归档/幂等确定规则；新接口 `contractVersion = "3.0"`；V2 接口仍为 `"1.0"`）
+> 文档修订：v3.3（补充材料理解条目的有效来源校验：无真实片段的条目不能确认；新增 `DRAFT_SOURCE_MISSING`；新接口 `contractVersion = "3.0"`；V2 接口仍为 `"1.0"`）
 > 编制日期：2026-09-25（v2.0：2026-10-12；v3.0：2026-10-19，PR1 冻结 V3/V4 账号、阶段、进展、AI 上下文与迁移）
 > owner：负责人（后端）
 > 地位：**本文件是前后端唯一契约。** 四名成员不得自行新增字段或创建第二套 DTO。
@@ -1722,8 +1722,8 @@ model 响应：
 
 ### 20.6 幂等、并发与过期
 
-1. 幂等键作用域 `(userId, idempotencyKey)`，保留 24 小时；同一键 + 相同请求体返回首次响应并置 `replayed: true`，不递增版本；
-2. 同一键 + 不同请求体返回 409 `IDEMPOTENCY_CONFLICT`，不写入任何数据；
+1. 幂等键作用域 `(userId, idempotencyKey)`，保留 24 小时；请求指纹必须绑定规范化 HTTP 方法、服务端操作类别、资源目标（如 `projectId` / `projectId/entityId`）和有效请求体；同一键 + 完全相同的操作/资源/请求体返回首次响应并置 `replayed: true`，不递增版本；
+2. 同一键被用于不同操作、不同资源或不同请求体返回 409 `IDEMPOTENCY_CONFLICT`，不写入任何数据；密码、邀请码等敏感字段不进入快速哈希指纹，由业务层用 bcrypt/常量时间比较单独验证；
 3. 幂等查询先于版本校验；重放响应可能带旧版本号，客户端必须按 20.7 丢弃；
 4. `projectRevision` 不匹配返回 409 `STALE_REVISION`，响应带 `currentProjectRevision`，不执行部分写入；
 5. `expectedRevision` 不匹配返回 409 `STALE_REVISION`，响应带 `currentEntityRevision`；
@@ -1897,16 +1897,21 @@ await fetch(`${API_BASE}/api/projects`, {
     "createdAt": "2026-10-19T02:30:00.000Z",
     "updatedAt": "2026-10-19T02:30:00.000Z"
   },
-  "sessionExpiresAt": "2026-10-26T02:30:00.000Z"
+  "sessionExpiresAt": "2026-10-26T02:30:00.000Z",
+  "replayed": false
 }
 ```
+
+首次注册响应丢失后的恢复响应额外包含 `"replayed": true`、`"recovered": true`；首次响应为 `"replayed": false`。
 
 重复注册与邀请码错误：
 
 - 统一返回 409 `REGISTER_REJECTED`，文案固定为“注册未完成，请检查用户名、密码和邀请码”；
 - 不区分“账号已存在”“邀请码错误”“账号被禁用”；
 - 不覆盖已有账号，不返回已有用户信息；
-- 重复使用同一 `idempotencyKey` + 相同请求体：返回首次响应，不重复创建；不同请求体返回 409 `IDEMPOTENCY_CONFLICT`。
+- **响应丢失恢复**：重复使用同一 `idempotencyKey` + 相同非敏感请求内容（账号、昵称）时，服务端必须重新校验密码（bcrypt）和邀请码；验证通过返回 200 + 新 `Set-Cookie`，并标记 `replayed: true`、`recovered: true`；密码或邀请码不匹配仍返回 409 `REGISTER_REJECTED`，不得仅凭 `account + idempotencyKey` 签发会话；
+- 同一 `idempotencyKey` 但昵称等非敏感内容不同：409 `IDEMPOTENCY_CONFLICT`；
+- 使用新 `idempotencyKey` 重复注册：409 `REGISTER_REJECTED`。
 
 ### 21.4 POST /api/auth/login
 
@@ -1927,8 +1932,10 @@ await fetch(`${API_BASE}/api/projects`, {
 
 - 账号不存在、密码错误、账号禁用统一 401 `AUTH_FAILED`，文案“用户名或密码不正确”；
 - 不返回“账号不存在”“密码错误”“剩余尝试次数”等可枚举信息；
-- 连续失败按 IP + 账号限流，超限 429 `RATE_LIMITED`，`retryAfterSeconds` 为正整数；
-- 登录请求不要求 `idempotencyKey`；每次成功登录都生成新会话。
+- 按 IP + 账号限流，超限 429 `RATE_LIMITED`，`retryAfterSeconds` 为正整数；
+- **限流预算必须在 bcrypt 之前预占**：并发请求共享同一窗口计数，不能全部进入密码比较；默认账号 5 次 / IP 50 次每 15 分钟，超限请求直接 429；成功登录只清账号预算，不清 IP 预算；
+- 客户端地址默认取 TCP socket 地址，**不信任任意 `X-Forwarded-For`**；只有显式配置 `SCP_TRUST_PROXY_HOPS=N`（表示前面有 N 层可信反代）时，才从 XFF 右侧取第 N 个合法 IP；
+- 登录请求不要求 `idempotencyKey`；每次成功登录都生成新会话；旧会话撤销与新会话创建必须在同一事务，失败时整体回滚。
 
 ### 21.5 POST /api/auth/logout
 
@@ -2340,9 +2347,9 @@ AI 候选确认规则见 23.7；**服务端不得因“项目为空”自动创�
 
 | 当前状态 | `activate` | `complete` | `reopen` | `archive` | `restore` |
 | --- | --- | --- | --- | --- | --- |
-| `planned` | `active` | `completed`（允许直接完成） | 不合法 | `archived` | 不合法 |
-| `active` | `active`（幂等） | `completed` | 不合法 | `archived` | 不合法 |
-| `completed` | 不合法 | `completed`（幂等） | `active`，清 `completedAt` | `archived` | 不合法 |
+| `planned` | `active` | `completed`（允许直接完成） | 不合法 | `archived` | `no-op`（非归档） |
+| `active` | `active`（幂等） | `completed` | `no-op`（幂等，不递增） | `archived` | `no-op`（非归档） |
+| `completed` | 不合法 | `completed`（幂等） | `active`，清 `completedAt` | `archived` | `no-op`（非归档） |
 | `archived` | 不合法 | 不合法 | 不合法 | 幂等 | `archivedFromStatus` |
 
 必须明确：
@@ -2351,7 +2358,9 @@ AI 候选确认规则见 23.7；**服务端不得因“项目为空”自动创�
 2. `completed → active` 是唯一 reopen 路径；任务状态不变，进度重新计算；
 3. 归档记录 `archivedFromStatus`；恢复回到该状态，不重置 revision；
 4. 归档阶段新增任务/证据返回 409 `MILESTONE_ARCHIVED`；必须先 `restore`；
-5. `active → planned`、`completed → planned`、`archived` 直接 `complete` 返回 409 `INVALID_STATE_TRANSITION`。
+5. `active → planned`、`completed → planned`、`archived` 直接 `complete` 返回 409 `INVALID_STATE_TRANSITION`；
+6. `active` 再 `reopen`、非归档阶段 `restore` 为幂等 no-op：返回当前状态，`changed: false`，不递增实体 revision 或 `projectRevision`；`planned`/`archived` 不能通过 `reopen` 跳过其他转换；
+7. `restore` 恢复出的名称若与当前未归档阶段重名，返回 409 `MILESTONE_NAME_CONFLICT`；整个事务回滚，阶段保持归档、版本不变，也不写入成功幂等记录；用户可先给现有同名阶段改名再恢复。
 
 ### 22.3 任务（Task）接口
 
@@ -2513,6 +2522,7 @@ AI 候选确认规则见 23.7；**服务端不得因“项目为空”自动创�
 规则：
 
 - 如果同时传 `milestoneId` 和 `taskId`，任务的当前阶段必须等于 `milestoneId`，否则 400 `INVALID_INPUT`（字段级冲突，不执行写入）；
+- 任务已归属阶段时，`milestoneId` 缺失或 `null` **不能绕过归档限制**：服务端以数据库中的任务阶段为准；有效阶段已归档返回 409 `MILESTONE_ARCHIVED`；显式传入不同阶段返回 400 `INVALID_INPUT`；拒绝时不得写入进展或递增版本；
 - 提交进展**不改变任务状态**；完成任务必须调用任务完成动作；
 - 成功返回 `data.progress` 与 `data.milestoneStats`（可空）；
 - 进展只追加；更正通过 `POST /api/projects/{projectId}/progress/{progressId}/supersede` 创建新记录，旧记录置 `superseded`，正文保留；
@@ -2552,7 +2562,7 @@ AI 候选确认规则见 23.7；**服务端不得因“项目为空”自动创�
 | --- | --- | --- | --- |
 | `submissionId` | string | 否 | 8～64 可打印字符；不传由服务端生成；同项目内唯一 |
 | `taskId` | string \| null | 是 | 同项目；归档任务拒绝 |
-| `milestoneId` | string \| null | 是 | 同项目；归档阶段拒绝；与任务当前阶段可以不同（历史快照） |
+| `milestoneId` | string \| null | 是 | 同项目；归档阶段拒绝；任务已归属阶段时必须与任务当前阶段一致（缺失/`null` 按任务阶段处理，不同阶段 400 `INVALID_INPUT`） |
 | `didWhat` | string | 是 | 1～300 字 |
 | `foundWhat` | string \| null | 是 | ≤ 500 字 |
 | `stillUnsure` | string \| null | 是 | ≤ 500 字；非空时创建疑问 |
@@ -2609,9 +2619,10 @@ AI 候选确认规则见 23.7；**服务端不得因“项目为空”自动创�
 规则：
 
 - 证据正文不可修改；`stillUnsure` 非空自动创建一条 `Doubt`，重复 `submissionId` 不重复创建；
+- 任务已归属阶段时，`milestoneId` 缺失或 `null` 不能绕过归档限制：服务端以数据库中的任务阶段为准，有效阶段归档返回 409 `MILESTONE_ARCHIVED`；显式传入不同阶段返回 400 `INVALID_INPUT`；拒绝时不得写入证据、疑问或改变任务状态；
 - `completeTask: true` 时在同一事务中把任务置 `done`、写 `completedAt`、重算阶段进度、创建证据与疑问、`projectRevision` 只 +1；
 - `completeTask` 对 `done` 任务幂等；对归档任务返回 `TASK_ARCHIVED`；
-- 证据不因阶段归档而删除；`milestoneNameSnapshot` 固定为提交时名称；
+- 证据不因阶段归档而删除；`milestoneNameSnapshot` 固定为提交时名称，任务后续移动阶段不静默改写历史快照；
 - 不提供证据删除接口。
 
 #### POST /api/projects/{projectId}/evidence/{evidenceId}/links
@@ -2635,8 +2646,9 @@ AI 候选确认规则见 23.7；**服务端不得因“项目为空”自动创�
 
 - `taskId` / `milestoneId` 可为 `null`，表示解除关联；
 - 两者必须同项目；归档任务/阶段拒绝；
+- 任务已归属阶段时，`milestoneId` 缺失/`null` 按任务阶段处理；显式不同阶段返回 400 `INVALID_INPUT`；有效阶段归档返回 409 `MILESTONE_ARCHIVED`，拒绝时不修改关联或版本；
 - 更新证据关联使证据 `revision + 1`、`projectRevision + 1`；
-- 阶段名称变化时同时更新 `milestoneNameSnapshot`；
+- 仅当本次显式改变关联阶段时更新 `milestoneNameSnapshot`；之后任务移动阶段不得静默改写历史快照；
 - 重复设置相同关联幂等，不递增版本。
 
 #### GET /api/projects/{projectId}/evidence
@@ -2762,6 +2774,9 @@ AI 候选确认规则见 23.7；**服务端不得因“项目为空”自动创�
 - `editDraftItem` 修改已确认条目时，必须立即清空 `confirmedAt` / `confirmedByUserId`，该条从 AI 可信上下文移除，直到再次确认；
 - `removeDraftItem` 只归档，不删除来源片段；同一 `itemId` 不能通过 `confirmAllDraft` 被恢复；
 - `undoDraftItem` 只撤销确认，不是删除；`pending` / `modified` 条目调用它是无操作；
+- **确认必须有可验证来源**：单条确认和整份确认在写入前，必须按条目的 `materialId + materialVersion` 查询 `material_segments`，至少解析到一个真实存在且 `text.trim().length > 0` 的 `segmentId`；空字符串、普通空格、Tab、换行、回车、全角空格等纯空白正文都不算有效来源；`sources_json` 中的材料 ID、版本、行号等元数据不可信，不能替代数据库校验；
+- 没有有效来源时返回 409 `DRAFT_SOURCE_MISSING`，不得把条目变为 `confirmed`；学生点击确认不能补足缺失来源；无来源手工事实不属于材料理解条目；
+- 已 `confirmed` 且来源有效的历史条目再次单条确认仍按幂等返回 `changed: false`；已 `confirmed` 但无有效来源的条目也返回 409 `DRAFT_SOURCE_MISSING`，不得返回成功；整份确认会校验所有提交条目，任一条无有效来源则整单失败；
 - `confirmAllDraft` 的 `items` 必须覆盖当前版本全部未归档条目，遗漏返回 400 `INVALID_INPUT`；任一条目 revision 不匹配返回 409 `STALE_REVISION`，整单不写入；
 - `confirmAllDraft` 只把 `pending` / `modified` 改为 `confirmed`；已确认条目跳过，`skippedCount` 计数；响应 `items` 返回本次提交的全部条目最终状态，`confirmedCount` 只统计本次实际变更的条目。
 
@@ -2785,10 +2800,10 @@ AI 候选确认规则见 23.7；**服务端不得因“项目为空”自动创�
 
 1. `items` 必须覆盖当前材料版本的全部未归档条目，恰好一次；遗漏、重复或未知 `itemId` 返回 400 `INVALID_INPUT` 或 404 `RESOURCE_NOT_FOUND`；
 2. `items` **不能包含任何 `archived` 条目**；只要发现任意一条 archived，整个请求返回 409 `DRAFT_ITEM_ARCHIVED`（archived 检查先于 revision 校验），不得部分成功，也不得把 archived 恢复为 `pending` 或 `confirmed`；
-3. 所有条目先校验 `materialId`、`materialVersion`、`itemId` 与 `expectedRevision`；任一不匹配返回 404 / 409 `MATERIAL_VERSION_OUTDATED` / 409 `STALE_REVISION`，**所有校验通过后才允许进入单事务写入**；
+3. 所有条目先校验 `materialId`、`materialVersion`、`itemId` 与 `expectedRevision`；任一不匹配返回 404 / 409 `MATERIAL_VERSION_OUTDATED` / 409 `STALE_REVISION`；随后逐条校验真实来源，任一条目没有有效来源返回 409 `DRAFT_SOURCE_MISSING`；**所有校验通过后才允许进入单事务写入**；
 4. 事务内只把 `pending` / `modified` 改为 `confirmed`，写 `confirmedAt` / `confirmedByUserId`；已确认条目跳过；
 5. 任一条目状态变化时 `revision +1`；整次成功 `projectRevision` **只 +1 一次**；
-6. 失败（包括 archived、版本冲突、revision 冲突、未知条目）时 `projectRevision` **不递增**，且不得出现部分写入；
+6. 失败（包括 archived、版本冲突、revision 冲突、未知条目、无有效来源）时 `projectRevision` **不递增**，且不得出现部分写入；其他条目的状态、确认人、确认时间、条目 revision 和成功幂等记录均保持不变；
 7. 全部条目已确认时返回 200 `changed: false`，`projectRevision` 不变；
 8. 已删除条目只能保持 archived；旧前端列表重新提交 archived `itemId` 时必须整单拒绝，不能因为重新提交而复活；
 9. 同一 `idempotencyKey` + 相同请求体重放返回首次响应；不同请求体返回 409 `IDEMPOTENCY_CONFLICT`。
@@ -2895,6 +2910,7 @@ AI 候选确认规则见 23.7；**服务端不得因“项目为空”自动创�
 | 条目版本/项目版本过期 | `STALE_REVISION` | 409 | 内容已更新，请刷新后重试 |
 | 条目不存在或不属于该材料 | `RESOURCE_NOT_FOUND` | 404 | 这条理解不存在或已失效 |
 | 条目已归档 / 整份确认包含 archived | `DRAFT_ITEM_ARCHIVED` | 409 | 这条理解已移除，不能恢复或再次确认，请重新生成 |
+| 条目没有可验证的材料来源 | `DRAFT_SOURCE_MISSING` | 409 | 这条理解没有可验证的材料来源，不能确认，请重新生成理解草稿 |
 | 文本为空或超长 | `INVALID_INPUT` | 400 | 理解内容需为 1～300 字 |
 | 整份确认遗漏条目 | `INVALID_INPUT` | 400 | 整份确认需要包含当前版本的全部理解条目 |
 | 同键不同内容 | `IDEMPOTENCY_CONFLICT` | 409 | 重复请求的内容不一致，请刷新后重试 |
@@ -3495,14 +3511,19 @@ v3 规则：
 | `type` 为 `csv` / `xlsx` / `pdf` / `docx` / `zip` 或未知 | 保留材料元数据，`status: "unsupported"`，不迁移正文，返回 `UNSUPPORTED_MATERIAL_SKIPPED` 警告 |
 | 材料仅登记、无正文 | `status: "registered"`，保留文件名 |
 | 分段文本超过 2,000 字 | 拒绝该材料并返回 `MATERIAL_INVALID_SKIPPED` 警告，不丢项目其他数据 |
-| 来源 `segmentId` 不存在 | 该理解条目置 `pending` 或丢弃，并返回 `UNDERSTANDING_SOURCE_MISSING` 警告 |
+| 来源数组为空 / 全部 `segmentId` 不存在 / 全部片段正文 `trim` 后为空 | 保留正文，状态降为 `pending`（`archived` 保持归档），返回 `UNDERSTANDING_SOURCE_MISSING` 警告，不能保留 `confirmed` |
+| 部分 `segmentId` 不存在或正文为纯空白 | 移除失效来源；剩余至少一个有效来源时保留原状态 |
+
+材料片段正文必须原样写入，不得为了来源校验改写正文；校验只读取数据库文本并做 `text.trim().length > 0` 判断。
 | 单文件超过 1 MB | 保留元数据并标 `unsupported`，返回 `MATERIAL_TOO_LARGE_SKIPPED` 警告 |
 
 材料迁移 DTO 字段：
 
 - `materials[]`：`clientId`（本地 `materialId`）、`name`、`type`、`size`、`encoding`、`status`（本地 `state` 映射）、`version`、`createdAt`、`updatedAt`；
 - `materials[].segments[]`：`segmentId`、`index`、`startLine`、`endLine`、`text`；
-- `materials[].understandingItems[]`：`clientId`（本地 `UnderstandingBlock.id`）、`clientItemId`（本地 `itemId`）、`kind`（五值原样）、`text`（本地 `content`）、`sourceSegmentIds`（本地 `sources[].segmentId`）、`status`（原样）。
+- `materials[].understandingItems[]`：`clientId`（本地 `UnderstandingBlock.id`）、`clientItemId`（本地 `itemId`）、`kind`（五值原样）、`text`（本地 `content`）、`originalText`（本地 `originalContent`）、`sourceSegmentIds`（本地 `sources[].segmentId`）、`status`（原样）；
+- `originalText` 缺失（旧数据）时，服务端保留 `text`、返回 `UNDERSTANDING_ORIGINAL_TEXT_MISSING` 警告并把该条置 `pending`，不得假装原文已完整保留；`archived` 仍保持 `archived`；
+- 同时提供 `text` 与 `originalText` 时分别写入；已修改后确认的条目迁移后 `undo` 应回到 `modified`，未修改条目应回到 `pending`。
 
 迁移是**单事务**：除上述明确的“跳过并警告”外，任何结构错误都整单失败，不产生半迁移项目。
 
@@ -3657,6 +3678,7 @@ v3 规则：
 | `MILESTONE_NOT_EMPTY` | 409 | false | 尝试硬删除仍有任务/证据/进展的阶段 | 该阶段下仍有内容，不能直接删除，请改为归档 |
 | `INVALID_STATE_TRANSITION` | 409 | false | 状态机不允许的转换 | 当前状态不支持该操作 |
 | `DRAFT_ITEM_ARCHIVED` | 409 | false | 单条或整份确认请求包含 archived 条目 | 这条理解已移除，不能恢复或再次确认，请重新生成 |
+| `DRAFT_SOURCE_MISSING` | 409 | false | 待确认条目没有任何能解析到当前材料版本真实片段的有效来源 | 这条理解没有可验证的材料来源，不能确认，请重新生成理解草稿 |
 | `TASK_ARCHIVED` | 409 | false | 对归档任务提交证据/进展/开始/完成 | 该任务已归档，请先恢复 |
 | `TASK_NOT_CLAIMABLE` | 409 | false | 旧客户端认领已完成任务 | 该任务已完成 |
 | `EVIDENCE_IMMUTABLE` | 409 | false | 尝试修改证据正文或删除证据 | 证据提交后不能修改正文 |
@@ -3687,7 +3709,7 @@ v3 规则：
 
 - `RATE_LIMITED`：按 `retryAfterSeconds` 等待；
 - `INTERNAL`、`MODEL_TIMEOUT`、`INVALID_MODEL_OUTPUT`、`MODEL_UNAVAILABLE`：适配层最多自动重试 1 次；
-- `STALE_REVISION`、`IDEMPOTENCY_CONFLICT`、`CONTRACT_VERSION_MISMATCH`、`DRAFT_ITEM_ARCHIVED`、`MIGRATION_*`、`AUTH_FAILED`、`REGISTER_REJECTED`：**不自动重试**；需要刷新、修正输入、升级客户端、重新生成草稿或重新确认；
+- `STALE_REVISION`、`IDEMPOTENCY_CONFLICT`、`CONTRACT_VERSION_MISMATCH`、`DRAFT_ITEM_ARCHIVED`、`DRAFT_SOURCE_MISSING`、`MIGRATION_*`、`AUTH_FAILED`、`REGISTER_REJECTED`：**不自动重试**；需要刷新、修正输入、升级客户端、重新生成草稿或重新确认；
 - 前端不得因为 `retryable: true` 无限重试；写操作重试必须复用同一 `idempotencyKey`。
 
 ### 25.4 安全与隐私
@@ -3836,3 +3858,4 @@ git status / git diff --name-only 检查是否误改 server/src、src、部署�
 | v3.0 | 2026-10-19 | PR1 冻结 V3/V4：新增领域模型文档（第 20 节入口）、账号契约（第 21 节）、项目/阶段/任务/证据/进展/时间线（第 22 节）、AI 阶段上下文与阶段候选（第 23 节）、本地迁移（第 24 节）、统一错误码（第 25 节）、V2 兼容方式（第 26 节）；V3 新接口 `contractVersion = "3.0"`，V2 接口保持 `"1.0"`；本 PR 不实现后端、不修改前端、不部署 | 姜厚禄（后端） |
 | v3.1 | 2026-10-19 | PR1 最终收尾：明确 `contractVersion` / `promptVersion` 组合并禁止静默降级；补充 Session 与材料草稿五动作、Milestone/Task 状态机、Cookie/CORS/CSRF 约定；按当前 `PROJECT_SCHEMA_VERSION = 3` 与 localStorage 实际字段修正迁移映射；澄清 `Project.short` 语义 | 姜厚禄（后端） |
 | v3.2 | 2026-10-19 | 明确 `undoDraftItem` 按 `text` 与 `originalText` 比较决定 `pending`/`modified`，清空确认信息且 `projectRevision` 只递增一次；明确 `confirmAllDraft` 不得包含或恢复 archived 条目、任一条目 archived 整单 409、所有 revision 校验通过后单事务写入、失败不递增版本；新增错误码 `DRAFT_ITEM_ARCHIVED` | 姜厚禄（后端） |
+| v3.3 | 2026-10-19 | 材料理解条目确认必须至少有一个能解析到当前材料版本、且 `text.trim().length > 0` 的真实片段；迁移将空来源/全部失效来源降为 `pending` 并警告，`archived` 保持；单条确认与整份确认共用数据库来源校验，不信任 `sources_json` 元数据；新增错误码 `DRAFT_SOURCE_MISSING` | 姜厚禄（后端） |
