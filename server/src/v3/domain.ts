@@ -311,6 +311,11 @@ export function assertProjectRevision(project: ProjectRow, revision: number): vo
   }
 }
 
+/** 所有领域写接口在 loadProject 后必须调用；恢复/删除项目本身例外 */
+export function assertProjectWritable(project: ProjectRow): void {
+  if (project.status === 'archived') throw new V3Error('PROJECT_ARCHIVED')
+}
+
 /** 成功领域写操作递增 projectRevision；一次事务只调用一次 */
 export function bumpProjectRevision(db: V3Database, projectId: string, nowText: string): number {
   db.prepare(

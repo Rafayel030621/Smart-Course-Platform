@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { transaction, type V3Database } from './db.js'
 import {
   assertProjectRevision,
+  assertProjectWritable,
   bumpProjectRevision,
   hasValidUnderstandingSource,
   loadProject,
@@ -119,6 +120,7 @@ async function prepare(
   }
 
   const project = loadProject(db, auth.user.user_id, projectId)
+  assertProjectWritable(project)
   assertProjectRevision(project, projectRevision)
   const material = loadCurrentMaterial(db, projectId, materialId)
   if (material.material_version !== materialVersion) {

@@ -1,6 +1,6 @@
 # 智慧课程平台 · 前后端接口契约
 
-> 文档修订：v3.5（不改字段、不改接口语义，只修正三处会误导实现的表述：`readOnly` 不含项目归档、Task DTO 无 `readOnly` 字段、材料 `type` 白名单与实际迁移类型）
+> 文档修订：v3.6（归档项目写保护：所有领域写接口返回 409 `PROJECT_ARCHIVED`；材料/片段/草稿 `readOnly` 纳入项目归档；片段读取按项目校验；不改已有字段名与响应结构）
 > 编制日期：2026-09-25（v2.0：2026-10-12；v3.0：2026-10-19，PR1 冻结 V3/V4 账号、阶段、进展、AI 上下文与迁移）
 > owner：负责人（后端）
 > 地位：**本文件是前后端唯一契约。** 四名成员不得自行新增字段或创建第二套 DTO。
@@ -2021,6 +2021,7 @@ await fetch(`${API_BASE}/api/projects`, {
 | 信封 | 写接口使用 20.2；读接口返回 `contractVersion` / `projectId` / `projectRevision` / `data` |
 | 幂等 | 所有写接口必须带 `idempotencyKey` |
 | 并发 | 所有写接口按 `projectRevision` 校验；单实体更新加 `expectedRevision` |
+| 归档写保护 | 项目状态为 `archived` 时，所有领域写接口在 `loadProject` 后返回 409 `PROJECT_ARCHIVED`，不得写入；仅 `POST /projects/{id}/restore` 与 `POST /projects/{id}/delete` 例外；所有 GET 不受限 |
 | 错误 | 使用第 25 节错误码；跨用户项目 404 `PROJECT_NOT_FOUND`；跨项目实体 ID 一律 404 `RESOURCE_NOT_FOUND`，避免通过 ID 探测其他项目数据 |
 | 时间 | 服务端生成 `createdAt`/`updatedAt`；客户端只传业务时间 |
 | 空值 | 缺失值一律 `null`，不省略字段 |
@@ -2969,7 +2970,7 @@ AI 候选确认规则见 23.7；**服务端不得因“项目为空”自动创�
 | `createdAt` / `updatedAt` | string | 服务端时间 |
 | `archivedAt` | string \| null | 归档时间 |
 | `isCurrent` | boolean | 是否为该 `materialId` 的当前版本 |
-| `readOnly` | boolean | 旧版本或归档材料为 `true` |
+| `readOnly` | boolean | 历史版本、材料归档或项目归档时为 `true` |
 
 #### GET /api/projects/{projectId}/materials
 
@@ -3016,7 +3017,8 @@ AI 候选确认规则见 23.7；**服务端不得因“项目为空”自动创�
 #### 共同读取规则
 
 - 所有接口要求登录，并先校验 `userId + projectId` 所有权；
-- 软删除项目 404 `PROJECT_NOT_FOUND`；归档项目仍可读。**`readOnly` 当前只由「历史版本」与「材料/条目归档」派生，不含项目归档**：项目级写保护与项目级 `readOnly` 留待后续切片，现阶段写入接口同样不校验项目是否归档，前端不得把归档项目视为服务端强制只读；
+- 软删除项目 404 `PROJECT_NOT_FOUND`；归档项目仍可读，但所有领域写接口返回 409 `PROJECT_ARCHIVED`（项目 `restore`/`delete` 例外）；
+- 材料、片段、理解草稿的 `readOnly` 由「历史版本、材料/条目归档或项目归档」派生；项目归档时 `readOnly=true` 而 `isCurrent` 仍按材料版本语义返回；
 - 跨用户 404 `PROJECT_NOT_FOUND`；同用户跨项目实体 404 `RESOURCE_NOT_FOUND`；
 - 读取不递增项目/实体 revision、不创建幂等记录、不改变任何业务状态；
 - 非法 `version`、`limit`、`cursor` 返回 400 `INVALID_INPUT`。
@@ -3773,6 +3775,7 @@ v3 规则：
 | `FORBIDDEN_ORIGIN` | 403 | false | 写请求 Origin 缺失或不在白名单 | 请求来源不受信任 |
 | `RATE_LIMITED` | 429 | true | 登录/注册/写接口触发频率限制 | 尝试次数过多，请稍后再试 |
 | `PROJECT_NOT_FOUND` | 404 | false | 项目不存在或不属于当前用户 | 项目不存在或无权访问 |
+| `PROJECT_ARCHIVED` | 409 | false | 对归档项目执行领域写操作（项目 restore/delete 除外） | 项目已归档，请先恢复再编辑 |
 | `RESOURCE_NOT_FOUND` | 404 | false | 阶段/任务/证据/材料/进展/聊天不存在或不属于当前用户 | 请求的内容不存在或无权访问 |
 | `PROJECT_MISMATCH` | 409 | false | 同一用户下，实体属于另一个项目 | 请求内容与当前项目不匹配 |
 | `STALE_REVISION` | 409 | false | `projectRevision` 或实体 revision 落后 | 项目内容已更新，请刷新后重试 |
@@ -3815,7 +3818,7 @@ v3 规则：
 
 - `RATE_LIMITED`：按 `retryAfterSeconds` 等待；
 - `INTERNAL`、`MODEL_TIMEOUT`、`INVALID_MODEL_OUTPUT`、`MODEL_UNAVAILABLE`：适配层最多自动重试 1 次；
-- `STALE_REVISION`、`IDEMPOTENCY_CONFLICT`、`CONTRACT_VERSION_MISMATCH`、`DRAFT_ITEM_ARCHIVED`、`DRAFT_SOURCE_MISSING`、`MIGRATION_*`、`AUTH_FAILED`、`REGISTER_REJECTED`：**不自动重试**；需要刷新、修正输入、升级客户端、重新生成草稿或重新确认；
+- `STALE_REVISION`、`IDEMPOTENCY_CONFLICT`、`CONTRACT_VERSION_MISMATCH`、`PROJECT_ARCHIVED`、`DRAFT_ITEM_ARCHIVED`、`DRAFT_SOURCE_MISSING`、`MIGRATION_*`、`AUTH_FAILED`、`REGISTER_REJECTED`：**不自动重试**；需要刷新、恢复项目、修正输入、升级客户端、重新生成草稿或重新确认；
 - 前端不得因为 `retryable: true` 无限重试；写操作重试必须复用同一 `idempotencyKey`。
 
 ### 25.4 安全与隐私
@@ -3967,3 +3970,4 @@ git status / git diff --name-only 检查是否误改 server/src、src、部署�
 | v3.3 | 2026-10-19 | 材料理解条目确认必须至少有一个能解析到当前材料版本、且 `text.trim().length > 0` 的真实片段；迁移将空来源/全部失效来源降为 `pending` 并警告，`archived` 保持；单条确认与整份确认共用数据库来源校验，不信任 `sources_json` 元数据；新增错误码 `DRAFT_SOURCE_MISSING` | 姜厚禄（后端） |
 | v3.4 | 2026-10-19 | PR2B 第一阶段：新增任务列表/单任务、材料列表/单材料、片段与理解草稿只读接口；材料列表默认当前版本，历史版本通过 `version` 只读访问；任务默认排除归档任务与归档阶段任务；统一 `limit`/`cursor`；读取不递增版本、不写幂等记录 | 姜厚禄（后端） |
 | v3.5 | 2026-10-19 | 仅修正表述，不改字段与语义：22.8 `readOnly` 明确只由历史版本与材料/条目归档派生、不含项目归档（项目级写保护留待后续切片）；22.3 明确 Task DTO 无 `readOnly` 字段；22.8 Material DTO 的 `type` 收紧为 `md`/`txt`，迁移旧材料可能保留其他类型 | 姜厚禄（后端） |
+| v3.6 | 2026-10-19 | 归档项目写保护：所有领域写接口返回 409 `PROJECT_ARCHIVED`（项目 restore/delete 例外）；材料/片段/草稿 `readOnly` 纳入项目归档；片段读取通过 `materials.project_id` 校验项目归属；不改字段名与响应结构 | 姜厚禄（后端） |

@@ -51,6 +51,7 @@ interface LoadedMaterial {
   currentVersion: number
   isCurrent: boolean
   currentArchived: boolean
+  projectArchived: boolean
 }
 
 function isMaterialArchived(row: MaterialRow): boolean {
@@ -63,6 +64,7 @@ function loadMaterial(
   materialId: string,
   requestedVersion: number | null,
   allowArchived: boolean,
+  projectArchived: boolean,
 ): LoadedMaterial {
   const current = db
     .prepare(
@@ -95,11 +97,12 @@ function loadMaterial(
     currentVersion: current.material_version,
     isCurrent: row.material_version === current.material_version,
     currentArchived,
+    projectArchived,
   }
 }
 
 function toMaterialDto(loaded: LoadedMaterial): Record<string, unknown> {
-  const { material, isCurrent, currentArchived } = loaded
+  const { material, isCurrent, currentArchived, projectArchived } = loaded
   return {
     materialId: material.material_id,
     materialVersion: material.material_version,
@@ -115,7 +118,8 @@ function toMaterialDto(loaded: LoadedMaterial): Record<string, unknown> {
     updatedAt: material.updated_at,
     archivedAt: material.archived_at,
     isCurrent,
-    readOnly: !isCurrent || currentArchived || isMaterialArchived(material),
+    readOnly:
+      !isCurrent || currentArchived || projectArchived || isMaterialArchived(material),
   }
 }
 
@@ -183,6 +187,7 @@ export async function handleMaterialList(
           currentVersion: row.material_version,
           isCurrent: true,
           currentArchived: isMaterialArchived(row),
+          projectArchived: project.status === 'archived',
         }),
       ),
       nextCursor,
@@ -206,6 +211,7 @@ export async function handleMaterialGet(
     materialId,
     parseVersion(url),
     includeArchived(url),
+    project.status === 'archived',
   )
 
   sendV3Json(res, 200, {
@@ -244,27 +250,39 @@ export async function handleMaterialSegments(
     materialId,
     parseVersion(url),
     includeArchived(url),
+    project.status === 'archived',
   )
   const limit = parseLimit(queryParam(url, 'limit'), 100, 200)
   const cursorRaw = queryParam(url, 'cursor')
 
-  const conditions = ['material_id = ?', 'material_version = ?']
-  const params: Array<string | number> = [materialId, loaded.material.material_version]
+  const conditions = [
+    's.material_id = ?',
+    's.material_version = ?',
+    'm.project_id = ?',
+  ]
+  const params: Array<string | number> = [
+    materialId,
+    loaded.material.material_version,
+    projectId,
+  ]
   if (cursorRaw !== null) {
     const cursor = decodeCursor(cursorRaw)
     if (typeof cursor.idx !== 'number' || typeof cursor.segmentId !== 'string') {
       throw invalidInput('cursor 不合法')
     }
-    conditions.push('(idx > ? OR (idx = ? AND segment_id > ?))')
+    conditions.push('(s.idx > ? OR (s.idx = ? AND s.segment_id > ?))')
     params.push(cursor.idx, cursor.idx, cursor.segmentId)
   }
   params.push(limit + 1)
 
   const rows = db
     .prepare(
-      `SELECT * FROM material_segments
+      `SELECT s.* FROM material_segments s
+         JOIN materials m
+           ON m.material_id = s.material_id
+          AND m.material_version = s.material_version
         WHERE ${conditions.join(' AND ')}
-        ORDER BY idx ASC, segment_id ASC
+        ORDER BY s.idx ASC, s.segment_id ASC
         LIMIT ?`,
     )
     .all(...params) as SegmentRow[]
@@ -289,6 +307,7 @@ export async function handleMaterialSegments(
       readOnly:
         !loaded.isCurrent ||
         loaded.currentArchived ||
+        loaded.projectArchived ||
         isMaterialArchived(loaded.material),
       segments: items.map((row) => ({
         segmentId: row.segment_id,
@@ -323,6 +342,7 @@ export async function handleMaterialUnderstanding(
     materialId,
     parseVersion(url),
     includeArchived(url),
+    project.status === 'archived',
   )
   const include = includeArchived(url)
   const limit = parseLimit(queryParam(url, 'limit'), 100, 200)
@@ -376,6 +396,7 @@ export async function handleMaterialUnderstanding(
       readOnly:
         !loaded.isCurrent ||
         loaded.currentArchived ||
+        loaded.projectArchived ||
         isMaterialArchived(loaded.material),
       items: items.map((item) =>
         toUnderstandingItemDto(db, item, loaded.material.name),
