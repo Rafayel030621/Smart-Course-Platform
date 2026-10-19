@@ -467,19 +467,27 @@ function parseMaterials(
         item.originalText === undefined || item.originalText === null || item.originalText === ''
           ? null
           : readString(item.originalText, 'understandingItems.originalText', 300)
-      const missing = sourceSegmentIds.some((id) => !segmentIds.has(id))
-      if (missing) warnings.add('UNDERSTANDING_SOURCE_MISSING', '部分理解条目来源片段缺失，已退回待确认')
+      const validSourceSegmentIds = sourceSegmentIds.filter((id) => segmentIds.has(id))
+      const sourceMissing = validSourceSegmentIds.length === 0
+      if (sourceMissing) {
+        warnings.add(
+          'UNDERSTANDING_SOURCE_MISSING',
+          '理解条目没有有效材料来源，已保留正文并退回待确认',
+        )
+      } else if (validSourceSegmentIds.length < sourceSegmentIds.length) {
+        warnings.add('UNDERSTANDING_SOURCE_MISSING', '部分理解条目来源片段失效，已移除失效来源')
+      }
       if (originalText === null) {
         warnings.add(
           'UNDERSTANDING_ORIGINAL_TEXT_MISSING',
           '旧数据缺少理解条目原文，已保留当前文本并退回待确认',
         )
       }
-      // 缺少原文时无法正确判断 undo 应回 pending 还是 modified，保守退回 pending
+      // 缺少原文或有效来源时无法安全确认，保守退回 pending；archived 不复活
       const status =
         item.status === 'archived'
           ? 'archived'
-          : missing || originalText === null
+          : sourceMissing || originalText === null
             ? 'pending'
             : item.status === 'confirmed' || item.status === 'modified'
               ? item.status
@@ -490,7 +498,7 @@ function parseMaterials(
         kind: item.kind,
         text,
         originalText,
-        sourceSegmentIds: sourceSegmentIds.filter((id) => segmentIds.has(id)),
+        sourceSegmentIds: validSourceSegmentIds,
         status,
       })
     }

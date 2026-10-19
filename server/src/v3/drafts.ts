@@ -77,39 +77,62 @@ interface SegmentRow {
   material_version: number
   start_line: number
   end_line: number
+  text: string
+}
+
+function requestedSegmentIds(item: UnderstandingItemRow): string[] {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(item.sources_json)
+  } catch {
+    return []
+  }
+  if (!Array.isArray(parsed)) return []
+  const ids = parsed
+    .filter((entry): entry is Record<string, unknown> => entry !== null && typeof entry === 'object')
+    .map((entry) => (typeof entry.segmentId === 'string' ? entry.segmentId : ''))
+    .filter((segmentId) => segmentId !== '')
+  return [...new Set(ids)]
+}
+
+/**
+ * 只信任数据库中与条目 materialId + materialVersion 匹配的真实片段。
+ * sources_json 中的 materialId、版本、行号都不可信。
+ */
+function resolveValidSegments(db: V3Database, item: UnderstandingItemRow): SegmentRow[] {
+  const statement = db.prepare(
+    `SELECT segment_id, material_id, material_version, start_line, end_line, text
+       FROM material_segments
+      WHERE material_id = ? AND material_version = ? AND segment_id = ?
+        AND length(trim(text)) > 0`,
+  )
+  const segments: SegmentRow[] = []
+  for (const segmentId of requestedSegmentIds(item)) {
+    const row = statement.get(
+      item.material_id,
+      item.material_version,
+      segmentId,
+    ) as SegmentRow | undefined
+    if (row !== undefined) segments.push(row)
+  }
+  return segments
+}
+
+function assertItemHasValidSource(db: V3Database, item: UnderstandingItemRow): void {
+  if (resolveValidSegments(db, item).length === 0) {
+    throw new V3Error('DRAFT_SOURCE_MISSING')
+  }
 }
 
 function itemDto(db: V3Database, item: UnderstandingItemRow, materialName: string): Record<string, unknown> {
-  let rawSources: Array<Record<string, unknown>> = []
-  try {
-    const parsed = JSON.parse(item.sources_json) as unknown
-    if (Array.isArray(parsed)) {
-      rawSources = parsed.filter(
-        (entry): entry is Record<string, unknown> => entry !== null && typeof entry === 'object',
-      )
-    }
-  } catch {
-    rawSources = []
-  }
-
-  const sources = rawSources.map((source) => {
-    const segmentId = typeof source.segmentId === 'string' ? source.segmentId : ''
-    const segment = db
-      .prepare(
-        `SELECT segment_id, material_id, material_version, start_line, end_line
-           FROM material_segments
-          WHERE material_id = ? AND material_version = ? AND segment_id = ?`,
-      )
-      .get(item.material_id, item.material_version, segmentId) as SegmentRow | undefined
-    return {
-      materialId: item.material_id,
-      materialName,
-      materialVersion: item.material_version,
-      segmentId,
-      startLine: segment?.start_line ?? (typeof source.startLine === 'number' ? source.startLine : 1),
-      endLine: segment?.end_line ?? (typeof source.endLine === 'number' ? source.endLine : 1),
-    }
-  })
+  const sources = resolveValidSegments(db, item).map((segment) => ({
+    materialId: item.material_id,
+    materialName,
+    materialVersion: item.material_version,
+    segmentId: segment.segment_id,
+    startLine: segment.start_line,
+    endLine: segment.end_line,
+  }))
 
   return {
     itemId: item.item_id,
@@ -307,6 +330,8 @@ export async function handleDraftItemAction(
 
       if (action === 'confirm') {
         if (item.status === 'confirmed') return finish(ctx, false, item)
+        // 学生点击确认不能补足来源：必须有数据库中真实存在的片段
+        assertItemHasValidSource(ctx.db, item)
         ctx.db.prepare(
           `UPDATE understanding_items
               SET status = 'confirmed', confirmed_at = ?, confirmed_by_user_id = ?,
@@ -439,6 +464,11 @@ export async function handleConfirmAllDraft(
           currentEntityRevision: item.revision,
         })
       }
+    }
+
+    // 任一条目没有真实来源就整单失败；此时尚未进入事务、尚未写入任何字段
+    for (const entry of entries) {
+      assertItemHasValidSource(ctx.db, byId.get(entry.itemId) as UnderstandingItemRow)
     }
 
     const response = transaction(ctx.db, () => {

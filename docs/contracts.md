@@ -1,6 +1,6 @@
 # 智慧课程平台 · 前后端接口契约
 
-> 文档修订：v3.2（补充 `undoDraftItem` 与 `confirmAllDraft` 的归档/幂等确定规则；新接口 `contractVersion = "3.0"`；V2 接口仍为 `"1.0"`）
+> 文档修订：v3.3（补充材料理解条目的有效来源校验：无真实片段的条目不能确认；新增 `DRAFT_SOURCE_MISSING`；新接口 `contractVersion = "3.0"`；V2 接口仍为 `"1.0"`）
 > 编制日期：2026-09-25（v2.0：2026-10-12；v3.0：2026-10-19，PR1 冻结 V3/V4 账号、阶段、进展、AI 上下文与迁移）
 > owner：负责人（后端）
 > 地位：**本文件是前后端唯一契约。** 四名成员不得自行新增字段或创建第二套 DTO。
@@ -2774,6 +2774,9 @@ AI 候选确认规则见 23.7；**服务端不得因“项目为空”自动创�
 - `editDraftItem` 修改已确认条目时，必须立即清空 `confirmedAt` / `confirmedByUserId`，该条从 AI 可信上下文移除，直到再次确认；
 - `removeDraftItem` 只归档，不删除来源片段；同一 `itemId` 不能通过 `confirmAllDraft` 被恢复；
 - `undoDraftItem` 只撤销确认，不是删除；`pending` / `modified` 条目调用它是无操作；
+- **确认必须有可验证来源**：单条确认和整份确认在写入前，必须按条目的 `materialId + materialVersion` 查询 `material_segments`，至少解析到一个真实存在且正文非空的 `segmentId`；`sources_json` 中的材料 ID、版本、行号等元数据不可信，不能替代数据库校验；
+- 没有有效来源时返回 409 `DRAFT_SOURCE_MISSING`，不得把条目变为 `confirmed`；学生点击确认不能补足缺失来源；无来源手工事实不属于材料理解条目；
+- 已 `confirmed` 的历史条目再次单条确认仍按幂等返回 `changed: false`；但整份确认会校验所有提交条目，任一条无有效来源则整单失败；
 - `confirmAllDraft` 的 `items` 必须覆盖当前版本全部未归档条目，遗漏返回 400 `INVALID_INPUT`；任一条目 revision 不匹配返回 409 `STALE_REVISION`，整单不写入；
 - `confirmAllDraft` 只把 `pending` / `modified` 改为 `confirmed`；已确认条目跳过，`skippedCount` 计数；响应 `items` 返回本次提交的全部条目最终状态，`confirmedCount` 只统计本次实际变更的条目。
 
@@ -2797,10 +2800,10 @@ AI 候选确认规则见 23.7；**服务端不得因“项目为空”自动创�
 
 1. `items` 必须覆盖当前材料版本的全部未归档条目，恰好一次；遗漏、重复或未知 `itemId` 返回 400 `INVALID_INPUT` 或 404 `RESOURCE_NOT_FOUND`；
 2. `items` **不能包含任何 `archived` 条目**；只要发现任意一条 archived，整个请求返回 409 `DRAFT_ITEM_ARCHIVED`（archived 检查先于 revision 校验），不得部分成功，也不得把 archived 恢复为 `pending` 或 `confirmed`；
-3. 所有条目先校验 `materialId`、`materialVersion`、`itemId` 与 `expectedRevision`；任一不匹配返回 404 / 409 `MATERIAL_VERSION_OUTDATED` / 409 `STALE_REVISION`，**所有校验通过后才允许进入单事务写入**；
+3. 所有条目先校验 `materialId`、`materialVersion`、`itemId` 与 `expectedRevision`；任一不匹配返回 404 / 409 `MATERIAL_VERSION_OUTDATED` / 409 `STALE_REVISION`；随后逐条校验真实来源，任一条目没有有效来源返回 409 `DRAFT_SOURCE_MISSING`；**所有校验通过后才允许进入单事务写入**；
 4. 事务内只把 `pending` / `modified` 改为 `confirmed`，写 `confirmedAt` / `confirmedByUserId`；已确认条目跳过；
 5. 任一条目状态变化时 `revision +1`；整次成功 `projectRevision` **只 +1 一次**；
-6. 失败（包括 archived、版本冲突、revision 冲突、未知条目）时 `projectRevision` **不递增**，且不得出现部分写入；
+6. 失败（包括 archived、版本冲突、revision 冲突、未知条目、无有效来源）时 `projectRevision` **不递增**，且不得出现部分写入；其他条目的状态、确认人、确认时间、条目 revision 和成功幂等记录均保持不变；
 7. 全部条目已确认时返回 200 `changed: false`，`projectRevision` 不变；
 8. 已删除条目只能保持 archived；旧前端列表重新提交 archived `itemId` 时必须整单拒绝，不能因为重新提交而复活；
 9. 同一 `idempotencyKey` + 相同请求体重放返回首次响应；不同请求体返回 409 `IDEMPOTENCY_CONFLICT`。
@@ -2907,6 +2910,7 @@ AI 候选确认规则见 23.7；**服务端不得因“项目为空”自动创�
 | 条目版本/项目版本过期 | `STALE_REVISION` | 409 | 内容已更新，请刷新后重试 |
 | 条目不存在或不属于该材料 | `RESOURCE_NOT_FOUND` | 404 | 这条理解不存在或已失效 |
 | 条目已归档 / 整份确认包含 archived | `DRAFT_ITEM_ARCHIVED` | 409 | 这条理解已移除，不能恢复或再次确认，请重新生成 |
+| 条目没有可验证的材料来源 | `DRAFT_SOURCE_MISSING` | 409 | 这条理解没有可验证的材料来源，不能确认，请重新生成理解草稿 |
 | 文本为空或超长 | `INVALID_INPUT` | 400 | 理解内容需为 1～300 字 |
 | 整份确认遗漏条目 | `INVALID_INPUT` | 400 | 整份确认需要包含当前版本的全部理解条目 |
 | 同键不同内容 | `IDEMPOTENCY_CONFLICT` | 409 | 重复请求的内容不一致，请刷新后重试 |
@@ -3507,7 +3511,8 @@ v3 规则：
 | `type` 为 `csv` / `xlsx` / `pdf` / `docx` / `zip` 或未知 | 保留材料元数据，`status: "unsupported"`，不迁移正文，返回 `UNSUPPORTED_MATERIAL_SKIPPED` 警告 |
 | 材料仅登记、无正文 | `status: "registered"`，保留文件名 |
 | 分段文本超过 2,000 字 | 拒绝该材料并返回 `MATERIAL_INVALID_SKIPPED` 警告，不丢项目其他数据 |
-| 来源 `segmentId` 不存在 | 该理解条目置 `pending` 或丢弃，并返回 `UNDERSTANDING_SOURCE_MISSING` 警告 |
+| 来源数组为空 / 全部 `segmentId` 不存在 | 保留正文，状态降为 `pending`（`archived` 保持归档），返回 `UNDERSTANDING_SOURCE_MISSING` 警告，不能保留 `confirmed` |
+| 部分 `segmentId` 不存在 | 移除失效来源；剩余至少一个有效来源时保留原状态 |
 | 单文件超过 1 MB | 保留元数据并标 `unsupported`，返回 `MATERIAL_TOO_LARGE_SKIPPED` 警告 |
 
 材料迁移 DTO 字段：
@@ -3671,6 +3676,7 @@ v3 规则：
 | `MILESTONE_NOT_EMPTY` | 409 | false | 尝试硬删除仍有任务/证据/进展的阶段 | 该阶段下仍有内容，不能直接删除，请改为归档 |
 | `INVALID_STATE_TRANSITION` | 409 | false | 状态机不允许的转换 | 当前状态不支持该操作 |
 | `DRAFT_ITEM_ARCHIVED` | 409 | false | 单条或整份确认请求包含 archived 条目 | 这条理解已移除，不能恢复或再次确认，请重新生成 |
+| `DRAFT_SOURCE_MISSING` | 409 | false | 待确认条目没有任何能解析到当前材料版本真实片段的有效来源 | 这条理解没有可验证的材料来源，不能确认，请重新生成理解草稿 |
 | `TASK_ARCHIVED` | 409 | false | 对归档任务提交证据/进展/开始/完成 | 该任务已归档，请先恢复 |
 | `TASK_NOT_CLAIMABLE` | 409 | false | 旧客户端认领已完成任务 | 该任务已完成 |
 | `EVIDENCE_IMMUTABLE` | 409 | false | 尝试修改证据正文或删除证据 | 证据提交后不能修改正文 |
@@ -3701,7 +3707,7 @@ v3 规则：
 
 - `RATE_LIMITED`：按 `retryAfterSeconds` 等待；
 - `INTERNAL`、`MODEL_TIMEOUT`、`INVALID_MODEL_OUTPUT`、`MODEL_UNAVAILABLE`：适配层最多自动重试 1 次；
-- `STALE_REVISION`、`IDEMPOTENCY_CONFLICT`、`CONTRACT_VERSION_MISMATCH`、`DRAFT_ITEM_ARCHIVED`、`MIGRATION_*`、`AUTH_FAILED`、`REGISTER_REJECTED`：**不自动重试**；需要刷新、修正输入、升级客户端、重新生成草稿或重新确认；
+- `STALE_REVISION`、`IDEMPOTENCY_CONFLICT`、`CONTRACT_VERSION_MISMATCH`、`DRAFT_ITEM_ARCHIVED`、`DRAFT_SOURCE_MISSING`、`MIGRATION_*`、`AUTH_FAILED`、`REGISTER_REJECTED`：**不自动重试**；需要刷新、修正输入、升级客户端、重新生成草稿或重新确认；
 - 前端不得因为 `retryable: true` 无限重试；写操作重试必须复用同一 `idempotencyKey`。
 
 ### 25.4 安全与隐私
@@ -3850,3 +3856,4 @@ git status / git diff --name-only 检查是否误改 server/src、src、部署�
 | v3.0 | 2026-10-19 | PR1 冻结 V3/V4：新增领域模型文档（第 20 节入口）、账号契约（第 21 节）、项目/阶段/任务/证据/进展/时间线（第 22 节）、AI 阶段上下文与阶段候选（第 23 节）、本地迁移（第 24 节）、统一错误码（第 25 节）、V2 兼容方式（第 26 节）；V3 新接口 `contractVersion = "3.0"`，V2 接口保持 `"1.0"`；本 PR 不实现后端、不修改前端、不部署 | 姜厚禄（后端） |
 | v3.1 | 2026-10-19 | PR1 最终收尾：明确 `contractVersion` / `promptVersion` 组合并禁止静默降级；补充 Session 与材料草稿五动作、Milestone/Task 状态机、Cookie/CORS/CSRF 约定；按当前 `PROJECT_SCHEMA_VERSION = 3` 与 localStorage 实际字段修正迁移映射；澄清 `Project.short` 语义 | 姜厚禄（后端） |
 | v3.2 | 2026-10-19 | 明确 `undoDraftItem` 按 `text` 与 `originalText` 比较决定 `pending`/`modified`，清空确认信息且 `projectRevision` 只递增一次；明确 `confirmAllDraft` 不得包含或恢复 archived 条目、任一条目 archived 整单 409、所有 revision 校验通过后单事务写入、失败不递增版本；新增错误码 `DRAFT_ITEM_ARCHIVED` | 姜厚禄（后端） |
+| v3.3 | 2026-10-19 | 材料理解条目确认必须至少有一个能解析到当前材料版本真实片段的来源；迁移将空来源/全部失效来源降为 `pending` 并警告，`archived` 保持；单条确认与整份确认共用数据库来源校验，不信任 `sources_json` 元数据；新增错误码 `DRAFT_SOURCE_MISSING` | 姜厚禄（后端） |

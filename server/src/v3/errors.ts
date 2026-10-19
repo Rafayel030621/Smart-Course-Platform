@@ -27,6 +27,7 @@ export type V3ErrorCode =
   | 'MILESTONE_NOT_EMPTY'
   | 'INVALID_STATE_TRANSITION'
   | 'DRAFT_ITEM_ARCHIVED'
+  | 'DRAFT_SOURCE_MISSING'
   | 'TASK_ARCHIVED'
   | 'TASK_NOT_CLAIMABLE'
   | 'EVIDENCE_IMMUTABLE'
@@ -92,6 +93,11 @@ export const V3_ERROR_META: Record<V3ErrorCode, ErrorMeta> = {
     status: 409,
     retryable: false,
     message: '这条理解已移除，不能恢复或再次确认，请重新生成',
+  },
+  DRAFT_SOURCE_MISSING: {
+    status: 409,
+    retryable: false,
+    message: '这条理解没有可验证的材料来源，不能确认，请重新生成理解草稿',
   },
   TASK_ARCHIVED: { status: 409, retryable: false, message: '该任务已归档，请先恢复' },
   TASK_NOT_CLAIMABLE: { status: 409, retryable: false, message: '该任务已完成' },
