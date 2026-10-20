@@ -149,8 +149,9 @@
 
 | 形态 | `npm test` | `typecheck` | `build` | `eslint` |
 | --- | --- | --- | --- | --- |
+| **PR-1 分支** `feature/v3-frontend-data-layer`（`origin/main` + V3 数据层，不含页面） | **815/815，34 文件** | **0 错误** | 通过 | 通过 |
+| 隔离验证目录 `scp-v3-verify-main-data` | 815/815，34 文件 | 0 错误 | 通过 | 通过 |
 | 完整混合工作区（主目录，基线 `ac65287`） | 787/787，35 文件 | 0 错误 | 通过 | 通过 |
-| **拟交付数据层**（`origin/main` + V3 数据层，不含页面） | **815/815，34 文件** | **0 错误** | 通过 | 通过 |
 | 严格 A 组（`ac65287` + 仅 V3 hunk） | 789 用例：727 通过 / 62 失败 | 23 错误（基线 21 + 2） | 通过 | 通过 |
 | 纯净基线 `ac65287` | 717 用例：655 通过 / 62 失败 | 21 错误 | — | — |
 
@@ -159,6 +160,7 @@
 - `npm run test:integration:v3-local`：**12/12**，2026-10-20 最近一次实际运行；该次运行在混合工作区（旧基线）上，**未在 `origin/main` 基线上重跑**，后端来源见 §4.3。
 
 验证目录（保留供复核）：`D:/bdana_program/scp-v3-verify-baseline`、`scp-v3-verify-ac65287`、`scp-v3-verify-agroup-strict`、`scp-v3-verify-main`、`scp-v3-verify-main-data`。
+实际提交分支工作区：`D:/bdana_program/Smart-Course-Platform-v3-data-layer`（分支 `feature/v3-frontend-data-layer`，6 个提交）。
 
 ### 4.2 集成测试运行方式
 

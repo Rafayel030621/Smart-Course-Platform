@@ -1,6 +1,6 @@
 # V3 前端提交方案（建议稿，未执行；含隔离验证结论）
 
-> 状态：**仅建议**。本文不表示已暂存、已提交或已推送；本轮未执行 `git add` / `commit` / `push` / `reset` / `checkout` / `clean` / `stash`。
+> 状态：**已在本地分支落地，未推送**。分支 `feature/v3-frontend-data-layer` 基于 `origin/main`（`a71b1e1`），含 6 个提交；未创建 PR、未推送、未部署。
 > 配套材料：PR 描述草稿 `docs/v3-pr-draft.md`，实现说明 `docs/v3-frontend-delivery.md`。
 > 验证日期：2026-10-20。验证方式：独立 `git worktree`，detached HEAD，不改动主工作区与暂存区。
 
@@ -39,6 +39,7 @@
 | `D:/bdana_program/scp-v3-verify-agroup-strict` | `ac65287` + 严格 A 组（`types/platform.ts` 只取 V3 hunk） |
 | `D:/bdana_program/scp-v3-verify-main` | 纯净 `origin/main`（`a71b1e1`） |
 | `D:/bdana_program/scp-v3-verify-main-data` | `origin/main` + V3 数据层（不含页面文件与 2 个页面测试） |
+| `D:/bdana_program/Smart-Course-Platform-v3-data-layer` | **实际提交分支** `feature/v3-frontend-data-layer`：基于 `origin/main`，6 个提交，工作树干净 |
 
 所有目录均用 `npm ci` 按 `package-lock.json` 安装依赖，未复制主工作区的 `node_modules`、`dist` 或 `.tmp-v3-backend/`。
 
@@ -158,7 +159,7 @@ only in agroup   = (空)
 | C5 | `test(v3): add opt-in integration suite` | `tests/integration/v3LocalBackend.integration.test.ts`、`vitest.integration.config.ts`、`scripts/run-v3-local-integration.mjs`、`package.json`、`README.md` | 独立执行入口，避免与离线单测混淆 |
 | C6 | `docs: add V3 delivery and PR materials` | `docs/v3-frontend-delivery.md`、`docs/integration-v3-local.md`、`docs/v3-pr-draft.md`、`docs/v3-commit-plan.md` | 与代码同 PR，独立提交便于对照 |
 
-验证目标：`typecheck` 0 错、`npm test` 815/815、`build` 通过、`eslint` 0（均已在 `scp-v3-verify-main-data` 实测）。
+验证结果：`typecheck` 0 错、`npm test` 815/815（34 文件）、`build` 通过、`eslint` 0 —— 已在本分支实测，与隔离目录 `scp-v3-verify-main-data` 一致。
 
 ### PR-2（页面接线，需按 main 新结构重做）：基线 PR-1 合并后
 
@@ -251,9 +252,11 @@ docs/v3-frontend-delivery.md  docs/integration-v3-local.md  docs/v3-pr-draft.md 
 
 ---
 
-## 7. 未执行声明
+## 7. 执行声明
 
-本轮**未**执行：`git add`、`commit`、`push`、`reset`、`checkout`（主工作区）、`clean`、`stash`、创建 PR、部署、发送消息。
-本轮**未**修改：`src/**`、`src/views/**`、`server/**`、`docs/contracts.md`、`.gitignore`、被排除的本地文件。
-本轮**仅修改文档**：`docs/v3-commit-plan.md`、`docs/v3-pr-draft.md`、`docs/v3-frontend-delivery.md`。
+本轮**已执行**（仅在新分支工作区）：按明确文件列表 `git add` 6 次、`git commit` 6 次；**未推送**。
+本轮**未**执行：`push`、`reset`、`checkout -f`、`clean`、`stash`、创建 PR、部署、发送消息。
+主工作区 `D:/bdana_program/Smart-Course-Platform-1` 的未提交内容**未被修改**；全部提交发生在独立 worktree（§1.2 最后一行）。
+本轮**未**修改：`src/**` 业务实现、`src/views/**`、`server/**`、`docs/contracts.md`、`.gitignore`、被排除的本地文件。
+文档仅在新分支内更新验证环境与提交状态；主工作区中的同名文档仍为提交前版本。
 隔离目录（§1.2）保留不清理，供复核。

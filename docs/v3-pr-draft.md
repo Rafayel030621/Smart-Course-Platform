@@ -71,7 +71,7 @@ V3 契约（账号会话、云端项目/阶段/任务/证据/进展、本地项�
 
 ## 4. 验证（针对本 PR 实际交付集合）
 
-验证方式：独立 `git worktree`（`D:/bdana_program/scp-v3-verify-main-data`），detached HEAD 于 `a71b1e1`，`npm ci` 按 `package-lock.json` 安装，未复制主工作区 `node_modules`/`dist`。验证日期 2026-10-20。
+验证方式：在本 PR 分支 `feature/v3-frontend-data-layer`（6 个提交，基于 `origin/main` = `a71b1e1`）上执行，`npm ci` 按 `package-lock.json` 安装。验证日期 2026-10-20。
 
 | 检查 | 结果 |
 | --- | --- |
@@ -84,7 +84,8 @@ V3 契约（账号会话、云端项目/阶段/任务/证据/进展、本地项�
 
 | 形态 | 结果 | 含义 |
 | --- | --- | --- |
-| 本 PR 交付集合（`origin/main` + 数据层） | **815/815，typecheck 0** | 拟提交版本的实际状态 |
+| **本 PR 分支** `feature/v3-frontend-data-layer` | **815/815，typecheck 0，build/eslint 通过** | 本 PR 的实际状态（已实际运行） |
+| 隔离验证目录 `scp-v3-verify-main-data` | 815/815，typecheck 0 | 与分支结果逐项一致，无差异 |
 | 完整混合工作区（主目录，基线 `ac65287`） | 787/787，typecheck 0 | 含 v2 修复与页面接线；**不等于本 PR** |
 | 旧基线 `ac65287` 本身 | 717 用例 62 失败，typecheck 21 错 | 基线自身不绿，不能作为目标 |
 
