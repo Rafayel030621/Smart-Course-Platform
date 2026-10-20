@@ -41,7 +41,7 @@
 
 ### 1.4 受接口缺口阻塞（未实现，不伪造）
 
-- 任务列表读取、时间线、阶段候选、进展 supersede、已确认材料读取（详见 §3）。
+- 时间线、阶段候选、evidence/progress 单条读取仍未实现；任务列表、材料读取、进展 supersede 已由 `origin/main` 后端实现，但**前端尚未接入**（详见 §3）。
 - 因此「刷新后恢复任务」「云端 AI 上下文」「云端证据/材料写入」在页面上仍不可用，界面已如实提示，不用空数组冒充成功。
 
 ---
@@ -127,17 +127,20 @@
 
 ## 3. 给姜厚禄的接口缺口清单
 
+> 2026-10-20 更新：`origin/main` 已补齐任务/材料读取与材料写入（PR #20 / #21），下表按最新 `docs/v3-v4-interface-status.md` 修正。
+
 | # | 能力 | 现状分类 | 依据 | 影响 |
 | --- | --- | --- | --- | --- |
-| 1 | 任务列表读取（`GET /api/projects/:id/tasks`） | **缺契约 + 缺实现** | 契约没有该端点；`cloud.test.ts` 实测 404 | 刷新/重进项目后任务丢失（阶段统计仍可读）；`tasksHydrated=false`；`buildAdvisorContext` 返回 `TASKS_NOT_AVAILABLE` |
-| 2 | 时间线（契约 22.11） | **缺实现** | 契约有定义，已合并后端无路由/404 | `loadTimeline()` 恒返回 `TIMELINE_NOT_AVAILABLE`，页面无时间线 |
-| 3 | 阶段候选（契约 23.7 `POST .../milestones/candidates`） | **缺实现** | 契约有定义，后端无路由（404） | 客户端未实现调用；AI 生成阶段候选不可用 |
-| 4 | 进展 supersede（契约 22.4） | **缺契约（字段未冻结）** | 契约只写语义，无请求字段表 | 客户端不实现；无法修正已提交进展 |
-| 5 | 已确认材料读取 | **缺契约** | 无读取端点 | V3 建议/聊天的 `confirmedMaterials` 需调用方显式传入；页面无法回读 |
-| 6 | 服务端聊天问题长度校验（契约 6.4，≤2000 字） | **两者不一致（历史遗留）** | 前端曾在适配层静默截断，现改为 store 前置拒绝；服务端应返回 400 `INVALID_INPUT` | 若后端仍截断，用户会误以为问题已完整提交 |
-| 7 | 创建项目不得注入模板阶段（契约 22.1） | **实现一致性防御已加** | 客户端请求体不含 `milestones`，且服务端返回阶段时以 `INVALID_RESPONSE` 拒绝 | 后端若改变行为，会立即被测试与客户端拦下（`cloud.test.ts` 2 条用例） |
+| 1 | 任务列表/单条读取（`GET /projects/:id/tasks`、`GET /tasks/:id`） | **后端已实现；前端未接入** | `server/src/v3/taskReads.ts`（支持 `milestoneId`/`status`/`includeArchived`/`limit`/`cursor`） | 刷新/重进项目后任务仍丢失；`tasksHydrated=false`；`buildAdvisorContext` 返回 `TASKS_NOT_AVAILABLE`；需后续补 store 调用 |
+| 2 | 时间线（契约 22.11） | **缺实现** | 后端 `server/src/v3` 无 timeline 路由 | `loadTimeline()` 恒返回 `TIMELINE_NOT_AVAILABLE`，页面无时间线 |
+| 3 | 阶段候选（契约 23.7 `POST .../milestones/candidates`） | **缺实现（表已建）** | 后端 router 无该路由 | 客户端未实现调用；AI 生成阶段候选不可用 |
+| 4 | 进展 supersede（契约 22.4） | **后端已实现；前端未接入** | `POST /progress/:id/supersede`，旧记录转 `superseded` | 页面无法修正已提交进展 |
+| 5 | 材料读取（`GET /materials`、`/materials/:id`、`/segments`、`/understanding`） | **后端已实现；前端未接入** | `server/src/v3/materialReads.ts` | `confirmedMaterials` 仍需调用方显式传入；页面无法回读 |
+| 6 | evidence/progress 单条读取 | **缺实现** | 后端无 `GET /evidence/:id`、`GET /progress/:id` | 详情只能从列表筛 |
+| 7 | 服务端聊天问题长度校验（契约 6.4，≤2000 字） | **两者不一致（历史遗留）** | 前端已在 store 前置拒绝；服务端应返回 400 `INVALID_INPUT` | 若后端仍截断，用户会误以为问题已完整提交 |
+| 8 | 创建项目不得注入模板阶段（契约 22.1） | **实现一致性防御已加** | 客户端请求体不含 `milestones`，且服务端返回阶段时以 `INVALID_RESPONSE` 拒绝 | 后端若改变行为，会立即被测试与客户端拦下 |
 
-> 后端如补第 1、2、3 项，需要同步更新契约（第 1 项）并给出字段表；客户端已预留 `contractBlockers` 与错误码，不需要改数据层结构。
+> 第 2、3、6 项是真实的后端缺口；第 1、4、5 项属"后端就绪、前端待接"的后续任务。客户端已预留 `contractBlockers` 与错误码，补接线不需要改数据层结构。
 
 ---
 
@@ -150,6 +153,7 @@
 | 形态 | `npm test` | `typecheck` | `build` | `eslint` |
 | --- | --- | --- | --- | --- |
 | **PR-1 分支** `feature/v3-frontend-data-layer`（`origin/main` + V3 数据层，不含页面） | **815/815，34 文件** | **0 错误** | 通过 | 通过 |
+| PR-1 分支合并 main `2cde85f` 后（HEAD `251dfb3`） | **815/815，34 文件** | **0 错误** | 通过 | 通过 |
 | 隔离验证目录 `scp-v3-verify-main-data` | 815/815，34 文件 | 0 错误 | 通过 | 通过 |
 | 完整混合工作区（主目录，基线 `ac65287`） | 787/787，35 文件 | 0 错误 | 通过 | 通过 |
 | 严格 A 组（`ac65287` + 仅 V3 hunk） | 789 用例：727 通过 / 62 失败 | 23 错误（基线 21 + 2） | 通过 | 通过 |

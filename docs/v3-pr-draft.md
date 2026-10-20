@@ -59,11 +59,14 @@ V3 契约（账号会话、云端项目/阶段/任务/证据/进展、本地项�
 
 | # | 能力 | 现状 | 对前端的影响 |
 | --- | --- | --- | --- |
-| 1 | `GET /api/projects/:id/tasks` | `origin/main` 后端只有 `POST /tasks`、`PATCH /tasks/:id`、`POST /tasks/:id/:action`、`link-milestone`，**无 GET** | **刷新/重进项目后任务丢失**（阶段统计仍可读）；`tasksHydrated=false`；`buildAdvisorContext()` 返回 `TASKS_NOT_AVAILABLE`，页面不能用空任务调用 AI |
-| 2 | 时间线（契约 22.11） | 后端 `server/src/v3` 无 timeline 路由 | `cloud.loadTimeline()` 恒返回 `TIMELINE_NOT_AVAILABLE`，不发请求 |
-| 3 | 阶段候选（契约 23.7） | 后端 router 无 `milestones/candidates` 路由（仅有候选表与内部查询） | 客户端未实现调用，AI 生成阶段候选不可用 |
-| 4 | 进展 supersede（契约 22.4） | **后端已实现** `POST /progress/:id/supersede` | **客户端尚未接入**，页面无法修正已提交进展；属后续功能，不是本 PR 缺陷 |
-| 5 | 已确认材料读取 | 后端 materials 路由只有 understanding 的写操作，无列表/详情 GET | `confirmedMaterials` 需调用方显式传入，无法回读 |
+| 1 | `GET /projects/:id/tasks`、`GET /tasks/:id` | **后端已实现**（main PR #20；支持 `milestoneId`/`status`/`includeArchived`/`limit`/`cursor`） | **客户端未接入**：`tasksHydrated=false`、`buildAdvisorContext()` 返回 `TASKS_NOT_AVAILABLE`；任务刷新恢复与云端 AI 上下文仍不可用，需后续补 store 调用 |
+| 2 | 时间线（契约 22.11） | ⬜ 后端未实现 | `cloud.loadTimeline()` 恒返回 `TIMELINE_NOT_AVAILABLE`，不发请求 |
+| 3 | 阶段候选（契约 23.7） | ⬜ 后端未实现（表已建） | 客户端未实现调用，AI 生成阶段候选不可用 |
+| 4 | 进展 supersede（契约 22.4） | ✅ 后端已实现 | **客户端未接入**，页面无法修正已提交进展 |
+| 5 | 材料读取 `GET /materials` 等 | ✅ 后端已实现 | **客户端未接入**，`confirmedMaterials` 仍需调用方显式传入，无法回读 |
+| 6 | `GET /evidence/:id`、`GET /progress/:id` | ⬜ 后端未实现 | 详情只能从列表筛 |
+
+> 第 1、4、5 项是"后端就绪、客户端未接"的后续接线任务，不是本 PR 的缺陷；第 2、3、6 项仍受后端阻塞。
 | 6 | 聊天问题长度（契约 6.4） | 历史行为不一致 | 前端已前置拒绝（该修复已在 `origin/main`）；后端应返回 400 `INVALID_INPUT` 而非静默截断 |
 | 7 | 创建项目不得注入模板阶段（契约 22.1） | 客户端已加防御 | 请求体不含 `milestones`；服务端若返回阶段，客户端以 `INVALID_RESPONSE` 拒绝 |
 
@@ -73,12 +76,13 @@ V3 契约（账号会话、云端项目/阶段/任务/证据/进展、本地项�
 
 验证方式：在本 PR 分支 `feature/v3-frontend-data-layer`（6 个提交，基于 `origin/main` = `a71b1e1`）上执行，`npm ci` 按 `package-lock.json` 安装。验证日期 2026-10-20。
 
-| 检查 | 结果 |
-| --- | --- |
-| `npm run typecheck` | **0 错误** |
-| `npm test` | **815/815 通过（34 文件，0 失败）** = `origin/main` 原有 25 个文件 + V3 数据层 9 个文件 |
-| `npm run build` | 通过（exit 0） |
-| `npx eslint .` | 通过（exit 0，无输出） |
+| 阶段 | HEAD | 结果 |
+| --- | --- | --- |
+| 提交完成时 | `7c91d72` | typecheck 0 错；`npm test` 815/815（34 文件）；build 通过；eslint 通过 |
+| **合并 main `2cde85f` 后（当前）** | **`251dfb3`** | 复跑一致：typecheck 0 错；`npm test` **815/815（34 文件）**；build 通过；eslint 通过 |
+
+- 815 = `origin/main` 原有 25 个测试文件 + V3 数据层 9 个测试文件。
+- 合并仅冲突 `README.md`，已解决（保留 main 的用例数措辞 + 本分支的集成测试入口）。
 
 **必须区分的三组数字（避免误读）**
 

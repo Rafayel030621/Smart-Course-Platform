@@ -246,7 +246,7 @@ docs/v3-frontend-delivery.md  docs/integration-v3-local.md  docs/v3-pr-draft.md 
 | --- | --- | --- | --- |
 | 1 | PR 目标基线是 `origin/main` 还是 `ac65287` | 决定"数据层独立 PR"是否成立 | 主理人 |
 | 2 | V3 集成测试后端来源未知（无分支/SHA，仓库 `server/` 至今无 V3 路由） | 12/12 不可由本仓库复现，只能作为有条件验证 | 姜厚禄 |
-| 3 | `GET /tasks`、timeline、`milestones/candidates` 在 `origin/main` 后端仍不存在；`progress supersede` 后端已实现但客户端未接入 | 任务刷新恢复与云端 AI 上下文不可用 | 姜厚禄 |
+| 3 | `GET /tasks`、`GET /materials`、`progress supersede` 后端已实现但客户端未接入；timeline、`milestones/candidates`、evidence/progress 单条读取仍未实现 | 任务刷新恢复与云端 AI 上下文仍不可用（属后续接线任务） | 李焰彬 / 姜厚禄 |
 | 4 | 登录/迁移/云端写入 UI 未接线；`WorkbenchView.vue` 需按 main 新结构重做 | 云端仅数据层可用 | 雍蕾 |
 | 5 | `types/platform.ts` / `recommendation.ts` 是否接受按 hunk 拆分提交 | 决定 PR 边界是否干净 | 李焰彬（提交人） |
 
