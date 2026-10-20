@@ -263,7 +263,7 @@ async function main() {
 
   const failed = results.filter((item) => !item.ok)
   console.log(`\n结果：${results.length - failed.length}/${results.length} 步通过\n`)
-  if (failed.length > 0) process.exit(1)
+  if (failed.length > 0) process.exitCode = 1
 }
 
 main().catch(() => {

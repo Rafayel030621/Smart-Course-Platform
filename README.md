@@ -40,14 +40,17 @@ Node 20.19+ 或 22.12+（Vite 8 的要求）。
 后端端到端冒烟（建议使用本地或临时数据库，不要指向生产库）：
 
 ```bash
-cd server && npm run build && cd ..
+cd server && npm run build
 export INVITE_CODE=dev-invite-2026
 export SCP_COOKIE_SECURE=0
-export SCP_DB_PATH=/tmp/course-platform-smoke.sqlite   # 可选
+export SCP_DB_PATH=/tmp/course-platform-smoke.sqlite
 export PORT=8099
-node server/dist/src/index.js
+node dist/src/index.js
+# 另开终端，回到仓库根目录运行：
 npm run smoke -- --base http://127.0.0.1:8099 --invite dev-invite-2026
 ```
+
+Windows PowerShell 使用 `$env:INVITE_CODE='dev-invite-2026'` 等写法，不是 `export`。
 
 ## 数据
 
