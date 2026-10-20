@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { transaction } from './db.js'
 import {
   assertProjectRevision,
+  assertProjectWritable,
   bumpProjectRevision,
   loadProject,
   optionalText,
@@ -177,6 +178,7 @@ export async function handleProjectPatch(
   }
 
   const project = loadProject(db, userId, projectId)
+  assertProjectWritable(project)
   assertProjectRevision(project, envelope.projectRevision)
 
   const hasName = body.name !== undefined
@@ -245,6 +247,10 @@ export async function handleProjectAction(
   const project = loadProject(db, userId, projectId, {
     includeDeleted: action === 'restore-deleted' || action === 'delete',
   })
+  // 恢复与删除项目本身不受归档写保护限制；其余项目动作必须先恢复
+  if (action !== 'restore' && action !== 'delete') {
+    assertProjectWritable(project)
+  }
   assertProjectRevision(project, envelope.projectRevision)
 
   const response = transaction(db, () => {

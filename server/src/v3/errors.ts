@@ -16,6 +16,7 @@ export type V3ErrorCode =
   | 'FORBIDDEN_ORIGIN'
   | 'RATE_LIMITED'
   | 'PROJECT_NOT_FOUND'
+  | 'PROJECT_ARCHIVED'
   | 'RESOURCE_NOT_FOUND'
   | 'PROJECT_MISMATCH'
   | 'STALE_REVISION'
@@ -40,6 +41,7 @@ export type V3ErrorCode =
   | 'EMPTY_MATERIAL'
   | 'MATERIAL_ENCODING_UNREADABLE'
   | 'MATERIAL_PARSE_FAILED'
+  | 'MATERIAL_CONTENT_UNAVAILABLE'
   | 'MIGRATION_NOT_CONFIRMED'
   | 'MIGRATION_CONFIRMATION_EXPIRED'
   | 'MIGRATION_VERSION_UNSUPPORTED'
@@ -71,6 +73,11 @@ export const V3_ERROR_META: Record<V3ErrorCode, ErrorMeta> = {
   FORBIDDEN_ORIGIN: { status: 403, retryable: false, message: '请求来源不受信任' },
   RATE_LIMITED: { status: 429, retryable: true, message: '尝试次数过多，请稍后再试' },
   PROJECT_NOT_FOUND: { status: 404, retryable: false, message: '项目不存在或无权访问' },
+  PROJECT_ARCHIVED: {
+    status: 409,
+    retryable: false,
+    message: '项目已归档，请先恢复再编辑',
+  },
   RESOURCE_NOT_FOUND: { status: 404, retryable: false, message: '请求的内容不存在或无权访问' },
   PROJECT_MISMATCH: { status: 409, retryable: false, message: '请求内容与当前项目不匹配' },
   STALE_REVISION: { status: 409, retryable: false, message: '项目内容已更新，请刷新后重试' },
@@ -123,6 +130,11 @@ export const V3_ERROR_META: Record<V3ErrorCode, ErrorMeta> = {
     message: '文件编码无法识别（已尝试 UTF-8 与 GBK），请另存为 UTF-8 后重试',
   },
   MATERIAL_PARSE_FAILED: { status: 400, retryable: false, message: '材料解析失败，请检查文件内容后重试' },
+  MATERIAL_CONTENT_UNAVAILABLE: {
+    status: 409,
+    retryable: false,
+    message: '这份材料没有保存原文，请重新上传',
+  },
   MIGRATION_NOT_CONFIRMED: { status: 400, retryable: false, message: '请先在页面上确认迁移，再继续' },
   MIGRATION_CONFIRMATION_EXPIRED: {
     status: 400,

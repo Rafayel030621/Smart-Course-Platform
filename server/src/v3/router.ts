@@ -43,6 +43,19 @@ import {
   handleTaskLinkMilestone,
   handleTaskPatch,
 } from './tasks.js'
+import { handleTaskGet, handleTaskList } from './taskReads.js'
+import {
+  handleMaterialGet,
+  handleMaterialList,
+  handleMaterialSegments,
+  handleMaterialUnderstanding,
+} from './materialReads.js'
+import {
+  handleMaterialArchive,
+  handleMaterialReparse,
+  handleMaterialRestore,
+  handleMaterialUpload,
+} from './materialWrites.js'
 import type { V3Runtime } from './runtime.js'
 
 /**
@@ -211,14 +224,16 @@ export async function handleV3Request(
 
     if (rest[0] === 'tasks') {
       if (rest.length === 1) {
-        assertMethod(method, 'POST')
-        await handleTaskCreate(req, res, runtime, auth, projectId)
+        if (method === 'GET') await handleTaskList(res, runtime, auth, projectId, url)
+        else if (method === 'POST') await handleTaskCreate(req, res, runtime, auth, projectId)
+        else throw new V3Error('RESOURCE_NOT_FOUND')
         return true
       }
       const taskId = rest[1] as string
       if (rest.length === 2) {
-        assertMethod(method, 'PATCH')
-        await handleTaskPatch(req, res, runtime, auth, projectId, taskId)
+        if (method === 'GET') await handleTaskGet(res, runtime, auth, projectId, taskId, url)
+        else if (method === 'PATCH') await handleTaskPatch(req, res, runtime, auth, projectId, taskId)
+        else throw new V3Error('RESOURCE_NOT_FOUND')
         return true
       }
       if (rest.length === 3) {
@@ -266,7 +281,50 @@ export async function handleV3Request(
 
     if (rest[0] === 'materials') {
       const materialId = rest[1] as string | undefined
-      if (materialId === undefined || rest[2] !== 'understanding') {
+      if (materialId === undefined) {
+        if (method === 'GET') await handleMaterialList(res, runtime, auth, projectId, url)
+        else if (method === 'POST') await handleMaterialUpload(req, res, runtime, auth, projectId)
+        else throw new V3Error('RESOURCE_NOT_FOUND')
+        return true
+      }
+
+      if (rest.length === 2) {
+        assertMethod(method, 'GET')
+        await handleMaterialGet(res, runtime, auth, projectId, materialId, url)
+        return true
+      }
+
+      if (rest[2] === 'segments' && rest.length === 3) {
+        assertMethod(method, 'GET')
+        await handleMaterialSegments(res, runtime, auth, projectId, materialId, url)
+        return true
+      }
+
+      if (rest[2] === 'understanding' && rest.length === 3) {
+        assertMethod(method, 'GET')
+        await handleMaterialUnderstanding(res, runtime, auth, projectId, materialId, url)
+        return true
+      }
+
+      if (rest.length === 3 && rest[2] === 'archive') {
+        assertMethod(method, 'POST')
+        await handleMaterialArchive(req, res, runtime, auth, projectId, materialId)
+        return true
+      }
+
+      if (rest.length === 3 && rest[2] === 'restore') {
+        assertMethod(method, 'POST')
+        await handleMaterialRestore(req, res, runtime, auth, projectId, materialId)
+        return true
+      }
+
+      if (rest.length === 3 && rest[2] === 'reparse') {
+        assertMethod(method, 'POST')
+        await handleMaterialReparse(req, res, runtime, auth, projectId, materialId)
+        return true
+      }
+
+      if (rest[2] !== 'understanding') {
         throw new V3Error('RESOURCE_NOT_FOUND')
       }
       if (rest[3] === 'confirm-all' && rest.length === 4) {

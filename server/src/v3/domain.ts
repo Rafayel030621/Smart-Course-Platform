@@ -124,6 +124,7 @@ export interface MaterialRow {
   created_at: string
   updated_at: string
   archived_at: string | null
+  content_text: string | null
 }
 
 export interface UnderstandingItemRow {
@@ -144,6 +145,15 @@ export interface UnderstandingItemRow {
   confirmed_at: string | null
   confirmed_by_user_id: string | null
   removed_at: string | null
+}
+
+export interface UnderstandingSourceSegment {
+  segmentId: string
+  materialId: string
+  materialVersion: number
+  startLine: number
+  endLine: number
+  text: string
 }
 
 export interface ProjectProfile {
@@ -302,6 +312,11 @@ export function assertProjectRevision(project: ProjectRow, revision: number): vo
   }
 }
 
+/** 所有领域写接口在 loadProject 后必须调用；恢复/删除项目本身例外 */
+export function assertProjectWritable(project: ProjectRow): void {
+  if (project.status === 'archived') throw new V3Error('PROJECT_ARCHIVED')
+}
+
 /** 成功领域写操作递增 projectRevision；一次事务只调用一次 */
 export function bumpProjectRevision(db: V3Database, projectId: string, nowText: string): number {
   db.prepare(
@@ -376,6 +391,116 @@ export function getProgress(
     .get(progressId, projectId) as ProgressRow | undefined
   if (row === undefined) throw new V3Error('RESOURCE_NOT_FOUND')
   return row
+}
+
+/** 理解条目 sources_json 中声明的 segmentId；其余元数据一律不可信 */
+function requestedSourceSegmentIds(item: UnderstandingItemRow): string[] {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(item.sources_json)
+  } catch {
+    return []
+  }
+  if (!Array.isArray(parsed)) return []
+  const ids = parsed
+    .filter((entry): entry is Record<string, unknown> => entry !== null && typeof entry === 'object')
+    .map((entry) => (typeof entry.segmentId === 'string' ? entry.segmentId : ''))
+    .filter((segmentId) => segmentId !== '')
+  return [...new Set(ids)]
+}
+
+/**
+ * 只返回数据库中与条目 materialId + materialVersion 匹配、且正文有效的片段。
+ * sources_json 中的 materialId、版本、行号等元数据不参与信任判断。
+ */
+export function resolveUnderstandingSourceSegments(
+  db: V3Database,
+  item: UnderstandingItemRow,
+): UnderstandingSourceSegment[] {
+  const statement = db.prepare(
+    `SELECT segment_id, material_id, material_version, start_line, end_line, text
+       FROM material_segments
+      WHERE material_id = ? AND material_version = ? AND segment_id = ?`,
+  )
+  const segments: UnderstandingSourceSegment[] = []
+  for (const segmentId of requestedSourceSegmentIds(item)) {
+    const row = statement.get(
+      item.material_id,
+      item.material_version,
+      segmentId,
+    ) as
+      | {
+          segment_id: string
+          material_id: string
+          material_version: number
+          start_line: number
+          end_line: number
+          text: string
+        }
+      | undefined
+    if (row === undefined || !isMeaningfulText(row.text)) continue
+    segments.push({
+      segmentId: row.segment_id,
+      materialId: row.material_id,
+      materialVersion: row.material_version,
+      startLine: row.start_line,
+      endLine: row.end_line,
+      text: row.text,
+    })
+  }
+  return segments
+}
+
+export function hasValidUnderstandingSource(db: V3Database, item: UnderstandingItemRow): boolean {
+  return resolveUnderstandingSourceSegments(db, item).length > 0
+}
+
+export interface UnderstandingItemDto {
+  itemId: string
+  kind: string
+  text: string
+  originalText: string
+  sources: Array<{
+    materialId: string
+    materialName: string
+    materialVersion: number
+    segmentId: string
+    startLine: number
+    endLine: number
+  }>
+  status: string
+  revision: number
+  confirmedAt: string | null
+  confirmedByUserId: string | null
+  removedAt: string | null
+}
+
+export function toUnderstandingItemDto(
+  db: V3Database,
+  item: UnderstandingItemRow,
+  materialName: string,
+): UnderstandingItemDto {
+  const sources = resolveUnderstandingSourceSegments(db, item).map((segment) => ({
+    materialId: item.material_id,
+    materialName,
+    materialVersion: item.material_version,
+    segmentId: segment.segmentId,
+    startLine: segment.startLine,
+    endLine: segment.endLine,
+  }))
+
+  return {
+    itemId: item.item_id,
+    kind: item.kind,
+    text: item.text,
+    originalText: item.original_text,
+    sources,
+    status: item.status,
+    revision: item.revision,
+    confirmedAt: item.confirmed_at,
+    confirmedByUserId: item.confirmed_by_user_id,
+    removedAt: item.removed_at,
+  }
 }
 
 export function requireTaskMilestone(db: V3Database, projectId: string, milestoneId: string): MilestoneRow {
