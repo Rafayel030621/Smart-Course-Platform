@@ -324,17 +324,20 @@ export async function handleMaterialUpload(
     return
   }
 
-  // 幂等冲突优先于内容校验：同 key 不同 body 必须稳定返回 IDEMPOTENCY_CONFLICT
-  const parsed = parseUpload(body)
+  // 项目存在性、归档状态和版本校验先于内容校验：
+  // 他人项目不能被 base64/编码错误探测，归档项目必须先返回 PROJECT_ARCHIVED。
   const project = loadProject(db, userId, projectId)
   assertProjectWritable(project)
   assertProjectRevision(project, envelope.projectRevision)
 
+  const parsed = parseUpload(body)
   const existing = db
     .prepare(
       `SELECT * FROM materials
         WHERE project_id = ? AND sha256 = ?
-        ORDER BY material_version DESC LIMIT 1`,
+          AND archived_at IS NULL AND status != 'archived'
+        ORDER BY created_at DESC, material_version DESC
+        LIMIT 1`,
     )
     .get(projectId, parsed.sha256) as MaterialRow | undefined
 
@@ -569,11 +572,11 @@ export async function handleMaterialReparse(
   assertProjectWritable(project)
   assertProjectRevision(project, envelope.projectRevision)
   const current = requireCurrentMaterial(db, projectId, materialId)
-  if (current.content_text === null) {
-    throw new V3Error('MATERIAL_CONTENT_UNAVAILABLE')
-  }
   if (isMaterialArchived(current)) {
     throw new V3Error('INVALID_STATE_TRANSITION')
+  }
+  if (current.content_text === null) {
+    throw new V3Error('MATERIAL_CONTENT_UNAVAILABLE')
   }
 
   const parsed = parseSegmentsOrFailure(current.content_text)

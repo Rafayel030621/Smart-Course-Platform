@@ -21,10 +21,12 @@ import { migrate } from '../src/v3/migrations.js'
 
 let client: TestClient
 let user: LoggedInUser
+let other: LoggedInUser
 
 before(async () => {
   client = await createTestClient()
-  user = await registerUser(client, { account: `material_write_${Date.now()}` })
+  user = await registerUser(client, { account: `mw_${Date.now().toString().slice(-10)}` })
+  other = await registerUser(client, { account: `mw_o_${Date.now().toString().slice(-9)}` })
 })
 
 after(async () => {
@@ -69,7 +71,11 @@ async function upload(
   return { response, body: (await response.json()) as Record<string, unknown> }
 }
 
-function seedMaterialWithoutContent(projectId: string, materialId: string): void {
+function seedMaterialWithoutContent(
+  projectId: string,
+  materialId: string,
+  archived = false,
+): void {
   client.runtime
     .getDb()
     .prepare(
@@ -77,10 +83,16 @@ function seedMaterialWithoutContent(projectId: string, materialId: string): void
          (material_id, material_version, project_id, user_id, name, type, size, encoding,
           status, revision, sha256, failure_reason, created_at, updated_at, archived_at,
           content_text)
-       VALUES (?, 1, ?, ?, '旧材料.md', 'md', 10, 'utf-8', 'parsed', 1, NULL, NULL,
-               '2026-10-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z', NULL, NULL)`,
+       VALUES (?, 1, ?, ?, '旧材料.md', 'md', 10, 'utf-8', ?, 1, NULL, NULL,
+               '2026-10-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z', ?, NULL)`,
     )
-    .run(materialId, projectId, user.userId)
+    .run(
+      materialId,
+      projectId,
+      user.userId,
+      archived ? 'archived' : 'parsed',
+      archived ? '2026-10-02T00:00:00.000Z' : null,
+    )
 }
 
 async function projectRevision(projectId: string): Promise<number> {
@@ -291,6 +303,42 @@ test('同 idempotencyKey 重放不新增行；不同 key 同 sha256 去重', asy
   )
 })
 
+test('同 sha256 只剩归档材料时按新上传处理，生成新 materialId', async () => {
+  const project = await createProject(client, user, { name: '归档后重传项目' })
+  const content = '归档后重新上传的同一文件'
+  const first = await upload(project.projectId, project.projectRevision, content)
+  const firstMaterialId = (first.body.data as { material: { materialId: string } }).material.materialId
+  const firstRevision = first.body.projectRevision as number
+
+  const archive = await client.request(
+    `/api/projects/${project.projectId}/materials/${firstMaterialId}/archive`,
+    {
+      method: 'POST',
+      cookie: user.cookie,
+      body: envelope(project.projectId, firstRevision),
+    },
+  )
+  const archived = (await archive.json()) as { projectRevision: number }
+  assert.equal(archive.status, 200)
+
+  const reupload = await upload(project.projectId, archived.projectRevision, content, {
+    name: 'reupload.md',
+  })
+  const reuploadData = reupload.body.data as {
+    material: { materialId: string; isCurrent: boolean; readOnly: boolean; status: string }
+    deduplicated: boolean
+  }
+  assert.equal(reupload.response.status, 200)
+  assert.equal(reuploadData.deduplicated, false)
+  assert.notEqual(reuploadData.material.materialId, firstMaterialId)
+  assert.equal(reuploadData.material.isCurrent, true)
+  assert.equal(reuploadData.material.readOnly, false)
+  assert.equal(
+    countRows('SELECT COUNT(*) AS count FROM materials WHERE project_id = ?', project.projectId),
+    2,
+  )
+})
+
 test('归档项目上传返回 PROJECT_ARCHIVED，且不产生材料行', async () => {
   const project = await createProject(client, user, { name: '归档材料项目' })
   const archive = await client.request(`/api/projects/${project.projectId}/archive`, {
@@ -310,6 +358,60 @@ test('归档项目上传返回 PROJECT_ARCHIVED，且不产生材料行', async 
   )
   assert.equal(
     countRows('SELECT COUNT(*) AS count FROM idempotency_records WHERE response_json LIKE ?', '%不应写入%'),
+    0,
+  )
+})
+
+test('他人项目 + 非法 base64 先返回 PROJECT_NOT_FOUND，不暴露内容校验', async () => {
+  const foreignProject = await createProject(client, other, { name: '他人材料项目' })
+  const response = await client.request(
+    `/api/projects/${foreignProject.projectId}/materials`,
+    {
+      method: 'POST',
+      cookie: user.cookie,
+      body: {
+        contractVersion: '3.0',
+        requestId: uuid(),
+        idempotencyKey: `foreign-${uuid().slice(0, 20)}`,
+        projectRevision: foreignProject.projectRevision,
+        name: 'bad.md',
+        contentBase64: '这不是合法 base64',
+      },
+    },
+  )
+  assert.equal(response.status, 404)
+  assert.equal((await jsonOf(response)).code, 'PROJECT_NOT_FOUND')
+})
+
+test('归档项目 + 非法 base64 先返回 PROJECT_ARCHIVED', async () => {
+  const project = await createProject(client, user, { name: '归档非法内容项目' })
+  const archive = await client.request(`/api/projects/${project.projectId}/archive`, {
+    method: 'POST',
+    cookie: user.cookie,
+    body: envelope(project.projectId, project.projectRevision),
+  })
+  const archived = (await archive.json()) as { projectRevision: number }
+  assert.equal(archive.status, 200)
+
+  const response = await client.request(
+    `/api/projects/${project.projectId}/materials`,
+    {
+      method: 'POST',
+      cookie: user.cookie,
+      body: {
+        contractVersion: '3.0',
+        requestId: uuid(),
+        idempotencyKey: `archived-bad-${uuid().slice(0, 20)}`,
+        projectRevision: archived.projectRevision,
+        name: 'bad.md',
+        contentBase64: '这不是合法 base64',
+      },
+    },
+  )
+  assert.equal(response.status, 409)
+  assert.equal((await jsonOf(response)).code, 'PROJECT_ARCHIVED')
+  assert.equal(
+    countRows('SELECT COUNT(*) AS count FROM materials WHERE project_id = ?', project.projectId),
     0,
   )
 })
@@ -378,6 +480,26 @@ test('reparse 迁移旧材料 content_text 为 NULL 返回 MATERIAL_CONTENT_UNAV
   assert.equal((await jsonOf(response)).code, 'MATERIAL_CONTENT_UNAVAILABLE')
   assert.equal(
     countRows('SELECT COUNT(*) AS count FROM materials WHERE material_id = ?', 'mat_old_no_content'),
+    1,
+  )
+})
+
+test('归档的迁移旧材料 reparse 先返回 INVALID_STATE_TRANSITION', async () => {
+  const project = await createProject(client, user, { name: '归档旧材料项目' })
+  seedMaterialWithoutContent(project.projectId, 'mat_archived_no_content', true)
+
+  const response = await client.request(
+    `/api/projects/${project.projectId}/materials/mat_archived_no_content/reparse`,
+    {
+      method: 'POST',
+      cookie: user.cookie,
+      body: envelope(project.projectId, project.projectRevision),
+    },
+  )
+  assert.equal(response.status, 409)
+  assert.equal((await jsonOf(response)).code, 'INVALID_STATE_TRANSITION')
+  assert.equal(
+    countRows('SELECT COUNT(*) AS count FROM materials WHERE material_id = ?', 'mat_archived_no_content'),
     1,
   )
 })

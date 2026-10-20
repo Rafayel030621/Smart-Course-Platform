@@ -3045,6 +3045,7 @@ AI 候选确认规则见 23.7；**服务端不得因“项目为空”自动创�
 - `projectId` 由路径提供；body 显式提供时必须与路径一致；
 - **不接受客户端 `materialId` / `materialVersion`**；两者由服务端生成，上传为新 `materialId` + `version=1`；
 - 请求体上限 2 MB；解码后文件上限 1 MB；
+- **项目校验先于内容校验**：先 `loadProject`、校验项目未归档、校验 `projectRevision`，再校验扩展名与文件内容；他人项目返回 404，归档项目返回 409，不能用非法 base64 探测项目状态；
 - 校验顺序与 V2 一致：扩展名白名单 → base64 合法性 → 大小 → UTF-8 严格 → GBK 严格 → 含 NUL 拒绝 → 空/纯空白拒绝 → 分段；
 - `materials.content_text` 保存解码后的原文，供重新解析和后续 AI 上下文使用；
 - `sha256` 按解码后的原始字节计算；
@@ -3071,7 +3072,8 @@ AI 候选确认规则见 23.7；**服务端不得因“项目为空”自动创�
 
 - `data.material` 复用 22.8 Material DTO；
 - `data.segments` 最多返回前 20 条，`segmentCount` 是真实总数；
-- 同项目内相同 `sha256`（不同 key）直接返回既有材料，`data.deduplicated=true`，不新增 `materials` / `material_segments` 行，不递增 `projectRevision`；
+- 同项目内相同 `sha256`（不同 key）**只在既有材料未归档时**去重：直接返回既有材料，`data.deduplicated=true`，不新增 `materials` / `material_segments` 行，不递增 `projectRevision`；
+- 如果同 `sha256` 只剩归档材料，视为一份新的上传，生成新的 `materialId` 与 `version=1`，不复活归档材料；
 - 同一 `idempotencyKey` + 相同请求体返回首次响应并 `replayed=true`；不同请求体 409 `IDEMPOTENCY_CONFLICT`；
 - 归档项目返回 409 `PROJECT_ARCHIVED`，且不产生任何材料行。
 
@@ -3096,8 +3098,8 @@ AI 候选确认规则见 23.7；**服务端不得因“项目为空”自动创�
 - 新版本继承 `name` / `type` / `encoding` / `size` / `sha256`，`revision` 重置为 1；
 - 旧版本自动成为只读历史，`isCurrent=false`；
 - 新版本分段成功 `parsed`，异常 `parse_failed`（200 + `failureReason`）；
-- `content_text IS NULL`（迁移旧材料）返回 409 `MATERIAL_CONTENT_UNAVAILABLE`，中文提示「这份材料没有保存原文，请重新上传」；
-- 当前版本已归档时返回 409 `INVALID_STATE_TRANSITION`，需先恢复；
+- **先判归档状态**：当前版本已归档时返回 409 `INVALID_STATE_TRANSITION`，需先恢复；
+- 再判原文：`content_text IS NULL`（迁移旧材料）返回 409 `MATERIAL_CONTENT_UNAVAILABLE`，中文提示「这份材料没有保存原文，请重新上传」；
 - 成功时单事务写入新版本及片段，`projectRevision` 只 +1；
 - 响应结构与上传相同，`deduplicated=false`。
 
@@ -4061,4 +4063,4 @@ git status / git diff --name-only 检查是否误改 server/src、src、部署�
 | v3.5 | 2026-10-19 | 仅修正表述，不改字段与语义：22.8 `readOnly` 明确只由历史版本与材料/条目归档派生、不含项目归档（项目级写保护留待后续切片）；22.3 明确 Task DTO 无 `readOnly` 字段；22.8 Material DTO 的 `type` 收紧为 `md`/`txt`，迁移旧材料可能保留其他类型 | 姜厚禄（后端） |
 | v3.6 | 2026-10-19 | 归档项目写保护：所有领域写接口返回 409 `PROJECT_ARCHIVED`（项目 restore/delete 例外）；材料/片段/草稿 `readOnly` 纳入项目归档；片段读取通过 `materials.project_id` 校验项目归属；不改字段名与响应结构 | 姜厚禄（后端） |
 | v3.7 | 2026-10-20 | 只改文档、不改接口：重写第 0 节为 V2/V3 双代入口、四条通则与章节导航，并明确实现进度由 `docs/v3-v4-pr2-status.md` 维护；密码哈希改为如实描述 bcrypt cost 12（Argon2id 仅列为可选升级）；`PROJECT_MISMATCH` 标注为保留码，跨项目实体统一 404；目标阶段不属于本项目由 409 改为 404；Session 30 天保留标注为部署侧尚未实现 | 姜厚禄（后端） |
-| v3.8 | 2026-10-20 | PR2 材料写链路：新增项目材料上传（同步解析、2 MB 请求体、1 MB 文件、服务端生成 ID/版本、sha256 去重）、归档/恢复、重新解析；迁移 v2 新增 `materials.content_text` 与项目 sha256 索引；新增 `MATERIAL_CONTENT_UNAVAILABLE` | 姜厚禄（后端） |
+| v3.8 | 2026-10-20 | PR2 材料写链路：新增项目材料上传（同步解析、2 MB 请求体、1 MB 文件、服务端生成 ID/版本、sha256 去重）、归档/恢复、重新解析；去重只命中未归档材料，归档后同内容重传生成新 materialId；项目校验先于内容校验；reparse 先判归档再判原文缺失；迁移 v2 新增 `materials.content_text` 与项目 sha256 索引；新增 `MATERIAL_CONTENT_UNAVAILABLE` | 姜厚禄（后端） |
