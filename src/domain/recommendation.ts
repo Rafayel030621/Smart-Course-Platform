@@ -42,6 +42,12 @@ export const ADVISOR_PROMPT_VERSION_V1 = 'mvp-prompt-v1'
 /** 契约 17.4：聊天接口的当前提示词版本；`advisor-chat-v1` 兼容保留 */
 export const ADVISOR_CHAT_PROMPT_VERSION = 'advisor-chat-v2'
 
+/** 契约 23.1：建议接口的 v3 提示词版本；必须与 milestoneContext 成对出现 */
+export const MILESTONE_PROMPT_VERSION = 'mvp-prompt-v3'
+
+/** 契约 23.1：聊天接口的 v3 提示词版本；必须与 milestoneContext 成对出现 */
+export const ADVISOR_CHAT_PROMPT_VERSION_V3 = 'advisor-chat-v3'
+
 /** 契约 17.4：材料理解接口的提示词版本，只此一值 */
 export const MATERIAL_UNDERSTANDING_PROMPT_VERSION = 'material-understanding-v1'
 
@@ -144,6 +150,47 @@ export interface ConfirmedMaterial {
 /** 契约 17.1：`confirmedMaterials` 里的一条片段（与 UnderstandingSegmentInput 同形） */
 export type ConfirmedMaterialSegment = UnderstandingSegmentInput
 
+/* ------------------------------------------------ v3 阶段上下文（契约 23.2） */
+
+/** 契约 23.2：当前阶段任务快照（字段沿用 4.1，包含已完成任务） */
+export type MilestoneTaskSnapshot = TaskSnapshot
+
+/** 契约 23.2：最近进展快照 */
+export interface ProgressSnapshot {
+  progressId: string
+  summary: string
+  milestoneId: string | null
+  taskId: string | null
+  occurredAt: string
+}
+
+/**
+ * 契约 23.2：建议 / 聊天的阶段上下文。
+ * `milestoneId === null` 时，其余标量字段必须为 null，三个数组必须为空。
+ */
+export interface MilestoneContext {
+  milestoneId: string | null
+  currentMilestone: string | null
+  milestoneRevision: number | null
+  milestoneGoal: string | null
+  milestoneDoneCriteria: string | null
+  milestoneStatus: 'planned' | 'active' | null
+  milestoneTasks: MilestoneTaskSnapshot[]
+  recentProgress: ProgressSnapshot[]
+  milestoneEvidence: EvidenceSnapshot[]
+}
+
+/** 契约 23.2：来源引用（BasisMaterialRef / Citation 同形） */
+export interface BasisMaterialRef {
+  materialId: string
+  materialName: string
+  materialVersion: number
+  segmentId: string
+  startLine: number
+  endLine: number
+  itemId: string | null
+}
+
 /** 契约 4.1 请求体；`projectProfile` 与 `confirmedMaterials` 是 v2 可选字段 */
 export interface AdvisorRecommendationsRequest {
   contractVersion: string
@@ -163,6 +210,8 @@ export interface AdvisorRecommendationsRequest {
   evidence: EvidenceSnapshot[]
   /** 只发 status === 'open' 的疑问 */
   doubts: DoubtSnapshot[]
+  /** 契约 23.1：v3 提示词必须携带；v1/v2 必须不出现 */
+  milestoneContext?: MilestoneContext
   promptVersion: string
   forceRefresh: boolean
 }
@@ -181,6 +230,8 @@ export interface Suggestion {
   existingTaskId: string | null
   basisEvidenceIds: string[]
   basisDoubtIds: string[]
+  /** 契约 23.3：v3 可选，只允许来自已确认材料的片段 */
+  basisMaterialRefs?: BasisMaterialRef[]
 }
 
 /** 契约 4.3 / 4.4：成功响应（source 为 model 或 fallback） */
@@ -195,6 +246,8 @@ export interface AdvisorRecommendationsSuccess {
   /** 是否复用服务端缓存；本轮服务端没有缓存层，恒为 false */
   cached: boolean
   promptVersion: string
+  /** 契约 23.3：v3 响应回显阶段版本；v1/v2 不返回 */
+  milestoneRevision?: number | null
   suggestions: Suggestion[]
 }
 
@@ -229,6 +282,8 @@ export interface AdvisorChatRequest {
   chatHistory: AdvisorChatMessage[]
   /** 非空，≤ 2,000 字 */
   question: string
+  /** 契约 23.1：v3 提示词必须携带；v1/v2 必须不出现 */
+  milestoneContext?: MilestoneContext
 }
 
 /** 契约 6.4：成功响应。`answer` 非空；`source` 只可能是 model / fallback */
@@ -240,6 +295,10 @@ export interface AdvisorChatSuccess {
   source: AdvisorResponseSource
   fallbackReason: AdvisorFallbackReason | null
   promptVersion: string
+  /** 契约 23.3：v3 响应回显阶段版本；v1/v2 不返回 */
+  milestoneRevision?: number | null
+  /** 契约 23.3：v3 必须返回（可为空数组），只包含已确认片段 */
+  citations?: BasisMaterialRef[]
   answer: string
 }
 
