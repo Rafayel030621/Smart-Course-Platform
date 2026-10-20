@@ -32,7 +32,7 @@
 
 | 状态 | 方法 | 路径 | 接入方 | 说明 |
 | --- | --- | --- | --- | --- |
-| ✅ | GET | `/api/projects` | 李、雍 | 当前用户项目列表；支持 `includeArchived`、分页 |
+| ✅ | GET | `/api/projects` | 李、雍 | 当前用户项目列表；支持 `includeArchived`；**不分页**，一次返回全部 |
 | ✅ | POST | `/api/projects` | 李、雍 | 创建项目；空项目不会自动注入模板阶段 |
 | ✅ | GET | `/api/projects/{projectId}` | 李、雍 | 项目详情 + `projectRevision` |
 | ✅ | PATCH | `/api/projects/{projectId}` | 李、雍 | 改名/简介等；需 `projectRevision` |
