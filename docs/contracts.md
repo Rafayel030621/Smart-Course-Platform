@@ -1,12 +1,12 @@
 # 智慧课程平台 · 前后端接口契约
 
-> 文档修订：v3.6（归档项目写保护：所有领域写接口返回 409 `PROJECT_ARCHIVED`；材料/片段/草稿 `readOnly` 纳入项目归档；片段读取按项目校验；不改已有字段名与响应结构）
+> 文档修订：v3.7（只改文档、不改接口：第 0 节重写为 V2/V3 双代入口与四条通则；密码哈希改为如实描述 bcrypt cost 12；`PROJECT_MISMATCH` 标注为保留码、跨项目实体统一 404；Session 30 天保留标注为部署侧待实现）
 > 编制日期：2026-09-25（v2.0：2026-10-12；v3.0：2026-10-19，PR1 冻结 V3/V4 账号、阶段、进展、AI 上下文与迁移）
 > owner：负责人（后端）
 > 地位：**本文件是前后端唯一契约。** 四名成员不得自行新增字段或创建第二套 DTO。
 > 适用范围：V2 的 `POST /api/advisor/recommendations`、`POST /api/advisor/chat`、`POST /api/materials`、`POST /api/materials/understanding`；V3/V4 的账号、项目、阶段、任务、证据、进展、时间线、阶段候选、本地迁移与 AI 阶段上下文。
 > v2 章节（第 12–18 节）是 M1 冻结内容：本轮只支持 `md` / `txt`（M2-A）；CSV/XLSX 属 M2-B，PDF/DOCX/ZIP 属 M4。
-> v3 章节（第 20–27 节）是 PR1 冻结内容：**只冻结模型与接口，不实现后端、不修改前端、不部署**。实体字段与生命周期详见 `docs/architecture/v3-v4-domain-model.md`。
+> v3 章节（第 20–27 节）是 V3 契约：定义账号、项目域、材料、迁移与 AI 上下文的接口语义。后端已实现其中一部分，**实现进度与缺口统一见 `docs/v3-v4-pr2-status.md`**。接口以本契约为准：代码与契约不一致时，要么按契约修代码，要么先改契约再改代码，不得默认以代码为准。
 > 节号说明：原第 11 节“变更记录”已移到文末第 28 节；为避免破坏既有引用，其余旧节号不重排；V3 章节从第 20 节开始。
 > **本文定义接口，不能替代部署验证。** 当前线上验证结果与仍需复验的事项见第 7 节。
 
@@ -16,12 +16,23 @@
 
 ## 0. 一分钟版
 
-1. 本轮只有**一条**新接口：`POST /api/advisor/recommendations`。任务、证据、疑问都保存在浏览器（localStorage），不经过该接口写入。
-2. 页面只调用 6 个 store action，不直接 `fetch`，不直接改项目深层对象。
-3. 建议有三个来源：`model`（模型）、`fallback`（服务端规则兜底）、`local-rule`（前端本地规则兜底）。三者共用同一份数据结构。
-4. 任何响应都要用 `projectId` + `projectRevision` + `requestId` 三者校验，不匹配就丢弃。
-5. 模型永远不能把任务标记为完成、不能解决疑问、不能改变项目事实。
-6. v2（M2-A）新增 `POST /api/materials`（材料登记与解析）与 `POST /api/materials/understanding`（材料理解草稿），以及 `projectProfile`、`confirmedMaterials` 两个可选请求字段；本轮只支持 `md` / `txt`，详见第 12–18 节。
+本文件是前后端唯一契约，同时覆盖两代接口，靠 `contractVersion` 区分：
+
+| 代 | `contractVersion` | 范围 | 章节 |
+| --- | --- | --- | --- |
+| V2 | `"1.0"` | 建议、聊天、材料登记与理解；字段与行为冻结 | 4–19 |
+| V3 | `"3.0"` | 账号与会话、项目/阶段/任务/证据/进展、材料读写、本地迁移 | 20–26 |
+
+V3 的四条通则，任何接口都不得违反：
+
+1. **归属**：先认证，再按 `userId + projectId` 校验所有权；跨用户项目一律 404 `PROJECT_NOT_FOUND`，同一用户跨项目实体一律 404 `RESOURCE_NOT_FOUND`，不得用 409/403 泄露资源是否存在。
+2. **并发**：写接口必须带 `projectRevision`（单实体更新再加 `expectedRevision`）与 `idempotencyKey`；不匹配返回 `STALE_REVISION`，且不写入任何数据。
+3. **幂等**：同键同体重放返回首次响应并置 `replayed: true`；同键不同体返回 409 `IDEMPOTENCY_CONFLICT`，不写入。
+4. **读不写**：读接口不递增版本、不写幂等记录、不改变任何业务状态。
+
+接口覆盖范围以本文件为准，**实现进度不在本文件内维护**：已实现、未实现和半成品的能力见 `docs/v3-v4-pr2-status.md`。本文件描述目标语义，状态文档标注代码与契约的差距。
+
+V2 建议与聊天仍有三层来源（`model` / `fallback` / `local-rule`）；任何响应都要用 `projectId` + `projectRevision` + `requestId` 三者校验，不匹配就丢弃。模型永远不能把任务标记为完成、不能解决疑问、不能改变项目事实。
 
 ---
 
@@ -1765,7 +1776,7 @@ model 响应：
 | 账号 | 用户名或学号；3～32 字符；允许 `[A-Za-z0-9_]`，或 6～20 位纯数字；大小写不敏感 |
 | 昵称 | 1～30 字，去除首尾空白后非空；允许中文 |
 | 密码 | 8～64 个字符；按 UTF-8 字节数 ≤ 72（兼容 bcrypt）；不去除首尾空格 |
-| 密码哈希 | 优先 Argon2id（memory ≥ 64 MiB、iterations ≥ 3、parallelism ≥ 1）；兼容 bcrypt（cost ≥ 12） |
+| 密码哈希 | 当前实现为 **bcrypt（cost 12）**，使用纯 JS 的 `bcryptjs`，不引入原生依赖。Argon2id 仅作为可选升级：若采用需满足 memory ≥ 64 MiB、iterations ≥ 3、parallelism ≥ 1，并同时提供已存哈希的迁移路径；未迁移前不得混用两种算法 |
 | 邀请码 | 8～64 个可打印字符；只保存哈希；常量时间比较；不写日志 |
 | 注册凭据 | 账号 + 密码 + 昵称 + 邀请码，四者缺一不可 |
 | 登录标识 | 账号 + 密码 |
@@ -1816,7 +1827,7 @@ model 响应：
 
 - 登录成功创建新 Session 并撤销旧 Session；退出撤销当前 Session；
 - `expiresAt` 到期即 `expired`；用户禁用时全部 Session 置 `revoked`；
-- Session 不参与项目 `projectRevision`；过期/撤销记录保留 30 天用于审计。
+- Session 不参与项目 `projectRevision`；过期/撤销记录的目标保留期为 30 天。**当前代码没有自动清理任务**，记录会一直保留；30 天保留期由部署侧定时任务执行，未实现前不得在文档或界面上宣称已按 30 天清理。
 
 #### 21.2.2 前端请求约定
 
@@ -2465,7 +2476,7 @@ AI 候选确认规则见 23.7；**服务端不得因“项目为空”自动创�
 }
 ```
 
-错误：目标阶段归档 `MILESTONE_ARCHIVED`；目标阶段完成且未重开 `MILESTONE_COMPLETED`；阶段不属于本项目 `PROJECT_MISMATCH`。
+错误：目标阶段归档 `MILESTONE_ARCHIVED`；目标阶段完成且未重开 `MILESTONE_COMPLETED`；目标阶段不属于当前项目返回 404 `RESOURCE_NOT_FOUND`（与 22.0 一致，不使用 `PROJECT_MISMATCH`）。
 
 #### PATCH /api/projects/{projectId}/tasks/{taskId}
 
@@ -3777,7 +3788,7 @@ v3 规则：
 | `PROJECT_NOT_FOUND` | 404 | false | 项目不存在或不属于当前用户 | 项目不存在或无权访问 |
 | `PROJECT_ARCHIVED` | 409 | false | 对归档项目执行领域写操作（项目 restore/delete 除外） | 项目已归档，请先恢复再编辑 |
 | `RESOURCE_NOT_FOUND` | 404 | false | 阶段/任务/证据/材料/进展/聊天不存在或不属于当前用户 | 请求的内容不存在或无权访问 |
-| `PROJECT_MISMATCH` | 409 | false | 同一用户下，实体属于另一个项目 | 请求内容与当前项目不匹配 |
+| `PROJECT_MISMATCH` | 409 | false | **保留码，当前实现不返回**：跨项目实体一律 404 `RESOURCE_NOT_FOUND`（见 22.0）；前端不需要专门分支 | 请求内容与当前项目不匹配 |
 | `STALE_REVISION` | 409 | false | `projectRevision` 或实体 revision 落后 | 项目内容已更新，请刷新后重试 |
 | `IDEMPOTENCY_CONFLICT` | 409 | false | 同一幂等键对应不同请求体 | 重复请求的内容不一致，请刷新后重试 |
 | `INVALID_ORDER` | 400 | false | 排序列表遗漏、重复、包含归档阶段或不是全量 | 阶段顺序不完整，请刷新后重试 |
@@ -3971,3 +3982,4 @@ git status / git diff --name-only 检查是否误改 server/src、src、部署�
 | v3.4 | 2026-10-19 | PR2B 第一阶段：新增任务列表/单任务、材料列表/单材料、片段与理解草稿只读接口；材料列表默认当前版本，历史版本通过 `version` 只读访问；任务默认排除归档任务与归档阶段任务；统一 `limit`/`cursor`；读取不递增版本、不写幂等记录 | 姜厚禄（后端） |
 | v3.5 | 2026-10-19 | 仅修正表述，不改字段与语义：22.8 `readOnly` 明确只由历史版本与材料/条目归档派生、不含项目归档（项目级写保护留待后续切片）；22.3 明确 Task DTO 无 `readOnly` 字段；22.8 Material DTO 的 `type` 收紧为 `md`/`txt`，迁移旧材料可能保留其他类型 | 姜厚禄（后端） |
 | v3.6 | 2026-10-19 | 归档项目写保护：所有领域写接口返回 409 `PROJECT_ARCHIVED`（项目 restore/delete 例外）；材料/片段/草稿 `readOnly` 纳入项目归档；片段读取通过 `materials.project_id` 校验项目归属；不改字段名与响应结构 | 姜厚禄（后端） |
+| v3.7 | 2026-10-20 | 只改文档、不改接口：重写第 0 节为 V2/V3 双代入口、四条通则与章节导航，并明确实现进度由 `docs/v3-v4-pr2-status.md` 维护；密码哈希改为如实描述 bcrypt cost 12（Argon2id 仅列为可选升级）；`PROJECT_MISMATCH` 标注为保留码，跨项目实体统一 404；目标阶段不属于本项目由 409 改为 404；Session 30 天保留标注为部署侧尚未实现 | 姜厚禄（后端） |
