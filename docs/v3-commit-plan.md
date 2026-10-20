@@ -1,6 +1,6 @@
 # V3 前端提交方案（建议稿，未执行；含隔离验证结论）
 
-> 状态：**已在本地分支落地，未推送**。分支 `feature/v3-frontend-data-layer` 基于 `origin/main`（`a71b1e1`），含 6 个提交；未创建 PR、未推送、未部署。
+> 状态：**已推送并创建 PR #22，未合并**。分支 `feature/v3-frontend-data-layer` 基于 `origin/main`（已合并 `2cde85f`）；评审修复提交后任务读取已接入；未合并、未部署。
 > 配套材料：PR 描述草稿 `docs/v3-pr-draft.md`，实现说明 `docs/v3-frontend-delivery.md`。
 > 验证日期：2026-10-20。验证方式：独立 `git worktree`，detached HEAD，不改动主工作区与暂存区。
 
@@ -11,7 +11,7 @@
 | # | 结论 |
 | --- | --- |
 | 1 | **A 组不能以当前分支 HEAD `ac65287` 为目标基线独立交付。** 该基线本身 typecheck 21 错、62 条用例失败；A 组不引入回归，但也无法让基线变绿，且 `src/domain/cloudView.ts` 真实依赖 v2 的 `Task.draftKey` 类型。 |
-| 2 | **A 组可以以 `origin/main`（`a71b1e1`）为基线，按"数据层"独立交付**：实测 typecheck 0 错、`npm test` 815/815（34 文件）、build 通过、eslint 0。 |
+| 2 | **A 组可以以 `origin/main`（`a71b1e1`）为基线，按"数据层"独立交付**：实测 typecheck 0 错、`npm test` 815/815（34 文件）、build 通过、eslint 0；评审修复（任务读取）后为 **820/820（35 文件）**。 |
 | 3 | **页面接线不能随数据层一起进 `origin/main`**：`src/views/WorkbenchView.vue` 在 main 已被 PR #16 重构（拆 tabs），A 组的页面补丁冲突，必须按新结构重做；`src/App.vue`、`src/views/ProjectMapView.vue` 可应用但需与页面重构一并验证。 |
 | 4 | 原提交方案把 `src/types/platform.ts` 整文件计入 A 组**不准确**：该文件 3 个 hunk 中，前 2 个（`SuggestedStep.taskId/status`、`Task.draftKey`）属 v2，只有第 3 个（423 行 V3 契约类型）属 V3。`src/domain/recommendation.ts` 同理（`ClaimTaskResult.status` 与 `describeAdvisorFailure` 属 v2/§14）。 |
 | 5 | B 组的 v2 实现修复（`draftKey` 持久化、聊天长度校验）**已合入 `origin/main`**（PR #14 / #15），因此在 main 基线上不再构成 V3 的前置依赖；在 `ac65287` 基线上则必须补齐，且补齐量等价于整个 B 组。 |
@@ -152,14 +152,14 @@ only in agroup   = (空)
 
 | 提交 | 标题 | 文件 | 理由 |
 | --- | --- | --- | --- |
-| C1 | `feat(v3): add contract types and authenticated HTTP/API clients` | `src/types/platform.ts`（**仅 V3 hunk，423 行**）、`src/services/http.ts`、`src/services/v3Http.ts`、`src/services/authApi.ts`、`src/services/projectsApi.ts` | 纯契约与传输层；`--check` 已验证可干净应用 |
+| C1 | `feat(v3): add contract types and authenticated HTTP/API clients` | `src/types/platform.ts`（**仅 V3 hunk，423 行**）、`src/services/http.ts`、`src/services/v3Http.ts`、`src/services/authApi.ts`、`src/services/projectsApi.ts`（含 `listTasks` / `getTask`） | 纯契约与传输层；`--check` 已验证可干净应用 |
 | C2 | `feat(v3): add cloud view, advisor context and local migration domain` | `src/domain/cloudView.ts`、`localMigration.ts`、`v3Advisor.ts`、`src/domain/recommendation.ts`（仅 V3 hunk）、`src/services/advisorApi.ts` | 依赖 C1；`cloudView.ts` 需要 main 已有的 `Task.draftKey` |
 | C3 | `feat(v3): add session, cloud, migration and platform stores` | `src/stores/session.ts`、`cloud.ts`、`migration.ts`、`platform.ts` | 依赖 C1/C2；不含页面 |
-| C4 | `test(v3): cover V3 data layer and keep npm test offline` | 9 个数据层测试、3 个 support、`vitest.config.ts` | 依赖 C1–C3；实测 815/815 |
+| C4 | `test(v3): cover V3 data layer and keep npm test offline` | 10 个数据层测试、3 个 support、`vitest.config.ts` | 依赖 C1–C3；评审修复后实测 820/820 |
 | C5 | `test(v3): add opt-in integration suite` | `tests/integration/v3LocalBackend.integration.test.ts`、`vitest.integration.config.ts`、`scripts/run-v3-local-integration.mjs`、`package.json`、`README.md` | 独立执行入口，避免与离线单测混淆 |
 | C6 | `docs: add V3 delivery and PR materials` | `docs/v3-frontend-delivery.md`、`docs/integration-v3-local.md`、`docs/v3-pr-draft.md`、`docs/v3-commit-plan.md` | 与代码同 PR，独立提交便于对照 |
 
-验证结果：`typecheck` 0 错、`npm test` 815/815（34 文件）、`build` 通过、`eslint` 0 —— 已在本分支实测，与隔离目录 `scp-v3-verify-main-data` 一致。
+验证结果（评审修复后）：`typecheck` 0 错、`npm test` **820/820（35 文件）**、`build` 通过、`eslint` 0 —— 已在本分支实测；修复前为 815/815，与隔离目录 `scp-v3-verify-main-data` 一致。
 
 ### PR-2（页面接线，需按 main 新结构重做）：基线 PR-1 合并后
 
@@ -197,7 +197,8 @@ src/services/advisorApi.ts            src/domain/recommendation.ts（V3 hunk）
 tests/domain/cloudView.test.ts        tests/domain/v3Advisor.test.ts
 tests/stores/cloud.test.ts            tests/stores/cloudWrites.test.ts
 tests/stores/migration.test.ts        tests/stores/platform.test.ts
-tests/stores/session.test.ts          tests/services/projectsIdempotency.test.ts
+tests/stores/session.test.ts          tests/stores/cloudTaskReads.test.ts
+tests/services/projectsIdempotency.test.ts
 tests/services/v3LocalTarget.test.ts
 
 测试基建（3）与配置（2）
@@ -238,7 +239,7 @@ docs/v3-frontend-delivery.md  docs/integration-v3-local.md  docs/v3-pr-draft.md 
 2. 禁用 `git add -A` / `git add .`；按 §5 路径逐个暂存。
 3. `src/types/platform.ts`、`src/domain/recommendation.ts` 用 `git add -p` 只取 V3 hunk；暂存后 `git diff --cached` 复核不含 `draftKey` 声明、不含 `describeAdvisorFailure`。
 4. 暂存后 `git diff --cached --stat` 复核：不应出现 `.tmp-v3-backend`、`*.patch`、`*.sqlite`、`.env*`、`tests/ui/WorkbenchViewCloud.test.ts`（PR-1 阶段）。
-5. 在 PR-1 分支上复跑 §4 的四项检查（目标 815/815）。
+5. 在 PR-1 分支上复跑 §4 的四项检查（目标 820/820）。
 
 ### 6.2 尚需确认
 
@@ -254,9 +255,9 @@ docs/v3-frontend-delivery.md  docs/integration-v3-local.md  docs/v3-pr-draft.md 
 
 ## 7. 执行声明
 
-本轮**已执行**（仅在新分支工作区）：按明确文件列表 `git add` 6 次、`git commit` 6 次；**未推送**。
-本轮**未**执行：`push`、`reset`、`checkout -f`、`clean`、`stash`、创建 PR、部署、发送消息。
+本轮**已执行**（独立 worktree）：按明确文件列表 `git add` 分批提交（6 个数据层提交 + 1 个合并提交 + 1 个文档校正 + 评审修复提交）；已 `git push -u origin feature/v3-frontend-data-layer` 并创建 **PR #22**（未合并）；已 `git fetch` + `git merge origin/main` 解决 `README.md` 冲突（**未 rebase、未 force push**）。
+本轮**未**执行：`reset`、`checkout -f`、`clean`、`stash`、合并 PR、部署、发送消息。
 主工作区 `D:/bdana_program/Smart-Course-Platform-1` 的未提交内容**未被修改**；全部提交发生在独立 worktree（§1.2 最后一行）。
-本轮**未**修改：`src/**` 业务实现、`src/views/**`、`server/**`、`docs/contracts.md`、`.gitignore`、被排除的本地文件。
+本轮**未**修改：`server/**`、`src/views/**`、`src/components/**`、`docs/contracts.md`、`.gitignore`、被排除的本地文件。
 文档仅在新分支内更新验证环境与提交状态；主工作区中的同名文档仍为提交前版本。
 隔离目录（§1.2）保留不清理，供复核。

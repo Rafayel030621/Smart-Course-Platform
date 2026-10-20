@@ -1,9 +1,9 @@
-# PR 描述草稿：V3 前端数据层
+# PR #22 描述：V3 前端数据层
 
-> 状态：**草稿，未提交、未推送、未创建 PR**。
-> 目标基线：`origin/main` = `a71b1e1`（**假设**，尚未经负责人确认；当前分支 HEAD `ac65287` 落后 36 个提交且自身红灯，不适合作为目标）。
-> 范围：本 PR 只含**数据层**；页面接线另开 PR，见 `docs/v3-commit-plan.md` §4。
-> 说明：本文只描述已在隔离目录实际验证的交付集合，不代表 V3/V4 平台整体完成。
+> 状态：**已推送到 `origin/feature/v3-frontend-data-layer`，PR #22 已创建（未合并）**。
+> 基线：`origin/main`（当前 `2cde85f`）；分支已合并该提交并解决 `README.md` 冲突。
+> 范围：本 PR 只含**数据层**；页面接线另开 PR-2，见 `docs/v3-commit-plan.md` §4。
+> 说明：本文只描述本 PR 实际交付并验证的集合，不代表 V3/V4 平台整体完成。
 
 ---
 
@@ -28,13 +28,13 @@ V3 契约（账号会话、云端项目/阶段/任务/证据/进展、本地项�
 | --- | --- | --- |
 | 契约 HTTP 适配 | `src/services/v3Http.ts` | 契约版本、`requestId`、幂等键、超时/取消、错误归一化（`V3Result`/`V3ApiError`）、写响应回显校验、`replayed` 标记 |
 | 鉴权 | `src/services/authApi.ts` | `GET /api/auth/me`、登录、退出；Cookie 由浏览器管理，前端不读取不保存 |
-| 资源 API | `src/services/projectsApi.ts` | 契约 22.1–22.5 项目/阶段/任务/证据/进展读写，含版本冲突、幂等键、跨项目校验 |
+| 资源 API | `src/services/projectsApi.ts` | 契约 22.1–22.5 项目/阶段/任务/证据/进展读写，含版本冲突、幂等键、跨项目校验；任务列表与单条读取（`listTasks`/`getTask`） |
 | 会话 store | `src/stores/session.ts` | `idle/loading/authenticated/unauthenticated/error`；项目列表；401 清理；epoch 丢弃迟到响应 |
-| 云端 store | `src/stores/cloud.ts` | 单一数据副本；写后合并、失败不半更新；`busy` / `isActionLoading` / `sync.status` / `lastError` / `contractBlockers` |
+| 云端 store | `src/stores/cloud.ts` | 单一数据副本；写后合并、失败不半更新；`busy` / `isActionLoading` / `sync.status` / `lastError` / `contractBlockers`；`refreshTasks()` 在打开项目、切换阶段、任务写成功后校正任务列表 |
 | 来源编排 | `src/stores/platform.ts` | 本地/云端来源切换、初始化、登录退出、选择/创建云端项目、迁移入口 |
 | 只读投影 | `src/domain/cloudView.ts` | 服务端数据 → 旧页面 `Project` 形状；不伪造任务/疑问/材料/聊天 |
 | 本地迁移 | `src/domain/localMigration.ts` + `src/stores/migration.ts` | 只读检测、显式确认、`migrationId` 复用重试、schema 版本拦截、失败保留 localStorage |
-| AI 上下文 | `src/domain/v3Advisor.ts` + `cloud.buildAdvisorContext()` | 组装阶段上下文；任务列表不完整时显式 `TASKS_NOT_AVAILABLE`，不用空数组冒充完整上下文 |
+| AI 上下文 | `src/domain/v3Advisor.ts` + `cloud.buildAdvisorContext()` | 基于已读取的任务列表组装阶段上下文；已知任务数与服务端 `taskStats.total` 不一致时显式 `TASKS_NOT_AVAILABLE`，不用空数组冒充完整上下文 |
 | 传输扩展 | `src/services/http.ts` | 支持 `PATCH`/`DELETE` 与 `credentials: 'include'`；默认值不变，既有 V2 调用方行为不变 |
 | 顾问上下文字段 | `src/services/advisorApi.ts` + `src/domain/recommendation.ts` | 建议/聊天携带 `milestoneContext` 与 v3 提示词；解析 `citations` / `milestoneRevision` |
 
@@ -59,41 +59,41 @@ V3 契约（账号会话、云端项目/阶段/任务/证据/进展、本地项�
 
 | # | 能力 | 现状 | 对前端的影响 |
 | --- | --- | --- | --- |
-| 1 | `GET /projects/:id/tasks`、`GET /tasks/:id` | **后端已实现**（main PR #20；支持 `milestoneId`/`status`/`includeArchived`/`limit`/`cursor`） | **客户端未接入**：`tasksHydrated=false`、`buildAdvisorContext()` 返回 `TASKS_NOT_AVAILABLE`；任务刷新恢复与云端 AI 上下文仍不可用，需后续补 store 调用 |
+| 1 | `GET /projects/:id/tasks`、`GET /tasks/:id` | ✅ 后端已实现；**本 PR 已接入**（`refreshTasks`：分页合并、去重、失败不改状态） | 刷新/重进项目后任务可恢复；`tasksHydrated=true`；`buildAdvisorContext()` 返回可用上下文 |
 | 2 | 时间线（契约 22.11） | ⬜ 后端未实现 | `cloud.loadTimeline()` 恒返回 `TIMELINE_NOT_AVAILABLE`，不发请求 |
 | 3 | 阶段候选（契约 23.7） | ⬜ 后端未实现（表已建） | 客户端未实现调用，AI 生成阶段候选不可用 |
-| 4 | 进展 supersede（契约 22.4） | ✅ 后端已实现 | **客户端未接入**，页面无法修正已提交进展 |
-| 5 | 材料读取 `GET /materials` 等 | ✅ 后端已实现 | **客户端未接入**，`confirmedMaterials` 仍需调用方显式传入，无法回读 |
+| 4 | 进展 supersede（契约 22.4） | ✅ 后端已实现；客户端未接入 | 页面无法修正已提交进展 |
+| 5 | 材料读取 `GET /materials` 等（main PR #21） | ✅ 后端已实现；客户端未接入 | `confirmedMaterials` 仍需调用方显式传入，无法回读 |
 | 6 | `GET /evidence/:id`、`GET /progress/:id` | ⬜ 后端未实现 | 详情只能从列表筛 |
+| 7 | 聊天问题长度（契约 6.4） | 前端已前置拒绝（修复已在 `origin/main`）；后端应返回 400 `INVALID_INPUT` | 后端若静默截断，用户会误以为问题已完整提交 |
+| 8 | 创建项目不得注入模板阶段（契约 22.1） | 客户端已加防御 | 请求体不含 `milestones`；服务端若返回阶段，客户端以 `INVALID_RESPONSE` 拒绝 |
 
-> 第 1、4、5 项是"后端就绪、客户端未接"的后续接线任务，不是本 PR 的缺陷；第 2、3、6 项仍受后端阻塞。
-| 6 | 聊天问题长度（契约 6.4） | 历史行为不一致 | 前端已前置拒绝（该修复已在 `origin/main`）；后端应返回 400 `INVALID_INPUT` 而非静默截断 |
-| 7 | 创建项目不得注入模板阶段（契约 22.1） | 客户端已加防御 | 请求体不含 `milestones`；服务端若返回阶段，客户端以 `INVALID_RESPONSE` 拒绝 |
-
-> 第 1 项是**任务刷新恢复与云端 AI 上下文的硬阻塞**；第 4、5 项字段未冻结，客户端刻意不实现。
+> 第 4、5 项是"后端就绪、客户端未接入"的后续接线任务，不是本 PR 的缺陷；第 2、3、6 项仍受后端阻塞。任务读取已在本 PR 修复。
 
 ## 4. 验证（针对本 PR 实际交付集合）
 
-验证方式：在本 PR 分支 `feature/v3-frontend-data-layer`（6 个提交，基于 `origin/main` = `a71b1e1`）上执行，`npm ci` 按 `package-lock.json` 安装。验证日期 2026-10-20。
+验证方式：在本 PR 分支 `feature/v3-frontend-data-layer` 上执行，`npm ci` 按 `package-lock.json` 安装。验证日期 2026-10-20。
 
 | 阶段 | HEAD | 结果 |
 | --- | --- | --- |
-| 提交完成时 | `7c91d72` | typecheck 0 错；`npm test` 815/815（34 文件）；build 通过；eslint 通过 |
-| **合并 main `2cde85f` 后（当前）** | **`251dfb3`** | 复跑一致：typecheck 0 错；`npm test` **815/815（34 文件）**；build 通过；eslint 通过 |
+| 数据层提交完成 | `7c91d72` | typecheck 0 错；`npm test` 815/815（34 文件）；build 通过；eslint 通过 |
+| 合并 main `2cde85f` 后 | `251dfb3` | 复跑一致：815/815（34 文件） |
+| **评审修复后（当前）** | **本次修复提交** | typecheck 0 错；`npm test` **820/820（35 文件）**；build 通过；eslint 通过 |
 
-- 815 = `origin/main` 原有 25 个测试文件 + V3 数据层 9 个测试文件。
+- 815 → 820：新增 `tests/stores/cloudTaskReads.test.ts`（5 条），覆盖任务列表解析、失败不改状态、成功后上下文可用、分页去重与 `getTask`。
 - 合并仅冲突 `README.md`，已解决（保留 main 的用例数措辞 + 本分支的集成测试入口）。
+- 精确 SHA 以 PR 提交列表为准；本文不写死修复提交号，避免与提交后状态不一致。
 
 **必须区分的三组数字（避免误读）**
 
 | 形态 | 结果 | 含义 |
 | --- | --- | --- |
-| **本 PR 分支** `feature/v3-frontend-data-layer` | **815/815，typecheck 0，build/eslint 通过** | 本 PR 的实际状态（已实际运行） |
-| 隔离验证目录 `scp-v3-verify-main-data` | 815/815，typecheck 0 | 与分支结果逐项一致，无差异 |
+| **本 PR 分支** `feature/v3-frontend-data-layer` | **820/820，typecheck 0，build/eslint 通过** | 本 PR 的实际状态（已实际运行） |
+| 隔离验证目录 `scp-v3-verify-main-data` | 815/815，typecheck 0 | 修复前基线；本轮新增 5 条任务读取用例 |
 | 完整混合工作区（主目录，基线 `ac65287`） | 787/787，typecheck 0 | 含 v2 修复与页面接线；**不等于本 PR** |
 | 旧基线 `ac65287` 本身 | 717 用例 62 失败，typecheck 21 错 | 基线自身不绿，不能作为目标 |
 
-**测试性质**：815 条用例全部离线，`fetch` 被替身化，不发网络请求。它们验证前端状态机与契约解析，**不是真实联调**。
+**测试性质**：820 条用例全部离线，`fetch` 被替身化，不发网络请求。它们验证前端状态机与契约解析，**不是真实联调**。
 
 **集成测试（不在本 PR 的验证范围）**：`npm run test:integration:v3-local` 最近一次实际运行是 2026-10-20 的 **12/12**，但该次运行在旧基线（混合工作区）上进行，**未在 `origin/main` + 本 PR 的目录中重跑**；后端来源限制见 §5。
 

@@ -6,7 +6,7 @@
  *   projectId / projectRevision）；
  * - 成功响应必须由 `requestV3Envelope` 校验后才进入 store；
  * - 这里只做“请求与解析”，不做归属/顺序等业务判断（由 cloud store 校验）；
- * - 契约未定义的读取端点（任务列表、材料理解列表、时间线）**不在这里伪造**。
+ * - 任务列表/单条读取按契约 22.3 接入；仍缺失的读取端点（材料理解列表、时间线）**不在这里伪造**。
  */
 import { normalizeProjectProfile } from '@/domain/materials'
 import { V3_CONTRACT_VERSION } from '@/types/platform'
@@ -881,6 +881,82 @@ export async function milestoneAction(
 }
 
 /* ------------------------------------------------------------------ 任务 */
+
+export interface TaskListQuery {
+  /** 契约 22.3：按阶段筛选 */
+  milestoneId?: string
+  status?: CloudTask['status']
+  includeArchived?: boolean
+  limit?: number
+  cursor?: string
+}
+
+export interface CloudTaskPage {
+  tasks: CloudTask[]
+  /** 契约 22.3：无下一页时为 null */
+  nextCursor: string | null
+}
+
+/** GET /api/projects/{projectId}/tasks */
+export async function listTasks(
+  projectId: string,
+  query: TaskListQuery = {},
+  options: ProjectApiOptions = {},
+): Promise<V3Result<CloudTaskPage>> {
+  const requestId = newRequestId()
+  return requestV3Envelope(`/api/projects/${encodeURIComponent(projectId)}/tasks`, {
+    method: 'GET',
+    requestId,
+    expectedProjectId: projectId,
+    query: {
+      milestoneId: query.milestoneId,
+      status: query.status,
+      includeArchived: query.includeArchived === true ? true : undefined,
+      limit: query.limit,
+      cursor: query.cursor,
+    },
+    parseData: (data) => {
+      const record = asRecord(data)
+      const list = record === null ? null : asArray(record['tasks'])
+      if (record === null || list === null) return null
+      const tasks = list.map(parseTask)
+      if (tasks.some((task) => task === null)) return null
+      const nextCursor = record['nextCursor']
+      return {
+        tasks: tasks as CloudTask[],
+        nextCursor: typeof nextCursor === 'string' && nextCursor !== '' ? nextCursor : null,
+      }
+    },
+    signal: options.signal,
+    timeoutMs: options.timeoutMs,
+    fetchImpl: options.fetchImpl,
+  })
+}
+
+/** GET /api/projects/{projectId}/tasks/{taskId} */
+export async function getTask(
+  projectId: string,
+  taskId: string,
+  options: ProjectApiOptions = {},
+): Promise<V3Result<{ task: CloudTask }>> {
+  const requestId = newRequestId()
+  return requestV3Envelope(
+    `/api/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}`,
+    {
+      method: 'GET',
+      requestId,
+      expectedProjectId: projectId,
+      parseData: (data) => {
+        const record = asRecord(data)
+        const task = record === null ? null : parseTask(record['task'])
+        return task === null ? null : { task }
+      },
+      signal: options.signal,
+      timeoutMs: options.timeoutMs,
+      fetchImpl: options.fetchImpl,
+    },
+  )
+}
 
 export interface CreateTaskInput {
   projectId: string

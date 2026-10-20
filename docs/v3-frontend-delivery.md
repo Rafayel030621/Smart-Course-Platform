@@ -41,7 +41,7 @@
 
 ### 1.4 受接口缺口阻塞（未实现，不伪造）
 
-- 时间线、阶段候选、evidence/progress 单条读取仍未实现；任务列表、材料读取、进展 supersede 已由 `origin/main` 后端实现，但**前端尚未接入**（详见 §3）。
+- 时间线、阶段候选、evidence/progress 单条读取仍未实现；材料读取与进展 supersede 已由后端实现但前端尚未接入；**任务列表已在本 PR 接入**（详见 §3）。
 - 因此「刷新后恢复任务」「云端 AI 上下文」「云端证据/材料写入」在页面上仍不可用，界面已如实提示，不用空数组冒充成功。
 
 ---
@@ -131,7 +131,7 @@
 
 | # | 能力 | 现状分类 | 依据 | 影响 |
 | --- | --- | --- | --- | --- |
-| 1 | 任务列表/单条读取（`GET /projects/:id/tasks`、`GET /tasks/:id`） | **后端已实现；前端未接入** | `server/src/v3/taskReads.ts`（支持 `milestoneId`/`status`/`includeArchived`/`limit`/`cursor`） | 刷新/重进项目后任务仍丢失；`tasksHydrated=false`；`buildAdvisorContext` 返回 `TASKS_NOT_AVAILABLE`；需后续补 store 调用 |
+| 1 | 任务列表/单条读取（`GET /projects/:id/tasks`、`GET /tasks/:id`） | **已接入（本 PR）** | `server/src/v3/taskReads.ts`（支持 `milestoneId`/`status`/`includeArchived`/`limit`/`cursor`） | `refreshTasks()` 在打开项目、切换阶段、任务写成功后校正列表：分页合并、按 `taskId` 去重、失败保留原任务且不置 `tasksHydrated`；成功后 AI 上下文可用 |
 | 2 | 时间线（契约 22.11） | **缺实现** | 后端 `server/src/v3` 无 timeline 路由 | `loadTimeline()` 恒返回 `TIMELINE_NOT_AVAILABLE`，页面无时间线 |
 | 3 | 阶段候选（契约 23.7 `POST .../milestones/candidates`） | **缺实现（表已建）** | 后端 router 无该路由 | 客户端未实现调用；AI 生成阶段候选不可用 |
 | 4 | 进展 supersede（契约 22.4） | **后端已实现；前端未接入** | `POST /progress/:id/supersede`，旧记录转 `superseded` | 页面无法修正已提交进展 |
@@ -140,7 +140,7 @@
 | 7 | 服务端聊天问题长度校验（契约 6.4，≤2000 字） | **两者不一致（历史遗留）** | 前端已在 store 前置拒绝；服务端应返回 400 `INVALID_INPUT` | 若后端仍截断，用户会误以为问题已完整提交 |
 | 8 | 创建项目不得注入模板阶段（契约 22.1） | **实现一致性防御已加** | 客户端请求体不含 `milestones`，且服务端返回阶段时以 `INVALID_RESPONSE` 拒绝 | 后端若改变行为，会立即被测试与客户端拦下 |
 
-> 第 2、3、6 项是真实的后端缺口；第 1、4、5 项属"后端就绪、前端待接"的后续任务。客户端已预留 `contractBlockers` 与错误码，补接线不需要改数据层结构。
+> 第 2、3、6 项是真实的后端缺口；第 4、5 项属"后端就绪、前端待接"的后续任务；第 1 项已在本 PR 接入。客户端已预留 `contractBlockers` 与错误码，补接线不需要改数据层结构。
 
 ---
 
@@ -154,6 +154,7 @@
 | --- | --- | --- | --- | --- |
 | **PR-1 分支** `feature/v3-frontend-data-layer`（`origin/main` + V3 数据层，不含页面） | **815/815，34 文件** | **0 错误** | 通过 | 通过 |
 | PR-1 分支合并 main `2cde85f` 后（HEAD `251dfb3`） | **815/815，34 文件** | **0 错误** | 通过 | 通过 |
+| **PR-1 分支评审修复后（本次修复提交）** | **820/820，35 文件** | **0 错误** | 通过 | 通过 |
 | 隔离验证目录 `scp-v3-verify-main-data` | 815/815，34 文件 | 0 错误 | 通过 | 通过 |
 | 完整混合工作区（主目录，基线 `ac65287`） | 787/787，35 文件 | 0 错误 | 通过 | 通过 |
 | 严格 A 组（`ac65287` + 仅 V3 hunk） | 789 用例：727 通过 / 62 失败 | 23 错误（基线 21 + 2） | 通过 | 通过 |
@@ -220,12 +221,12 @@ src/services/http.ts           src/services/advisorApi.ts   README.md
 **新增测试与基建（12 个测试文件 + 3 个 support）**
 
 ```
-数据层测试（9，随数据层 PR）
+数据层测试（10，随数据层 PR）
 tests/domain/cloudView.test.ts        tests/domain/v3Advisor.test.ts
 tests/stores/cloud.test.ts            tests/stores/cloudWrites.test.ts
-tests/stores/migration.test.ts        tests/stores/platform.test.ts
-tests/stores/session.test.ts          tests/services/projectsIdempotency.test.ts
-tests/services/v3LocalTarget.test.ts
+tests/stores/cloudTaskReads.test.ts   tests/stores/migration.test.ts
+tests/stores/platform.test.ts         tests/stores/session.test.ts
+tests/services/projectsIdempotency.test.ts  tests/services/v3LocalTarget.test.ts
 
 集成测试（1，随数据层 PR）
 tests/integration/v3LocalBackend.integration.test.ts

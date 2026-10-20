@@ -11,8 +11,8 @@
  *   4. 同一操作的并发重复调用直接拒绝，不发送第二次请求。
  *
  * 契约缺口（不伪造）：
- *   - 没有读取任务列表的端点，任务只能来自本次会话内的创建/关联响应；
- *   - 没有读取 timeline 的端点，`loadTimeline()` 返回 MISSING_CONTRACT；
+ *   - 任务列表按契约 22.3 读取（`refreshTasks`）；读取失败时保留现有任务且不置 `tasksHydrated`；
+ *   - 没有读取 timeline 的端点，`loadTimeline()` 返回 TIMELINE_NOT_AVAILABLE；
  *   - 没有读取材料理解条目的端点，v3 AI 的已确认材料需由调用方显式传入。
  */
 import { computed, ref } from 'vue'
@@ -29,6 +29,7 @@ import {
   listEvidence,
   listMilestones,
   listProgress,
+  listTasks,
   milestoneAction as milestoneActionApi,
   projectAction as projectActionApi,
   reorderMilestones as reorderMilestonesApi,
@@ -587,8 +588,8 @@ export const useCloudStore = defineStore('cloud', () => {
       progress.value = progressResult.data.progress
       for (const item of loaded.milestones) indexEntity(item.milestoneId, projectId)
       for (const item of evidence.value) indexEntity(item.evidenceId, projectId)
-      // 任务列表读取端点缺失：不伪造，只标记未恢复
-      tasksHydrated.value = false
+      // 任务列表（契约 22.3）：读取失败不阻断打开项目，只保持未恢复状态
+      await refreshTasks({ ...requestOptions, silent: true })
       loadingProject.value = false
       clearFailure()
       return { ok: true, data: project.value! }
@@ -1043,6 +1044,8 @@ export const useCloudStore = defineStore('cloud', () => {
       applyMilestone(result.data.milestone)
       recomputeCurrentMilestoneId()
       applyRevision(result.projectRevision)
+      // 阶段状态变化可能影响任务归属/归档状态，按服务端最新列表校正
+      await refreshTasks({ silent: true })
       clearFailure()
       return { ok: true, data: result.data.milestone }
     } finally {
@@ -1096,6 +1099,8 @@ export const useCloudStore = defineStore('cloud', () => {
       applyMilestone(result.data.milestone)
       recomputeCurrentMilestoneId()
       applyRevision(result.projectRevision)
+      // 阶段状态变化可能影响任务归属/归档状态，按服务端最新列表校正
+      await refreshTasks({ silent: true })
       clearFailure()
       return { ok: true, data: result.data.milestone }
     } finally {
@@ -1175,6 +1180,8 @@ export const useCloudStore = defineStore('cloud', () => {
       applyTask(result.data.task)
       applyMilestoneStats(result.data.task.milestoneId, result.data.milestoneStats)
       applyRevision(result.projectRevision)
+      // 写成功后按服务端最新列表校正（失败不影响本次写入结果）
+      await refreshTasks({ silent: true })
       clearFailure()
       return { ok: true, data: result.data.task }
     } finally {
@@ -1232,6 +1239,7 @@ export const useCloudStore = defineStore('cloud', () => {
       applyMilestoneStats(input.milestoneId, result.data.targetMilestoneStats ?? result.data.milestoneStats)
       applyMilestoneStats(task.milestoneId, result.data.sourceMilestoneStats)
       applyRevision(result.projectRevision)
+      await refreshTasks({ silent: true })
       clearFailure()
       return { ok: true, data: result.data.task }
     } finally {
@@ -1291,6 +1299,8 @@ export const useCloudStore = defineStore('cloud', () => {
       applyTask(result.data.task)
       applyMilestoneStats(result.data.task.milestoneId, result.data.milestoneStats)
       applyRevision(result.projectRevision)
+      // 写成功后按服务端最新列表校正（失败不影响本次写入结果）
+      await refreshTasks({ silent: true })
       clearFailure()
       return { ok: true, data: result.data.task }
     } finally {
@@ -1352,6 +1362,8 @@ export const useCloudStore = defineStore('cloud', () => {
       applyTask(result.data.task)
       applyMilestoneStats(result.data.task.milestoneId, result.data.milestoneStats)
       applyRevision(result.projectRevision)
+      // 写成功后按服务端最新列表校正（失败不影响本次写入结果）
+      await refreshTasks({ silent: true })
       clearFailure()
       return { ok: true, data: result.data.task }
     } finally {
@@ -1387,6 +1399,65 @@ export const useCloudStore = defineStore('cloud', () => {
     if (isStale(token, projectId) || !result.ok) return
     milestones.value = result.data.milestones
     currentMilestoneId.value = result.data.currentMilestoneId
+  }
+
+  /**
+   * 读取任务列表（契约 22.3），补齐刷新/重进项目后丢失的任务。
+   *
+   * - 成功：整体替换任务副本并置 `tasksHydrated = true`；
+   * - 失败：不改变现有任务，也不置 `tasksHydrated`（避免把"没读到"说成"没有任务"）；
+   * - `silent` 用于 openProject / 写操作后的自动刷新，不覆盖项目级 `lastError`。
+   */
+  async function refreshTasks(
+    options: CloudStoreOptions & { silent?: boolean } = {},
+  ): Promise<ActionResult<CloudTask[]>> {
+    const projectId = activeProjectId
+    if (projectId === null) return failure(makeV3Error('NOT_LOADED'))
+    const token = epoch
+    const collected = new Map<string, CloudTask>()
+    let cursor: string | undefined
+    let complete = false
+    for (let page = 0; page < 100; page += 1) {
+      const result = await listTasks(
+        projectId,
+        {
+          includeArchived: true,
+          limit: 100,
+          ...(cursor === undefined ? {} : { cursor }),
+        },
+        {
+          signal: options.signal ?? abortController.signal,
+          timeoutMs: options.timeoutMs,
+          fetchImpl: options.fetchImpl,
+        },
+      )
+      if (isStale(token, projectId)) return failure(makeV3Error('STALE_RESPONSE'))
+      if (!result.ok) {
+        const error = mapAbort(result.error)
+        if (options.silent !== true) setFailure(error)
+        return failure(error)
+      }
+      if (result.data.tasks.some((task) => task.projectId !== projectId)) {
+        const error = makeV3Error('PROJECT_MISMATCH')
+        if (options.silent !== true) setFailure(error)
+        return failure(error)
+      }
+      for (const task of result.data.tasks) collected.set(task.taskId, task)
+      if (result.data.nextCursor === null) {
+        complete = true
+        break
+      }
+      cursor = result.data.nextCursor
+    }
+    if (!complete) {
+      const error = makeV3Error('INVALID_RESPONSE')
+      if (options.silent !== true) setFailure(error)
+      return failure(error)
+    }
+    tasks.value = [...collected.values()]
+    for (const task of tasks.value) indexEntity(task.taskId, projectId)
+    tasksHydrated.value = true
+    return { ok: true, data: tasks.value }
   }
 
   /* ---------------------------------------------------------------- 进展 */
@@ -1682,6 +1753,7 @@ export const useCloudStore = defineStore('cloud', () => {
     refreshEvidence,
     refreshProgress,
     refreshMilestones,
+    refreshTasks,
     loadTimeline,
     createProject,
 

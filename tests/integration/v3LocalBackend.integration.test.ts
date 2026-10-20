@@ -517,9 +517,11 @@ describe.skipIf(!RUN)('本地 V3 后端集成（真实 HTTP，仅 loopback）', 
     expect(cloud.project?.status).toBe('active')
   })
 
-  it('契约未冻结的端点仍为 404：只记录已知缺口，不伪造替代实现', async () => {
+  it('任务读取已实现；时间线与阶段候选仍为 404，不伪造替代实现', async () => {
     const tasksGet = await localRequest(`/api/projects/${projectId}/tasks`)
-    expect(tasksGet.status).toBe(404)
+    expect(tasksGet.status).toBe(200)
+    const tasksBody = (await tasksGet.json()) as { data?: { tasks?: unknown } }
+    expect(Array.isArray(tasksBody.data?.tasks)).toBe(true)
 
     const timelineGet = await localRequest(`/api/projects/${projectId}/timeline`)
     expect(timelineGet.status).toBe(404)
