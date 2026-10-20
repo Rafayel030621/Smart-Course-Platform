@@ -339,6 +339,58 @@ test('同 sha256 只剩归档材料时按新上传处理，生成新 materialId'
   )
 })
 
+test('上传→reparse v2→archive 后重传同一文件，不复用旧版本也不复活归档材料', async () => {
+  const project = await createProject(client, user, { name: '历史版本去重项目' })
+  const content = '跨版本去重必须只匹配当前未归档版本'
+  const first = await upload(project.projectId, project.projectRevision, content)
+  const firstMaterialId = (first.body.data as { material: { materialId: string } }).material.materialId
+  const firstRevision = first.body.projectRevision as number
+
+  const reparse = await client.request(
+    `/api/projects/${project.projectId}/materials/${firstMaterialId}/reparse`,
+    {
+      method: 'POST',
+      cookie: user.cookie,
+      body: envelope(project.projectId, firstRevision),
+    },
+  )
+  const reparsed = (await reparse.json()) as { projectRevision: number }
+  assert.equal(reparse.status, 200)
+
+  const archive = await client.request(
+    `/api/projects/${project.projectId}/materials/${firstMaterialId}/archive`,
+    {
+      method: 'POST',
+      cookie: user.cookie,
+      body: envelope(project.projectId, reparsed.projectRevision),
+    },
+  )
+  const archived = (await archive.json()) as { projectRevision: number }
+  assert.equal(archive.status, 200)
+
+  const reupload = await upload(project.projectId, archived.projectRevision, content, {
+    name: 'after-archive.md',
+  })
+  const data = reupload.body.data as {
+    material: { materialId: string; isCurrent: boolean; readOnly: boolean }
+    deduplicated: boolean
+  }
+  assert.equal(reupload.response.status, 200)
+  assert.equal(data.deduplicated, false)
+  assert.notEqual(data.material.materialId, firstMaterialId)
+  assert.equal(data.material.isCurrent, true)
+  assert.equal(data.material.readOnly, false)
+
+  // 旧 materialId 的 v1/v2 历史行仍保留；逻辑材料数为 2，不能被旧版 v1 去重命中
+  assert.equal(
+    countRows(
+      'SELECT COUNT(DISTINCT material_id) AS count FROM materials WHERE project_id = ?',
+      project.projectId,
+    ),
+    2,
+  )
+})
+
 test('归档项目上传返回 PROJECT_ARCHIVED，且不产生材料行', async () => {
   const project = await createProject(client, user, { name: '归档材料项目' })
   const archive = await client.request(`/api/projects/${project.projectId}/archive`, {

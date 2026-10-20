@@ -333,10 +333,16 @@ export async function handleMaterialUpload(
   const parsed = parseUpload(body)
   const existing = db
     .prepare(
-      `SELECT * FROM materials
-        WHERE project_id = ? AND sha256 = ?
-          AND archived_at IS NULL AND status != 'archived'
-        ORDER BY created_at DESC, material_version DESC
+      `SELECT m.* FROM materials m
+        WHERE m.project_id = ? AND m.sha256 = ?
+          AND m.material_version = (
+            SELECT MAX(m2.material_version)
+              FROM materials m2
+             WHERE m2.project_id = m.project_id
+               AND m2.material_id = m.material_id
+          )
+          AND m.archived_at IS NULL AND m.status != 'archived'
+        ORDER BY m.created_at DESC
         LIMIT 1`,
     )
     .get(projectId, parsed.sha256) as MaterialRow | undefined
