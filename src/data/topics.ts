@@ -21,7 +21,7 @@ import type { Template } from '@/types/platform'
  *     `Task.owner` 在 MVP 阶段恒为 `null`，这个字段只用于生成 `suggestedOwner` 做展示；
  *   - v2 的论文检索内容升级（吴-5）不再往 `TEMPLATES` 里堆，放到 `src/data/paperPrompts.ts`。
  *
- * 相关结论见 `docs/ai/prompt-spec.md` 第 11 节「附录 A：题目资产盘点」。
+ * 相关结论见 `docs/ai/prompt-spec.md` 第 12 节「附录 A：题目资产盘点」。
  */
 
 export const TOPICS: string[] = [

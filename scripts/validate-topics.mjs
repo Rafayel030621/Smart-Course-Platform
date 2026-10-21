@@ -11,7 +11,7 @@
  * 结构缺失**不会**直接导致学生建出来的项目不完整。
  *
  * 仍然值得跑的理由：`tests/content/aiFixtures.test.ts` 用模板与 AI 场景样例做交叉校验，
- * 模板一旦写坏，那份交叉校验就失去意义。结论见 `docs/ai/prompt-spec.md` 第 11 节。
+ * 模板一旦写坏，那份交叉校验就失去意义。结论见 `docs/ai/prompt-spec.md` 第 12 节。
  *
  * 用法：
  *   node scripts/validate-topics.mjs              # 报告 + 退出码
