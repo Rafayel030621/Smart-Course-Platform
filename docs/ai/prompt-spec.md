@@ -613,7 +613,7 @@ V3 的三条阶段化路径**契约已冻结、实现尚未开始**。这不是�
 | **D14** | 阶段候选没有前端常量，且 v3 常量命名易混 | `src/domain/recommendation.ts` 有 `MILESTONE_PROMPT_VERSION = 'mvp-prompt-v3'`（名字像"阶段"，实际是**建议接口**的 v3）与 `ADVISOR_CHAT_PROMPT_VERSION_V3`，**没有 `milestone-candidate-v1`** | 接候选接口时容易把建议的 v3 值发给候选接口 → 400 | 李焰彬（`src/domain/**` 属他）；本规格只登记 |
 | **D15** | V3 服务端材料门禁未实现 | 契约 §23.3 要求服务端按 `materialId + version + segmentId` 回查数据库、只接受 `status = "confirmed"`；当前 `confirmedMaterials` 完全由前端 `selectConfirmedMaterials()` 过滤（`src/domain/v3Advisor.ts`），服务端尚无此逻辑 | 前端一旦漏发，未确认内容可进入提示词；**契约要求的"服务端复核"目前不存在** | 负责人（后端）；前端侧规则见 §11.2 |
 | **D16** | 聊天不落库 | `docs/v3-v4-interface-status.md` §8 标 🟡：每次由前端回传历史 | v3 聊天看不到"服务端保存的历史对话"，只能依赖客户端回传；历史被篡改无法察觉 | 负责人（后端） |
-| **D17** | 材料理解仍有 4 处「四块」残留（D7 扩大） | `server/src/materials/prompt.ts:59`、`server/src/materials/types.ts:166`，**加上契约 `docs/contracts.md` 第 779 / 789 / 1059 / 1102 行四处**——全部写着"四块"，而同文件系统提示词与 §14.3 / §15.3 是五块 | 提示词自己告诉模型只要四块，`methodNotes` 会被系统性漏掉；它正是阶段候选与阶段化建议的输入之一 | 负责人（后端 + 契约） |
+| **D17** | 材料理解仍有 **6 处**「四块」残留（2 处代码 + 4 处契约，D7 扩大） | `server/src/materials/prompt.ts:59`、`server/src/materials/types.ts:166`，**加上契约 `docs/contracts.md` 第 779 / 789 / 1059 / 1102 行四处**——全部写着"四块"，而同文件系统提示词与 §14.3 / §15.3 是五块 | 提示词自己告诉模型只要四块，`methodNotes` 会被系统性漏掉；它正是阶段候选与阶段化建议的输入之一 | **负责人（后端 + 契约），已登记，随 V3 AI 批次修复** |
 
 > D7–D11（上一轮登记的材料理解差距）**至今一条未修**：`prompt.ts:59` 仍写"四块候选"、温度仍 0.2、仍无 `max_tokens`、行号仍格式化成 `40-40`。V3 阶段候选会复用同一套材料清洗与校验，这些坑会一起带过来。
 
