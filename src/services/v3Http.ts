@@ -98,6 +98,7 @@ export const V3_ERROR_MESSAGES: Record<string, string> = {
   EMPTY_MATERIAL: '文件内容为空，请检查后再上传',
   MATERIAL_ENCODING_UNREADABLE: '无法识别文件编码，请转换后重试',
   MATERIAL_PARSE_FAILED: '材料解析失败，请检查文件内容后重试',
+  MATERIAL_CONTENT_UNAVAILABLE: '这份材料没有保存原文，请重新上传',
   DRAFT_ITEM_ARCHIVED: '该理解条目已归档',
   DRAFT_SOURCE_MISSING: '该理解条目缺少有效材料来源',
   AUTH_FAILED: '用户名或密码不正确',
@@ -128,7 +129,7 @@ export const V3_ERROR_MESSAGES: Record<string, string> = {
   MISSING_CONTRACT: '接口契约尚未定义，暂无法执行该操作',
   DUPLICATE_REQUEST: '该操作正在处理，请稍候',
   NOT_LOADED: '项目尚未加载完成，请稍后重试',
-  TASKS_NOT_AVAILABLE: '任务列表读取接口尚未提供，暂时无法校验任务归属',
+  TASKS_NOT_AVAILABLE: '任务列表尚未加载完整，请刷新后重试',
   TIMELINE_NOT_AVAILABLE: '时间线读取接口尚未提供',
 }
 
@@ -197,11 +198,12 @@ export function v3Message(code: string, fallback?: string | null): string {
 
 export function makeV3Error(
   code: string,
-  overrides: Partial<Omit<V3ApiError, 'code' | 'message'>> = {},
+  overrides: Partial<Omit<V3ApiError, 'code'>> = {},
 ): V3ApiError {
+  const override = overrides.message?.trim() ?? ''
   return {
     code,
-    message: v3Message(code),
+    message: override === '' ? v3Message(code) : override,
     retryable: overrides.retryable ?? RETRYABLE_CODES.has(code),
     retryAfterSeconds: overrides.retryAfterSeconds ?? null,
     requestId: overrides.requestId ?? null,
@@ -311,9 +313,16 @@ function httpError(status: number, data: unknown): V3ApiError {
                   ? 'INTERNAL'
                   : 'INVALID_REQUEST')
   const retryAfter = record !== null ? asNumber(record['retryAfterSeconds']) : null
+  // 本地没有收录的新错误码（后端先加、前端未跟进）直接沿用服务端中文提示，
+  // 避免把"材料未保存原文"这类具体原因降级成"服务内部错误"。
+  const serverMessage = record !== null ? asString(record['message']) : null
+  const hasLocalMessage = Object.prototype.hasOwnProperty.call(V3_ERROR_MESSAGES, code)
   return {
     ...makeV3Error(code, {
       status,
+      ...(hasLocalMessage || serverMessage === null || serverMessage.trim() === ''
+        ? {}
+        : { message: serverMessage }),
       cause: 'http',
       requestId: record !== null ? asString(record['requestId']) : null,
       retryAfterSeconds: retryAfter,
