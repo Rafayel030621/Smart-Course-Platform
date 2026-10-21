@@ -1,6 +1,6 @@
 # V3 前端交付说明（李焰彬）
 
-> 状态：**本轮 D14 修改已在本地提交（未推送）**。本文只描述当前分支里的实现与验证结果，不宣称已合并或已部署。
+> 状态：**D14 独立修复分支 `fix/v3-d14-chat-citations`（基于 main `ee6cc2d`；PR #22 已合并）**。本文只描述该分支里的实现与验证结果，不宣称已合并或已部署。
 > 相关记录：`李焰彬_v2联调与交接记录.md` §14（历史测试失败诊断）与 §14.7/§14.9（A/B/C 决策）。
 >
 > 一句话结论：**V3 数据层与本地真实后端联调已完成；页面只接入了只读的云端视图，登录、云端新建项目、云端写入入口仍未接线。**
@@ -44,7 +44,9 @@
 - 时间线、阶段候选、evidence/progress 单条读取仍未实现；材料读取与进展 supersede 已由后端实现但前端尚未接入；**任务列表已在本 PR 接入**（详见 §3）。
 - 因此「刷新后恢复任务」「云端 AI 上下文」「云端证据/材料写入」在页面上仍不可用，界面已如实提示，不用空数组冒充成功。
 
-### 1.5 D14：提示词常量区分 + 聊天引用展示（本轮完成）
+### 1.5 D14：提示词常量区分 + 聊天引用展示（PR #22 合并后的独立修复）
+
+**前置**：原数据层 PR #22 已于 2026-10-21 合并（head `e1c605e`，merge commit `4cf7b2a`），其中**不含**本节内容。本分支从合并后的 main `ee6cc2d` 新建，只做 D14 这一件事。
 
 **1）提示词常量（`src/domain/recommendation.ts`）**
 
@@ -55,7 +57,7 @@
 
 - 旧的 `MILESTONE_PROMPT_VERSION` 已删除，`buildAdvisorRequest()` 的 v3 分支改用 `ADVISOR_V3_PROMPT_VERSION`；全仓检索旧名 0 命中。
 - **D12 仍受阻**：`server/src/v3/router.ts` 的 `milestones` 分支没有 `candidates` 路由（请求会被当成 `milestoneId` 走 PATCH），因此本轮没有装配候选请求、没有猜端点、没有发请求；常量的存在不代表候选能力可用。
-- 依据说明：当前分支的 `docs/ai/prompt-spec.md` **没有** §9.3 / §11.5 / §11.7（§9 只有 9.1/9.2，§11 是附录 A），D14 的取值拆分依据来自任务要求转述；权威规格章节**待文档负责人确认**后再对齐，本轮未自行创建或改写这些章节。
+- 依据说明：以 main 上已有的规格为准——`docs/ai/prompt-spec.md` §9.3 的 **D14**（“阶段候选没有前端常量，且 v3 常量命名易混”，负责人李焰彬）、§10.7 / §11.7（引用格式与展示规则）、§11.5（阶段化聊天 A3：引用已确认材料才叫依据）。本分支未改写规格文件。
 
 **2）聊天 citations 全链路（契约 23.3 / 23.7）**
 
@@ -65,15 +67,16 @@
 | 保存 | `src/stores/workbench.ts`（`sendChat` → `appendAssistant`） | 成功回答把适配层校验后的引用写进消息；只保留 `MaterialSourceRef` 的六个展示字段，适配层多解析的 `itemId` 不落盘；用户消息、失败回答、无引用回答一律 `[]` |
 | 类型 | `src/types/platform.ts`（`ChatMessage.citations`） | 必填 `MaterialSourceRef[]`，与「无引用 = 空数组」一致 |
 | 旧数据 | `src/stores/persistence.ts`（`normalizeChatMessage`） | 旧 localStorage 记录没有该字段 → 补 `[]`，**消息一条不丢**；引用逐条校验，缺材料名的引用剔除（不拿 `materialId` 顶替）；学生消息的引用强制清空 |
-| 展示 | `src/views/WorkbenchView.vue`（`chatCitationsText`） | **仅非空时**显示 `依据材料：实验手册.md（版本 2）第 10–24 行`；同一材料多段合并；只显示材料名/版本/行号，不显示 `materialId`/`segmentId` |
+| 展示 | `src/views/WorkbenchView.vue`（`chatCitationsText`） | **仅非空时**显示 `依据材料：《实验手册.md》第 10–24 行`；单行写 `第 40 行`；**多条分别列出、不合并**（同一材料的多个片段也各写一句）；只显示材料名与行号，不显示版本、`materialId`/`segmentId`/`itemId` |
 
 空引用行为（契约 23.7：不得暗示存在材料依据）：服务端返回 `[]`、字段缺失、或非法引用被全部过滤成空时，**不渲染任何来源标签**，`answer` 照常显示；前端不从本地材料或聊天历史补造引用。
 
 兼容性：属于附加字段 + 读取归一化，**未升 `schemaVersion`（仍为 3）**，不需要新增迁移分支；旧版本代码读到新记录会忽略该字段。
 
-**3）本轮明确未做**
+**3）本分支明确未做**
 
-- suggestion 的 `basisMaterialRefs` **仍未展示**：`src/components/SuggestionCard.vue` 的「依据」只有证据与疑问（`basisCount = evidence + doubts`），建议卡上的材料引用既没有渲染也没有测试；本轮按要求没有顺带扩大改动。
+- suggestion 的 `basisMaterialRefs` **仍未展示**：`src/components/SuggestionCard.vue` 的「依据」只有证据与疑问（`basisCount = evidence + doubts`），建议卡上的材料引用既没有渲染也没有测试；不属于本 PR 范围。
+- D12 阶段候选接入未开始：只定义 `MILESTONE_CANDIDATE_PROMPT_VERSION`，不装配候选请求、不猜端点。
 
 ---
 
@@ -186,19 +189,20 @@
 | **PR-1 分支** `feature/v3-frontend-data-layer`（`origin/main` + V3 数据层，不含页面） | **815/815，34 文件** | **0 错误** | 通过 | 通过 |
 | PR-1 分支合并 main `2cde85f` 后（HEAD `251dfb3`） | **815/815，34 文件** | **0 错误** | 通过 | 通过 |
 | **PR-1 分支评审修复后（本次修复提交）** | **820/820，35 文件** | **0 错误** | 通过 | 通过 |
-| **D14（常量区分 + 聊天引用链路，本轮本地提交）** | **835/835，35 文件** | **0 错误** | 通过 | 通过 |
+| D14 初版（#22 分支上的本地提交，未合并，已由本分支取代） | 835/835，35 文件 | 0 错误 | 通过 | 通过 |
+| **D14 独立修复分支** `fix/v3-d14-chat-citations`（main `ee6cc2d` + D14） | **875/875，37 文件** | **0 错误** | 通过 | 通过 |
 | 隔离验证目录 `scp-v3-verify-main-data` | 815/815，34 文件 | 0 错误 | 通过 | 通过 |
 | 完整混合工作区（主目录，基线 `ac65287`） | 787/787，35 文件 | 0 错误 | 通过 | 通过 |
 | 严格 A 组（`ac65287` + 仅 V3 hunk） | 789 用例：727 通过 / 62 失败 | 23 错误（基线 21 + 2） | 通过 | 通过 |
 | 纯净基线 `ac65287` | 717 用例：655 通过 / 62 失败 | 21 错误 | — | — |
 
 - V3 专项 11 个文件 72/72 通过（在 `ac65287` 基线上测得）。
-- D14 新增 15 条用例（820 → 835）：parser 4（引用解析/非数组拒绝/空数组/字段缺失）、store 4（落库与不补造）、UI 2（展示与空引用不显示）、持久化 4（旧记录补空数组/加载不丢消息/非法剔除/往返）、常量 1（两个 v3 常量互不顶替）。
+- D14 用例规模：#22 分支上为 820 → 835（+15）；**本分支**为 **875/37（+17）**，main `ee6cc2d` 的 858/36 为按新增 17 条推算的基线值，构成为 parser 4、store 4、持久化 4、常量 1，UI 由初版 2 条扩为 **4 条**（书名号+区间行号、同材料多段分别展示、单行 `第 40 行`、空引用/全部剔除后不显示标签）。UI 旧断言中的“版本 2”按 §10.7 移除（文案不得带版本），断言为改写而非放宽。
 - A 组与基线的失败用例集合逐条一致（62 条，零差异），说明 V3 未引入测试回归，但旧基线本身不绿。
 - `npm run test:integration:v3-local`：**12/12**，2026-10-20 最近一次实际运行；该次运行在混合工作区（旧基线）上，**未在 `origin/main` 基线上重跑**，后端来源见 §4.3。
 
 验证目录（保留供复核）：`D:/bdana_program/scp-v3-verify-baseline`、`scp-v3-verify-ac65287`、`scp-v3-verify-agroup-strict`、`scp-v3-verify-main`、`scp-v3-verify-main-data`。
-实际提交分支工作区：`D:/bdana_program/Smart-Course-Platform-v3-data-layer`（分支 `feature/v3-frontend-data-layer`，6 个提交）。
+实际提交分支工作区：`D:/bdana_program/scp-v3-d14`（分支 `fix/v3-d14-chat-citations`，基于 main `ee6cc2d`；PR #22 的 6 个提交已随合并进入 main）。
 
 ### 4.2 集成测试运行方式
 
@@ -275,9 +279,9 @@ tests/support/v3Fixtures.ts  tests/support/v3LocalHarness.ts  tests/support/v3Lo
 
 **文档（4）**：`docs/integration-v3-local.md`、`docs/v3-frontend-delivery.md`、`docs/v3-pr-draft.md`、`docs/v3-commit-plan.md`（`李焰彬_v2联调与交接记录.md` §14 属 v2 记录，已在 main）。
 
-### 5.1.1 D14 追加文件（本轮，覆盖 §5.1 中的“不纳入”表述）
+### 5.1.1 D14 追加文件（独立修复分支，覆盖 §5.1 中的“不纳入”表述）
 
-D14 要保存并展示聊天引用，因此本轮**修改了 3 个此前标为“不纳入”的文件**；改动只限引用链路，不夹带 v2 修复或云端接线：
+D14 要保存并展示聊天引用，因此该分支**修改了 3 个此前标为“不纳入”的文件**；改动只限引用链路，不夹带 v2 修复或云端接线：
 
 | 文件 | 本轮改动 | 为什么必须动 |
 | --- | --- | --- |

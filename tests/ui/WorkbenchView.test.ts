@@ -1173,30 +1173,33 @@ describe('WorkbenchView', () => {
     await flushPromises()
   }
 
-  it('聊天回答带引用：显示材料名、版本与行号，不泄露内部 ID', async () => {
+  function citationPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      materialId: 'mat_ui_chat',
+      materialName: '实验手册.md',
+      materialVersion: 2,
+      segmentId: 'seg_ui_chat_1',
+      startLine: 10,
+      endLine: 24,
+      itemId: null,
+      ...overrides,
+    }
+  }
+
+  it('聊天回答带引用：用书名号与行号区间展示，不显示版本、不泄露内部 ID', async () => {
     const store = freshStore()
     createProject(store, '引用展示项目')
     stubChatReply({
       answer: '先补齐样例数据的字段说明，再进入方法对比。',
       citations: [
-        {
-          materialId: 'mat_ui_chat',
-          materialName: '实验手册.md',
-          materialVersion: 2,
-          segmentId: 'seg_ui_chat_1',
-          startLine: 10,
-          endLine: 24,
-          itemId: null,
-        },
-        {
-          materialId: 'mat_ui_chat',
-          materialName: '实验手册.md',
-          materialVersion: 2,
+        citationPayload(),
+        citationPayload({
+          materialId: 'mat_ui_chat_2',
+          materialName: '数据说明.md',
           segmentId: 'seg_ui_chat_2',
-          startLine: 30,
-          endLine: 30,
-          itemId: null,
-        },
+          startLine: 6,
+          endLine: 8,
+        }),
       ],
     })
     const wrapper = mount(WorkbenchView)
@@ -1207,16 +1210,57 @@ describe('WorkbenchView', () => {
 
     expect(store.current?.chat[1]?.citations).toHaveLength(2)
     const citations = wrapper.get('.chat-citations').text()
+    // prompt-spec §10.7：`《材料名》第 12–18 行`
     expect(citations).toContain('依据材料')
-    expect(citations).toContain('实验手册.md')
-    expect(citations).toContain('版本 2')
-    expect(citations).toContain('第 10–24 行')
-    expect(citations).toContain('第 30 行')
+    expect(citations).toContain('《实验手册.md》第 10–24 行')
+    expect(citations).toContain('《数据说明.md》第 6–8 行')
+    // 版本只留在数据层，不进用户可见文案
+    expect(citations).not.toContain('版本')
 
     // 用户可见文本里不出现内部 ID，也不出现任何字段名
     expect(visibleTextOf(wrapper)).not.toContain('mat_ui_chat')
     expect(visibleTextOf(wrapper)).not.toContain('seg_ui_chat')
     expectNoInternalTokens(visibleTextOf(wrapper))
+  })
+
+  it('同一材料的多个引用分别展示，不合并成一句', async () => {
+    const store = freshStore()
+    createProject(store, '多片段引用项目')
+    stubChatReply({
+      answer: '这两段都要看。',
+      citations: [
+        citationPayload(),
+        citationPayload({ segmentId: 'seg_ui_chat_2', startLine: 30, endLine: 30 }),
+      ],
+    })
+    const wrapper = mount(WorkbenchView)
+
+    await sendChatFromUi(wrapper, '这两段分别是什么？')
+    await vi.waitFor(() => expect(store.current?.chat.length).toBe(2), { timeout: 3_000 })
+    await flushPromises()
+
+    const citations = wrapper.get('.chat-citations').text()
+    expect(citations).toBe('依据材料：《实验手册.md》第 10–24 行；《实验手册.md》第 30 行')
+    // 出现两次书名，说明是分别列出而不是“第 10–24 行、第 30 行”的合并写法
+    expect(citations.split('《实验手册.md》').length - 1).toBe(2)
+  })
+
+  it('单行引用写成“第 40 行”，不出现 40–40', async () => {
+    const store = freshStore()
+    createProject(store, '单行引用项目')
+    stubChatReply({
+      answer: '只看第 40 行即可。',
+      citations: [citationPayload({ segmentId: 'seg_ui_chat_line', startLine: 40, endLine: 40 })],
+    })
+    const wrapper = mount(WorkbenchView)
+
+    await sendChatFromUi(wrapper, '具体看哪一行？')
+    await vi.waitFor(() => expect(store.current?.chat.length).toBe(2), { timeout: 3_000 })
+    await flushPromises()
+
+    const citations = wrapper.get('.chat-citations').text()
+    expect(citations).toContain('《实验手册.md》第 40 行')
+    expect(citations).not.toContain('40–40')
   })
 
   it('citations 为空数组或被过滤成空：不显示来源标签，回答照常显示', async () => {
