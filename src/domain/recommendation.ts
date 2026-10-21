@@ -42,11 +42,26 @@ export const ADVISOR_PROMPT_VERSION_V1 = 'mvp-prompt-v1'
 /** 契约 17.4：聊天接口的当前提示词版本；`advisor-chat-v1` 兼容保留 */
 export const ADVISOR_CHAT_PROMPT_VERSION = 'advisor-chat-v2'
 
-/** 契约 23.1：建议接口的 v3 提示词版本；必须与 milestoneContext 成对出现 */
-export const MILESTONE_PROMPT_VERSION = 'mvp-prompt-v3'
+/**
+ * 契约 23.1 / 23.4：**建议接口**的 v3 提示词版本；必须与 `milestoneContext` 成对出现。
+ *
+ * 名字里带 `ADVISOR`：它只用于 `POST /api/advisor/recommendations`，与阶段候选接口的
+ * `milestone-candidate-v1` 不是同一个东西，不能互相顶替。
+ */
+export const ADVISOR_V3_PROMPT_VERSION = 'mvp-prompt-v3'
 
 /** 契约 23.1：聊天接口的 v3 提示词版本；必须与 milestoneContext 成对出现 */
 export const ADVISOR_CHAT_PROMPT_VERSION_V3 = 'advisor-chat-v3'
+
+/**
+ * 契约 23.4 / 23.7：**阶段候选接口**（`POST /api/projects/{projectId}/milestones/candidates`）
+ * 的提示词版本。
+ *
+ * D12 状态：契约已定义取值与请求体，但服务端路由尚未确认存在（`server/src/v3/router.ts`
+ * 没有该路径）。因此这里**只定义常量**：候选接口一旦确认可用，直接用它装配请求，
+ * 不要拿建议接口的 `mvp-prompt-v3` 顶替，也不要提前发请求。
+ */
+export const MILESTONE_CANDIDATE_PROMPT_VERSION = 'milestone-candidate-v1'
 
 /** 契约 17.4：材料理解接口的提示词版本，只此一值 */
 export const MATERIAL_UNDERSTANDING_PROMPT_VERSION = 'material-understanding-v1'

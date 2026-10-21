@@ -37,6 +37,8 @@ V3 契约（账号会话、云端项目/阶段/任务/证据/进展、本地项�
 | AI 上下文 | `src/domain/v3Advisor.ts` + `cloud.buildAdvisorContext()` | 基于已读取的任务列表组装阶段上下文；已知任务数与服务端 `taskStats.total` 不一致时显式 `TASKS_NOT_AVAILABLE`，不用空数组冒充完整上下文 |
 | 传输扩展 | `src/services/http.ts` | 支持 `PATCH`/`DELETE` 与 `credentials: 'include'`；默认值不变，既有 V2 调用方行为不变 |
 | 顾问上下文字段 | `src/services/advisorApi.ts` + `src/domain/recommendation.ts` | 建议/聊天携带 `milestoneContext` 与 v3 提示词；解析 `citations` / `milestoneRevision` |
+| D14 提示词常量 | `src/domain/recommendation.ts` | 建议接口专用 `ADVISOR_V3_PROMPT_VERSION = 'mvp-prompt-v3'`；阶段候选专用 `MILESTONE_CANDIDATE_PROMPT_VERSION = 'milestone-candidate-v1'`（D12 未实现，只定义不使用） |
+| D14 聊天引用 | `advisorApi` → `workbench.sendChat` → `ChatMessage.citations` → `WorkbenchView` | 解析→保存→旧记录归一化→有引用才展示材料名/版本/行号；空引用不显示来源，不泄露内部 ID |
 
 一致语义（已由单测固化）：
 
@@ -45,14 +47,26 @@ V3 契约（账号会话、云端项目/阶段/任务/证据/进展、本地项�
 - 迁移只在 `userConfirmed: true` 时发请求；`pending-confirmation` 不会自动上传。
 - 迁移成功后**不删除**本地项目；失败/超时重试复用同一 `migrationId`。
 
-### 2.2 页面入口（不在本 PR）
+#### 2.1.1 D14（本轮追加）：提示词常量区分与聊天引用闭环
 
-`src/App.vue`、`src/views/WorkbenchView.vue`、`src/views/ProjectMapView.vue` 的云端只读接线**不随本 PR 提交**。原因：`origin/main` 已将工作台重构为「项目推进 / 项目资料」tabs（PR #16），现有页面补丁无法直接应用，需按新结构重做。
+**常量**（`src/domain/recommendation.ts`）：`MILESTONE_PROMPT_VERSION` 已删除，拆成两个互不顶替的常量——`ADVISOR_V3_PROMPT_VERSION = 'mvp-prompt-v3'` 只给建议接口，`MILESTONE_CANDIDATE_PROMPT_VERSION = 'milestone-candidate-v1'` 只给阶段候选接口。**D12 仍受阻**（`server/src/v3/router.ts` 无 `candidates` 路由），因此候选常量只定义、不装配请求。
+
+**聊天引用（契约 23.3 / 23.7）**：适配层解析并逐条剔除非法引用（既有逻辑，本轮补测试）→ `sendChat` 把引用写进 assistant 消息（只保留 6 个展示字段，`itemId` 不落盘）→ 旧 localStorage 记录缺字段时补 `[]` 且不丢消息 → `WorkbenchView` **仅有引用时**显示 `依据材料：实验手册.md（版本 2）第 10–24 行`，不显示 `materialId` / `segmentId`。`citations` 为 `[]`、字段缺失、或非法引用被全部过滤成空时，`answer` 照常显示但不出现任何来源标签；前端不从本地材料补造引用。本轮**未升 `schemaVersion`**（附加字段 + 读取归一化）。
+
+**本轮未做**：suggestion 的 `basisMaterialRefs` 仍未展示（建议卡「依据」只有证据与疑问）。
+
+**规格依据待确认**：本分支 `docs/ai/prompt-spec.md` 不含 §9.3 / §11.5 / §11.7，D14 的取值拆分依据来自任务要求转述；权威章节待文档负责人确认后再对齐，本轮未自行创建或改写。
+
+### 2.2 页面入口（不在本 PR，D14 有一处例外）
+
+`src/App.vue`、`src/views/ProjectMapView.vue` 以及 `src/views/WorkbenchView.vue` 的**云端只读接线**不随本 PR 提交。原因：`origin/main` 已将工作台重构为「项目推进 / 项目资料」tabs（PR #16），现有页面补丁无法直接应用，需按新结构重做。
+
+**D14 例外**：`src/views/WorkbenchView.vue` 随本 PR 带一处纯渲染改动（`chatCitationsText()` + `.chat-citations`，约 39 行），只负责显示聊天回答引用了哪份已确认材料的哪个行号区间；不涉及来源切换、`guardCloudWrite`、迁移弹窗等云端接线。
 
 因此本 PR 合入后：
 
 - 数据层可用、可测；
-- **页面行为不变**，仍以本地项目为主路径；
+- 页面主路径仍以本地项目为主，唯一可见变化是聊天回答带材料来源说明（仅当服务端返回合法引用时）；
 - 云端只读展示、来源切换、`guardCloudWrite` 拦截等由后续页面 PR 提供。
 
 ## 3. 后端端点缺口与影响
@@ -61,7 +75,7 @@ V3 契约（账号会话、云端项目/阶段/任务/证据/进展、本地项�
 | --- | --- | --- | --- |
 | 1 | `GET /projects/:id/tasks`、`GET /tasks/:id` | ✅ 后端已实现；**本 PR 已接入**（`refreshTasks`：分页合并、去重、失败不改状态） | 刷新/重进项目后任务可恢复；`tasksHydrated=true`；`buildAdvisorContext()` 返回可用上下文 |
 | 2 | 时间线（契约 22.11） | ⬜ 后端未实现 | `cloud.loadTimeline()` 恒返回 `TIMELINE_NOT_AVAILABLE`，不发请求 |
-| 3 | 阶段候选（契约 23.7） | ⬜ 后端未实现（表已建） | 客户端未实现调用，AI 生成阶段候选不可用 |
+| 3 | 阶段候选（契约 23.7） | ⬜ 后端未实现（表已建，router 无 `candidates` 路由） | 客户端未实现调用；D14 只定义 `MILESTONE_CANDIDATE_PROMPT_VERSION`，不装配请求、不发请求 |
 | 4 | 进展 supersede（契约 22.4） | ✅ 后端已实现；客户端未接入 | 页面无法修正已提交进展 |
 | 5 | 材料读取 `GET /materials` 等（main PR #21） | ✅ 后端已实现；客户端未接入 | `confirmedMaterials` 仍需调用方显式传入，无法回读 |
 | 6 | `GET /evidence/:id`、`GET /progress/:id` | ⬜ 后端未实现 | 详情只能从列表筛 |
@@ -72,15 +86,17 @@ V3 契约（账号会话、云端项目/阶段/任务/证据/进展、本地项�
 
 ## 4. 验证（针对本 PR 实际交付集合）
 
-验证方式：在本 PR 分支 `feature/v3-frontend-data-layer` 上执行，`npm ci` 按 `package-lock.json` 安装。验证日期 2026-10-20。
+验证方式：在本 PR 分支 `feature/v3-frontend-data-layer` 上执行，`npm ci` 按 `package-lock.json` 安装。验证日期：数据层 2026-10-20；D14 2026-10-21。
 
 | 阶段 | HEAD | 结果 |
 | --- | --- | --- |
 | 数据层提交完成 | `7c91d72` | typecheck 0 错；`npm test` 815/815（34 文件）；build 通过；eslint 通过 |
 | 合并 main `2cde85f` 后 | `251dfb3` | 复跑一致：815/815（34 文件） |
-| **评审修复后（当前）** | **本次修复提交** | typecheck 0 错；`npm test` **820/820（35 文件）**；build 通过；eslint 通过 |
+| 评审修复后 | 评审修复提交 | typecheck 0 错；`npm test` **820/820（35 文件）**；build 通过；eslint 通过 |
+| **D14 提交（当前）** | **D14 本地提交**（SHA 见提交历史） | 2026-10-21 复跑：typecheck 0 错；`npm test` **835/835（35 文件）**；build 通过；eslint 通过 |
 
 - 815 → 820：新增 `tests/stores/cloudTaskReads.test.ts`（5 条），覆盖任务列表解析、失败不改状态、成功后上下文可用、分页去重与 `getTask`。
+- 820 → 835（D14，+15）：`advisorApi` 引用解析 4 条、`materials.test` store 落库/不补造 4 条、`WorkbenchView` 展示 2 条、`persistence` 旧记录与往返 4 条、`v3Advisor` 常量区分 1 条。
 - 合并仅冲突 `README.md`，已解决（保留 main 的用例数措辞 + 本分支的集成测试入口）。
 - 精确 SHA 以 PR 提交列表为准；本文不写死修复提交号，避免与提交后状态不一致。
 
@@ -88,12 +104,12 @@ V3 契约（账号会话、云端项目/阶段/任务/证据/进展、本地项�
 
 | 形态 | 结果 | 含义 |
 | --- | --- | --- |
-| **本 PR 分支** `feature/v3-frontend-data-layer` | **820/820，typecheck 0，build/eslint 通过** | 本 PR 的实际状态（已实际运行） |
+| **本 PR 分支** `feature/v3-frontend-data-layer` | **835/835，typecheck 0，build/eslint 通过** | 本 PR 的实际状态（含 D14；已实际运行） |
 | 隔离验证目录 `scp-v3-verify-main-data` | 815/815，typecheck 0 | 修复前基线；本轮新增 5 条任务读取用例 |
 | 完整混合工作区（主目录，基线 `ac65287`） | 787/787，typecheck 0 | 含 v2 修复与页面接线；**不等于本 PR** |
 | 旧基线 `ac65287` 本身 | 717 用例 62 失败，typecheck 21 错 | 基线自身不绿，不能作为目标 |
 
-**测试性质**：820 条用例全部离线，`fetch` 被替身化，不发网络请求。它们验证前端状态机与契约解析，**不是真实联调**。
+**测试性质**：835 条用例全部离线，`fetch` 被替身化，不发网络请求。它们验证前端状态机与契约解析，**不是真实联调**。
 
 **集成测试（不在本 PR 的验证范围）**：`npm run test:integration:v3-local` 最近一次实际运行是 2026-10-20 的 **12/12**，但该次运行在旧基线（混合工作区）上进行，**未在 `origin/main` + 本 PR 的目录中重跑**；后端来源限制见 §5。
 
@@ -126,10 +142,12 @@ V3 契约（账号会话、云端项目/阶段/任务/证据/进展、本地项�
 4. **幂等语义**：同一逻辑操作重试复用同一 `idempotencyKey`；版本推进后的同内容属新操作，键必须变化，否则 `IDEMPOTENCY_CONFLICT`。
 5. **hunk 边界**：`src/types/platform.ts` 只含 V3 类型块；`src/domain/recommendation.ts` 只含 V3 常量/类型，不含 v2 的 `ClaimTaskResult.status` 与 §14 的失败文案修复（二者已在 `origin/main`）。
 6. **展示约束**：用户可见文本不出现错误码、字段名、内部状态名（契约 4.3 / 17.3）。
+7. **引用边界（D14）**：`citations` 只在服务端返回合法引用时展示；`[]`、字段缺失或被全部过滤时不得出现来源标签，也不得显示 `materialId` / `segmentId`；前端不从本地材料补造。suggestion 的 `basisMaterialRefs` 仍未展示，属已知未完成项。
+8. **范围例外（D14）**：本 PR 仅新增 `src/views/WorkbenchView.vue` 的聊天引用渲染，其余云端页面接线仍按 §2.2 排除；评审时请把该文件与数据层改动区分看。
 
 ## 8. 非目标
 
-- 不实现页面接线（登录、来源切换、迁移弹窗、云端写入入口）；
+- 不实现云端页面接线（登录、来源切换、迁移弹窗、云端写入入口）；D14 的聊天引用渲染是唯一例外；
 - 不补齐后端缺失端点，不改 `server/`；
 - 不修改正式契约（`docs/contracts.md`）；
 - 不把云端项目映射成完整的本地 `Project`（缺失字段保持空，不伪造）；

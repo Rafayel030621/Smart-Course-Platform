@@ -1,6 +1,6 @@
 # V3 前端交付说明（李焰彬）
 
-> 状态：**工作区未提交**。本文只描述当前工作区里的实现与验证结果，不宣称已合并或已部署。
+> 状态：**本轮 D14 修改已在本地提交（未推送）**。本文只描述当前分支里的实现与验证结果，不宣称已合并或已部署。
 > 相关记录：`李焰彬_v2联调与交接记录.md` §14（历史测试失败诊断）与 §14.7/§14.9（A/B/C 决策）。
 >
 > 一句话结论：**V3 数据层与本地真实后端联调已完成；页面只接入了只读的云端视图，登录、云端新建项目、云端写入入口仍未接线。**
@@ -43,6 +43,37 @@
 
 - 时间线、阶段候选、evidence/progress 单条读取仍未实现；材料读取与进展 supersede 已由后端实现但前端尚未接入；**任务列表已在本 PR 接入**（详见 §3）。
 - 因此「刷新后恢复任务」「云端 AI 上下文」「云端证据/材料写入」在页面上仍不可用，界面已如实提示，不用空数组冒充成功。
+
+### 1.5 D14：提示词常量区分 + 聊天引用展示（本轮完成）
+
+**1）提示词常量（`src/domain/recommendation.ts`）**
+
+| 常量 | 值 | 允许使用的接口 |
+| --- | --- | --- |
+| `ADVISOR_V3_PROMPT_VERSION` | `mvp-prompt-v3` | **仅**建议接口 `POST /api/advisor/recommendations`（必须与 `milestoneContext` 成对出现） |
+| `MILESTONE_CANDIDATE_PROMPT_VERSION` | `milestone-candidate-v1` | **仅**阶段候选接口 `POST /api/projects/{projectId}/milestones/candidates`；**只定义、不使用** |
+
+- 旧的 `MILESTONE_PROMPT_VERSION` 已删除，`buildAdvisorRequest()` 的 v3 分支改用 `ADVISOR_V3_PROMPT_VERSION`；全仓检索旧名 0 命中。
+- **D12 仍受阻**：`server/src/v3/router.ts` 的 `milestones` 分支没有 `candidates` 路由（请求会被当成 `milestoneId` 走 PATCH），因此本轮没有装配候选请求、没有猜端点、没有发请求；常量的存在不代表候选能力可用。
+- 依据说明：当前分支的 `docs/ai/prompt-spec.md` **没有** §9.3 / §11.5 / §11.7（§9 只有 9.1/9.2，§11 是附录 A），D14 的取值拆分依据来自任务要求转述；权威规格章节**待文档负责人确认**后再对齐，本轮未自行创建或改写这些章节。
+
+**2）聊天 citations 全链路（契约 23.3 / 23.7）**
+
+| 环节 | 位置 | 行为 |
+| --- | --- | --- |
+| 解析 | `src/services/advisorApi.ts`（`asChatSuccess`） | 已有实现：逐条校验引用，非法条目剔除；`citations` 不是数组 → 整份响应按 `invalid-response` 丢弃；字段完全缺失 → 不补造 |
+| 保存 | `src/stores/workbench.ts`（`sendChat` → `appendAssistant`） | 成功回答把适配层校验后的引用写进消息；只保留 `MaterialSourceRef` 的六个展示字段，适配层多解析的 `itemId` 不落盘；用户消息、失败回答、无引用回答一律 `[]` |
+| 类型 | `src/types/platform.ts`（`ChatMessage.citations`） | 必填 `MaterialSourceRef[]`，与「无引用 = 空数组」一致 |
+| 旧数据 | `src/stores/persistence.ts`（`normalizeChatMessage`） | 旧 localStorage 记录没有该字段 → 补 `[]`，**消息一条不丢**；引用逐条校验，缺材料名的引用剔除（不拿 `materialId` 顶替）；学生消息的引用强制清空 |
+| 展示 | `src/views/WorkbenchView.vue`（`chatCitationsText`） | **仅非空时**显示 `依据材料：实验手册.md（版本 2）第 10–24 行`；同一材料多段合并；只显示材料名/版本/行号，不显示 `materialId`/`segmentId` |
+
+空引用行为（契约 23.7：不得暗示存在材料依据）：服务端返回 `[]`、字段缺失、或非法引用被全部过滤成空时，**不渲染任何来源标签**，`answer` 照常显示；前端不从本地材料或聊天历史补造引用。
+
+兼容性：属于附加字段 + 读取归一化，**未升 `schemaVersion`（仍为 3）**，不需要新增迁移分支；旧版本代码读到新记录会忽略该字段。
+
+**3）本轮明确未做**
+
+- suggestion 的 `basisMaterialRefs` **仍未展示**：`src/components/SuggestionCard.vue` 的「依据」只有证据与疑问（`basisCount = evidence + doubts`），建议卡上的材料引用既没有渲染也没有测试；本轮按要求没有顺带扩大改动。
 
 ---
 
@@ -155,12 +186,14 @@
 | **PR-1 分支** `feature/v3-frontend-data-layer`（`origin/main` + V3 数据层，不含页面） | **815/815，34 文件** | **0 错误** | 通过 | 通过 |
 | PR-1 分支合并 main `2cde85f` 后（HEAD `251dfb3`） | **815/815，34 文件** | **0 错误** | 通过 | 通过 |
 | **PR-1 分支评审修复后（本次修复提交）** | **820/820，35 文件** | **0 错误** | 通过 | 通过 |
+| **D14（常量区分 + 聊天引用链路，本轮本地提交）** | **835/835，35 文件** | **0 错误** | 通过 | 通过 |
 | 隔离验证目录 `scp-v3-verify-main-data` | 815/815，34 文件 | 0 错误 | 通过 | 通过 |
 | 完整混合工作区（主目录，基线 `ac65287`） | 787/787，35 文件 | 0 错误 | 通过 | 通过 |
 | 严格 A 组（`ac65287` + 仅 V3 hunk） | 789 用例：727 通过 / 62 失败 | 23 错误（基线 21 + 2） | 通过 | 通过 |
 | 纯净基线 `ac65287` | 717 用例：655 通过 / 62 失败 | 21 错误 | — | — |
 
 - V3 专项 11 个文件 72/72 通过（在 `ac65287` 基线上测得）。
+- D14 新增 15 条用例（820 → 835）：parser 4（引用解析/非数组拒绝/空数组/字段缺失）、store 4（落库与不补造）、UI 2（展示与空引用不显示）、持久化 4（旧记录补空数组/加载不丢消息/非法剔除/往返）、常量 1（两个 v3 常量互不顶替）。
 - A 组与基线的失败用例集合逐条一致（62 条，零差异），说明 V3 未引入测试回归，但旧基线本身不绿。
 - `npm run test:integration:v3-local`：**12/12**，2026-10-20 最近一次实际运行；该次运行在混合工作区（旧基线）上，**未在 `origin/main` 基线上重跑**，后端来源见 §4.3。
 
@@ -242,6 +275,20 @@ tests/support/v3Fixtures.ts  tests/support/v3LocalHarness.ts  tests/support/v3Lo
 
 **文档（4）**：`docs/integration-v3-local.md`、`docs/v3-frontend-delivery.md`、`docs/v3-pr-draft.md`、`docs/v3-commit-plan.md`（`李焰彬_v2联调与交接记录.md` §14 属 v2 记录，已在 main）。
 
+### 5.1.1 D14 追加文件（本轮，覆盖 §5.1 中的“不纳入”表述）
+
+D14 要保存并展示聊天引用，因此本轮**修改了 3 个此前标为“不纳入”的文件**；改动只限引用链路，不夹带 v2 修复或云端接线：
+
+| 文件 | 本轮改动 | 为什么必须动 |
+| --- | --- | --- |
+| `src/stores/persistence.ts` | 新增 `normalizeChatMessage` / `normalizeCitationRef`，`chat` 改为逐条归一化 | 旧 localStorage 没有 `citations`，必须补空数组且不丢消息 |
+| `src/stores/workbench.ts` | `appendAssistant` 增加 `citations` 参数；`sendChat` 成功时落库 | 引用要进聊天记录，页面才有数据可展示 |
+| `src/views/WorkbenchView.vue` | 新增 `chatCitationsText()` 与 `.chat-citations` 渲染 | 契约 23.7：有引用才显示来源，空引用不得暗示材料依据 |
+
+其余 9 个文件：`src/domain/recommendation.ts`、`src/services/advisorApi.ts`、`src/types/platform.ts`（常量、类型与解析接线），以及 `tests/domain/v3Advisor.test.ts`、`tests/services/advisorApi.test.ts`、`tests/stores/materials.test.ts`、`tests/stores/migration.test.ts`（仅类型必填补 `citations: []`）、`tests/stores/persistence.test.ts`、`tests/ui/WorkbenchView.test.ts`。
+
+> 范围提醒：`WorkbenchView.vue` 的这次改动**只是聊天引用渲染**，不包含 §1.2 列出的云端接线（来源切换、`guardCloudWrite`、迁移弹窗）。
+
 ### 5.2 应排除（本地文件，不提交）
 
 | 路径 | 类别 | 说明 |
@@ -255,4 +302,4 @@ tests/support/v3Fixtures.ts  tests/support/v3LocalHarness.ts  tests/support/v3Lo
 
 - §5.1 的源码/测试/文档均属本次 V3 交付内容；
 - `liyanbin-fix.patch`、`debug.log`、`f2.log`~`f7.log`、`m1.log` 在本轮开始前已存在，**归属不明**，本轮未删除、未移动、未暂存；
-- 页面文件（`src/App.vue`、`src/views/*.vue`）属于只读云端接入的页面改动，后续页面工作由雍蕾继续；本轮未再修改它们。
+- 仅 `src/views/WorkbenchView.vue` 在 D14 中被修改（聊天引用渲染）；`src/App.vue` 与 `src/views/ProjectMapView.vue` 本轮未改，云端只读接线仍由雍蕾在后续 PR 完成。

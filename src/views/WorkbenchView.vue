@@ -993,6 +993,37 @@ function chatSourceText(message: ChatMessage): string {
   return '本地规则参考'
 }
 
+/**
+ * 契约 23.7：只有**非空**引用才显示材料来源，且只说材料名、版本与行号。
+ *
+ * - 空数组（含适配层把非法引用逐条剔除后变成空）一律返回空串，页面不渲染任何来源标签，
+ *   也不能出现"依据来自某材料"这类暗示（契约 23.7 最后一条）；
+ * - 不显示 `materialId` / `segmentId`：内部 ID 不进用户可见文本；
+ * - 只展示消息里已经有的引用，不从本地材料或聊天历史补造。
+ */
+function chatCitationsText(message: ChatMessage): string {
+  if (message.me || message.citations.length === 0) return ''
+
+  // 同一份材料的多段引用合并成一句，避免同一个书名重复出现
+  const groups = new Map<string, { name: string; version: number; ranges: string[] }>()
+  for (const ref of message.citations) {
+    const key = `${ref.materialId}@${ref.materialVersion}`
+    const range =
+      ref.startLine === ref.endLine ? `第 ${ref.startLine} 行` : `第 ${ref.startLine}–${ref.endLine} 行`
+    const group = groups.get(key)
+    if (group === undefined) {
+      groups.set(key, { name: ref.materialName, version: ref.materialVersion, ranges: [range] })
+    } else {
+      group.ranges.push(range)
+    }
+  }
+
+  const parts = [...groups.values()].map(
+    (group) => `${group.name}（版本 ${group.version}）${group.ranges.join('、')}`,
+  )
+  return `依据材料：${parts.join('；')}`
+}
+
 /* -------------------------------------------------------- 提交证据 */
 
 const evidenceForm = ref<InstanceType<typeof EvidenceForm> | null>(null)
@@ -1341,6 +1372,7 @@ watch(
                     <span v-if="chatSourceText(msg)" class="chat-source">{{ chatSourceText(msg) }}</span>
                   </div>
                   <div class="bubble">{{ msg.text }}</div>
+                  <p v-if="chatCitationsText(msg)" class="chat-citations">{{ chatCitationsText(msg) }}</p>
                 </div>
               </div>
               <p v-if="!project.chat.length" class="empty" style="padding-left:0;">
@@ -1641,6 +1673,13 @@ watch(
   margin-left: 6px;
   font-size: 10.5px;
   color: #185fa5;
+}
+
+.chat-citations {
+  margin-top: 4px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: #5f5e5a;
 }
 
 .chat-status {

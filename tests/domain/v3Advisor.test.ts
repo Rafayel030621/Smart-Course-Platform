@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest'
 import { buildAdvisorChatRequest, buildAdvisorRequest } from '@/services/advisorApi'
 import {
   ADVISOR_CHAT_PROMPT_VERSION_V3,
-  MILESTONE_PROMPT_VERSION,
+  ADVISOR_V3_PROMPT_VERSION,
+  MILESTONE_CANDIDATE_PROMPT_VERSION,
   type MilestoneContext,
 } from '@/domain/recommendation'
 import { buildMilestoneContext, selectConfirmedMaterials } from '@/domain/v3Advisor'
@@ -163,10 +164,22 @@ describe('v3 请求构造器', () => {
   it('建议请求带 milestoneContext 时默认 v3，并原样传递阶段上下文', () => {
     const request = buildAdvisorRequest({ ...baseInput, milestoneContext: context() })
 
-    expect(request.promptVersion).toBe(MILESTONE_PROMPT_VERSION)
+    expect(request.promptVersion).toBe(ADVISOR_V3_PROMPT_VERSION)
     expect(request.milestoneContext?.milestoneId).toBe('ms_1')
     expect(request.contractVersion).toBe('1.0')
     expect(request.milestoneContext?.milestoneTasks.map((item) => item.taskId)).toEqual(['tsk_1', 'tsk_2'])
+  })
+
+  it('建议 v3 与阶段候选是两个不同的常量，各自只对应自己的接口', () => {
+    // D14：建议接口用 mvp-prompt-v3；阶段候选用 milestone-candidate-v1
+    expect(ADVISOR_V3_PROMPT_VERSION).toBe('mvp-prompt-v3')
+    expect(MILESTONE_CANDIDATE_PROMPT_VERSION).toBe('milestone-candidate-v1')
+    expect(ADVISOR_V3_PROMPT_VERSION).not.toBe(MILESTONE_CANDIDATE_PROMPT_VERSION)
+
+    // D12 未确认前只定义常量：建议请求永远不会发出候选接口的版本号
+    const request = buildAdvisorRequest({ ...baseInput, milestoneContext: context() })
+    expect(request.promptVersion).toBe('mvp-prompt-v3')
+    expect(JSON.stringify(request)).not.toContain(MILESTONE_CANDIDATE_PROMPT_VERSION)
   })
 
   it('不传 milestoneContext 时保持 V2 请求结构，不出现该字段', () => {

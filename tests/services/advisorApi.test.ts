@@ -2,9 +2,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   ADVISOR_RECOMMENDATIONS_PATH,
   MAX_SUGGESTIONS,
+  buildAdvisorChatRequest,
   buildAdvisorRequest,
   buildRecommendationId,
   createRequestId,
+  fetchAdvisorChat,
   fetchRecommendations,
   isStaleResponseError,
   shouldFallbackToLocalRule,
@@ -12,9 +14,11 @@ import {
 } from '@/services/advisorApi'
 import { DEFAULT_API_BASE_URL } from '@/services/http'
 import {
+  ADVISOR_CHAT_PROMPT_VERSION,
   CONTRACT_VERSION,
   DEFAULT_PROMPT_VERSION,
   type AdvisorApiError,
+  type AdvisorChatRequest,
   type AdvisorRecommendationsFailure,
   type AdvisorRecommendationsRequest,
   type AdvisorRecommendationsSuccess,
@@ -579,3 +583,114 @@ function emptyError(): AdvisorApiError {
     cause: 'network',
   }
 }
+
+/* --------------------------------------------- 聊天响应：引用解析（契约 23.7） */
+
+function chatRequest(): AdvisorChatRequest {
+  return buildAdvisorChatRequest({
+    projectId: PROJECT_ID,
+    projectRevision: REVISION,
+    projectName: '测试项目',
+    currentMilestone: null,
+    tasks: [],
+    evidence: [],
+    doubts: [],
+    question: '下一步做什么？',
+    requestId: REQUEST_ID,
+  })
+}
+
+function chatBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    contractVersion: CONTRACT_VERSION,
+    requestId: REQUEST_ID,
+    projectId: PROJECT_ID,
+    projectRevision: REVISION,
+    source: 'model',
+    fallbackReason: null,
+    promptVersion: ADVISOR_CHAT_PROMPT_VERSION,
+    answer: '先把研究海区定下来，再决定是否需要多尺度数据。',
+    ...overrides,
+  }
+}
+
+function citation(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    materialId: 'mat_1',
+    materialName: '实验手册.md',
+    materialVersion: 1,
+    segmentId: 'seg_1',
+    startLine: 10,
+    endLine: 24,
+    itemId: null,
+    ...overrides,
+  }
+}
+
+describe('fetchAdvisorChat：citations 解析与过滤（契约 23.3 / 23.7）', () => {
+  it('合法引用原样保留，非法引用逐条剔除（不影响整份回答）', async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse(
+        chatBody({
+          citations: [
+            citation(),
+            citation({ materialName: '数据说明.md', segmentId: 'seg_2', startLine: 3, endLine: 3 }),
+            // 缺 materialName：无法展示，按非法剔除
+            { materialId: 'mat_1', materialVersion: 1, segmentId: 'seg_3', startLine: 1, endLine: 2, itemId: null },
+            // 行号类型不对
+            citation({ startLine: '10' }),
+            // 不是对象
+            'seg_4',
+            // segmentId 类型不对
+            citation({ segmentId: 42 }),
+          ],
+        }),
+      ),
+    )
+
+    const result = await fetchAdvisorChat(chatRequest(), { fetchImpl, retry: false })
+
+    if (!result.ok) throw new Error('期望成功结果，但收到了失败结果')
+    expect(result.data.citations?.map((item) => item.segmentId)).toEqual(['seg_1', 'seg_2'])
+    expect(result.data.citations?.[1]).toEqual({
+      materialId: 'mat_1',
+      materialName: '数据说明.md',
+      materialVersion: 1,
+      segmentId: 'seg_2',
+      startLine: 3,
+      endLine: 3,
+      itemId: null,
+    })
+    expect(result.data.answer).toContain('研究海区')
+  })
+
+  it('citations 不是数组：整份响应按“不符合契约”丢弃，不保留半份引用', async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse(chatBody({ citations: 'seg_1' })))
+
+    const result = await fetchAdvisorChat(chatRequest(), { fetchImpl, retry: false })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.error.cause).toBe('invalid-response')
+    expect(result.error.message).toBe('后端响应不符合契约，已丢弃')
+  })
+
+  it('服务端返回 citations: [] 时保留空数组，回答照常可用', async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse(chatBody({ citations: [] })))
+
+    const result = await fetchAdvisorChat(chatRequest(), { fetchImpl, retry: false })
+
+    if (!result.ok) throw new Error('期望成功结果，但收到了失败结果')
+    expect(result.data.citations).toEqual([])
+    expect(result.data.answer).toContain('研究海区')
+  })
+
+  it('完全不带 citations 字段时按“契约缺失”处理：适配层不补造引用', async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse(chatBody()))
+
+    const result = await fetchAdvisorChat(chatRequest(), { fetchImpl, retry: false })
+
+    if (!result.ok) throw new Error('期望成功结果，但收到了失败结果')
+    expect('citations' in result.data).toBe(false)
+  })
+})

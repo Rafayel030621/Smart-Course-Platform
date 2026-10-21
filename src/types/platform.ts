@@ -342,6 +342,14 @@ export interface ChatMessage {
   source?: 'model' | 'fallback' | 'error'
   /** 契约 5.1：fallback / error 时的原因码，用于界面说明 */
   fallbackReason?: string | null
+  /**
+   * 契约 23.3 / 23.7：这条回答引用的**已确认**材料片段。
+   *
+   * - 名称、版本、行号一律由服务端按 `segmentId` 回填，前端只展示、不补造；
+   * - 学生自己的消息、失败回答、无引用回答都是空数组（契约 23.7：不得暗示存在材料依据）；
+   * - 旧版本 localStorage 里的消息没有这个字段，读取时补空数组（`normalizeChatMessage`）。
+   */
+  citations: MaterialSourceRef[]
 }
 
 /** AI 现场生成的检索方向卡片 */

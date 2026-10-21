@@ -410,6 +410,157 @@ describe('migrateProject：归一化', () => {
   })
 })
 
+describe('migrateProject：聊天记录与引用（契约 23.7）', () => {
+  const legacyChat = [
+    { who: '我', me: true, text: '旧问题：下一步做什么？' },
+    { who: 'AI 模型', me: false, text: '旧回答：先核对数据。', source: 'model', fallbackReason: null },
+  ]
+
+  it('旧记录没有 citations：消息一条不丢，引用补空数组', () => {
+    const migrated = migrateProject({
+      projectId: 'prj_1',
+      name: '项目',
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      chat: legacyChat,
+    })
+
+    expect(migrated?.chat).toHaveLength(2)
+    expect(migrated?.chat[0]).toMatchObject({ text: '旧问题：下一步做什么？', citations: [] })
+    expect(migrated?.chat[1]).toMatchObject({
+      text: '旧回答：先核对数据。',
+      source: 'model',
+      citations: [],
+    })
+  })
+
+  it('从旧 localStorage 加载：没有 citations 的历史消息一条不丢，引用补空数组', () => {
+    writeEnvelope({
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      projects: [
+        {
+          projectId: 'prj_legacy_chat',
+          name: '旧项目',
+          schemaVersion: CURRENT_SCHEMA_VERSION,
+          chat: legacyChat,
+        },
+      ],
+    })
+    writeCurrentProjectId('prj_legacy_chat')
+
+    const loaded = loadPersistedState()
+
+    expect(loaded.projects).toHaveLength(1)
+    expect(loaded.projects[0]?.chat).toEqual([
+      {
+        who: '我',
+        text: '旧问题：下一步做什么？',
+        me: true,
+        fallbackReason: null,
+        citations: [],
+      },
+      {
+        who: 'AI 模型',
+        text: '旧回答：先核对数据。',
+        me: false,
+        source: 'model',
+        fallbackReason: null,
+        citations: [],
+      },
+    ])
+  })
+
+  it('带引用的记录保留材料名、版本与行号；没有材料名的引用剔除（不拿 ID 顶替）', () => {
+    const migrated = migrateProject({
+      projectId: 'prj_1',
+      name: '项目',
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      chat: [
+        {
+          who: 'AI 模型',
+          me: false,
+          text: '新回答：先补齐字段说明。',
+          source: 'model',
+          fallbackReason: null,
+          citations: [
+            {
+              materialId: 'mat_1',
+              materialName: '实验手册.md',
+              materialVersion: 2,
+              segmentId: 'seg_1',
+              startLine: 10,
+              endLine: 24,
+            },
+            // 缺 materialName：界面无法展示，也不能退回显示 materialId
+            { materialId: 'mat_1', materialVersion: 2, segmentId: 'seg_2', startLine: 1, endLine: 2 },
+            // 材料名是空白
+            {
+              materialId: 'mat_1',
+              materialName: '   ',
+              materialVersion: 2,
+              segmentId: 'seg_3',
+              startLine: 1,
+              endLine: 2,
+            },
+            'seg_4',
+          ],
+        },
+      ],
+    })
+
+    expect(migrated?.chat[0]?.text).toBe('新回答：先补齐字段说明。')
+    expect(migrated?.chat[0]?.citations).toEqual([
+      {
+        materialId: 'mat_1',
+        materialName: '实验手册.md',
+        materialVersion: 2,
+        segmentId: 'seg_1',
+        startLine: 10,
+        endLine: 24,
+      },
+    ])
+  })
+
+  it('往返：写入后再读回，回答的引用不丢', () => {
+    const project = makeProject({
+      projectId: 'prj_chat',
+      chat: [
+        {
+          who: 'AI 模型',
+          me: false,
+          text: '往返回答',
+          source: 'model',
+          fallbackReason: null,
+          citations: [
+            {
+              materialId: 'mat_1',
+              materialName: '数据说明.md',
+              materialVersion: 1,
+              segmentId: 'seg_2',
+              startLine: 6,
+              endLine: 8,
+            },
+          ],
+        },
+      ],
+    })
+
+    expect(savePersistedState([project], 'prj_chat').ok).toBe(true)
+    const loaded = loadPersistedState()
+
+    expect(loaded.projects[0]?.chat).toHaveLength(1)
+    expect(loaded.projects[0]?.chat[0]?.citations).toEqual([
+      {
+        materialId: 'mat_1',
+        materialName: '数据说明.md',
+        materialVersion: 1,
+        segmentId: 'seg_2',
+        startLine: 6,
+        endLine: 8,
+      },
+    ])
+  })
+})
+
 describe('clearPersistedState', () => {
   it('移除两个存储键，之后读取为空状态', () => {
     savePersistedState([makeProject()], 'prj_1')
