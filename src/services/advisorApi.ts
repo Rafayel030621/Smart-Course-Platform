@@ -2,9 +2,9 @@ import { requestJson, type HttpFailureCause } from './http'
 import {
   ADVISOR_CHAT_PROMPT_VERSION,
   ADVISOR_CHAT_PROMPT_VERSION_V3,
+  ADVISOR_V3_PROMPT_VERSION,
   CONTRACT_VERSION,
   DEFAULT_PROMPT_VERSION,
-  MILESTONE_PROMPT_VERSION,
   MAX_ADVISOR_CHAT_HISTORY,
   MAX_ADVISOR_CHAT_QUESTION_LENGTH,
   MAX_ADVISOR_CHAT_TEXT_LENGTH,
@@ -173,7 +173,7 @@ export function buildAdvisorRequest(input: BuildAdvisorRequestInput): AdvisorRec
     doubts: input.doubts,
     promptVersion:
       input.promptVersion ??
-      (milestoneContext !== null ? MILESTONE_PROMPT_VERSION : DEFAULT_PROMPT_VERSION),
+      (milestoneContext !== null ? ADVISOR_V3_PROMPT_VERSION : DEFAULT_PROMPT_VERSION),
     forceRefresh: input.forceRefresh ?? false,
   }
 

@@ -84,7 +84,9 @@ function draftFor(materialId: string, text = '复现极端风浪事件的识别�
 }
 
 /** 用一份固定的回答桩替换全局 fetch，并返回捕获到的请求体 */
-function stubChatFetch(options: { ok?: boolean; revisionDelta?: number } = {}) {
+function stubChatFetch(
+  options: { ok?: boolean; revisionDelta?: number; citations?: unknown } = {},
+) {
   const captured: Record<string, unknown>[] = []
 
   const fetchStub = vi.fn(async (_url: string, init?: RequestInit) => {
@@ -102,6 +104,8 @@ function stubChatFetch(options: { ok?: boolean; revisionDelta?: number } = {}) {
         promptVersion: body.promptVersion,
         source: 'model',
         fallbackReason: null,
+        // 只在这个用例显式给了引用时才回显：默认响应没有 citations 字段
+        ...(options.citations === undefined ? {} : { citations: options.citations }),
         answer: '先把研究海区定下来，再决定是否需要多尺度数据。',
       }),
       { status: 200, headers: { 'content-type': 'application/json' } },
@@ -110,6 +114,20 @@ function stubChatFetch(options: { ok?: boolean; revisionDelta?: number } = {}) {
 
   vi.stubGlobal('fetch', fetchStub)
   return { captured, fetchStub }
+}
+
+/** 契约 23.7 的一条引用（名称、版本、行号由服务端回填） */
+function citationRef(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    materialId: 'mat_chat_1',
+    materialName: '实验手册.md',
+    materialVersion: 1,
+    segmentId: 'seg_0',
+    startLine: 1,
+    endLine: 4,
+    itemId: null,
+    ...overrides,
+  }
 }
 
 beforeEach(() => {
@@ -853,6 +871,90 @@ describe('sendChat（契约 6.4 / 13.2 / 17.1 / 17.4）', () => {
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.code).toBe('INVALID_INPUT')
     expect(fetchStub).not.toHaveBeenCalled()
+  })
+
+  /* ---------------------------------------------- 引用（契约 23.3 / 23.7） */
+
+  it('成功回答的 citations 保存到 assistant 消息，用户消息不带引用', async () => {
+    stubChatFetch({
+      citations: [
+        citationRef(),
+        citationRef({ materialName: '数据说明.md', segmentId: 'seg_1', startLine: 6, endLine: 8 }),
+      ],
+    })
+    const store = withProject()
+
+    const result = await store.sendChat('这一步的依据是什么？')
+
+    expect(result.ok).toBe(true)
+    const chat = project(store).chat
+    expect(chat.at(-2)?.me).toBe(true)
+    expect(chat.at(-2)?.citations).toEqual([])
+
+    const answer = chat.at(-1)
+    expect(answer?.source).toBe('model')
+    // 只保留适配层校验过的字段；ID 也留着（界面负责不展示），但绝不新增引用
+    expect(answer?.citations).toEqual([
+      {
+        materialId: 'mat_chat_1',
+        materialName: '实验手册.md',
+        materialVersion: 1,
+        segmentId: 'seg_0',
+        startLine: 1,
+        endLine: 4,
+      },
+      {
+        materialId: 'mat_chat_1',
+        materialName: '数据说明.md',
+        materialVersion: 1,
+        segmentId: 'seg_1',
+        startLine: 6,
+        endLine: 8,
+      },
+    ])
+  })
+
+  it('响应没有 citations 时存空数组：不从本地已确认材料补造引用', async () => {
+    const store = withProject()
+    const materialId = registerMd(store)
+    store.recordUnderstanding({ materialId, materialVersion: 1, draft: draftFor(materialId) })
+    store.confirmUnderstandingBlock({ blockId: store.pendingUnderstandingBlocks[0].id })
+    // 请求确实带上了已确认材料，但服务端这次没回引用
+    const { captured, fetchStub } = stubChatFetch()
+
+    const result = await store.sendChat('这份材料说明了什么？')
+
+    expect(result.ok).toBe(true)
+    expect(fetchStub).toHaveBeenCalledTimes(1)
+    expect('confirmedMaterials' in captured[0]).toBe(true)
+    expect(project(store).chat.at(-1)?.citations).toEqual([])
+  })
+
+  it('回答失败时不写 assistant 消息，也不留任何伪造引用', async () => {
+    stubChatFetch({ ok: false })
+    const store = withProject()
+
+    const result = await store.sendChat('断网时会怎样？')
+
+    expect(result.ok).toBe(false)
+    const chat = project(store).chat
+    expect(chat).toHaveLength(1)
+    expect(chat[0]?.me).toBe(true)
+    expect(chat.every((entry) => entry.citations.length === 0)).toBe(true)
+  })
+
+  it('引用被适配层全部剔除后（只剩非法条目）存空数组，回答仍保留', async () => {
+    stubChatFetch({
+      // 缺 materialName + 缺 segmentId：都会被适配层丢掉
+      citations: [{ materialId: 'mat_chat_1', materialVersion: 1, startLine: 1, endLine: 2, itemId: null }],
+    })
+    const store = withProject()
+
+    const result = await store.sendChat('这条回答有材料依据吗？')
+
+    expect(result.ok).toBe(true)
+    expect(project(store).chat.at(-1)?.text).toContain('研究海区')
+    expect(project(store).chat.at(-1)?.citations).toEqual([])
   })
 })
 

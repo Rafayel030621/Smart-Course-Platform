@@ -116,8 +116,8 @@ function localProject(overrides: Partial<Project> = {}): Project {
       },
     ],
     chat: [
-      { who: '学生', text: '下一步做什么？', me: true },
-      { who: 'AI 顾问', text: '先跑通下载链路。', me: false, source: 'model' },
+      { who: '学生', text: '下一步做什么？', me: true, citations: [] },
+      { who: 'AI 顾问', text: '先跑通下载链路。', me: false, source: 'model', citations: [] },
     ],
     ...overrides,
   })

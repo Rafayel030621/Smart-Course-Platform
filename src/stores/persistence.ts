@@ -1,4 +1,5 @@
 import type {
+  ChatMessage,
   Doubt,
   Evidence,
   Material,
@@ -359,6 +360,64 @@ function normalizeSourceRef(raw: unknown): MaterialSourceRef | null {
 }
 
 /**
+ * 契约 23.3：聊天回答的引用条目（材料名、版本、行号由服务端回填）。
+ *
+ * 与 `normalizeSourceRef` 的差别：**材料名必须有**。引用要展示给学生看，
+ * 没有名字时宁可不显示这一条，也不能拿 `materialId` 顶替（那会把内部 ID 漏到界面上）。
+ */
+function normalizeCitationRef(raw: unknown): MaterialSourceRef | null {
+  if (!isPlainObject(raw)) return null
+  const materialId = typeof raw.materialId === 'string' && raw.materialId !== '' ? raw.materialId : null
+  const segmentId = typeof raw.segmentId === 'string' && raw.segmentId !== '' ? raw.segmentId : null
+  const materialName = typeof raw.materialName === 'string' ? raw.materialName.trim() : ''
+  if (materialId === null || segmentId === null || materialName === '') return null
+
+  const startLine = asInteger(raw.startLine, 1, 1)
+  const endLine = Math.max(startLine, asInteger(raw.endLine, startLine, 1))
+
+  return {
+    materialId,
+    materialName,
+    materialVersion: asInteger(raw.materialVersion, 1, 1),
+    segmentId,
+    startLine,
+    endLine,
+  }
+}
+
+/**
+ * 契约 6.4 / 23.7：聊天记录里的一条消息。
+ *
+ * 兼容策略（旧 localStorage 不丢消息）：
+ *   - `citations` 在旧记录里不存在 → 补空数组，消息照常显示；
+ *   - 引用逐条校验，坏的丢掉、好的保留；学生自己的消息恒为空数组；
+ *   - 只有「根本不是对象」的条目才会被丢弃。
+ */
+function normalizeChatMessage(raw: unknown): ChatMessage | null {
+  if (!isPlainObject(raw)) return null
+
+  const me = raw.me === true
+  const source =
+    raw.source === 'model' || raw.source === 'fallback' || raw.source === 'error'
+      ? raw.source
+      : undefined
+  const citations = me
+    ? []
+    : asArray(raw.citations)
+        .map((item) => normalizeCitationRef(item))
+        .filter((item): item is MaterialSourceRef => item !== null)
+
+  return {
+    who: asString(raw.who, me ? '我' : 'AI 顾问'),
+    text: asString(raw.text, ''),
+    me,
+    ...(source === undefined ? {} : { source }),
+    fallbackReason: typeof raw.fallbackReason === 'string' ? raw.fallbackReason : null,
+    citations,
+  }
+}
+
+/**
  * 契约 14.3：理解草稿条目。
  *
  * - 块名接受 `kind`（v3）与 `block`（v2）；
@@ -498,7 +557,10 @@ export function migrateProject(raw: unknown): Project | null {
     papers: asArray(raw.papers) as Project['papers'],
     weekly: asNumberArray(raw.weekly, [0, 0, 0, 0]),
     materials: asArray(raw.materials) as Project['materials'],
-    chat: asArray(raw.chat) as Project['chat'],
+    // 旧记录没有 citations：归一化时补空数组，消息本身保留
+    chat: asArray(raw.chat)
+      .map((item) => normalizeChatMessage(item))
+      .filter((item): item is ChatMessage => item !== null),
     aiPapers: asArray(raw.aiPapers) as Project['aiPapers'],
     tasks: asArray(raw.tasks)
       .map((item) => normalizeTask(item, projectId, nowIso))

@@ -993,6 +993,28 @@ function chatSourceText(message: ChatMessage): string {
   return '本地规则参考'
 }
 
+/**
+ * 契约 23.7 / prompt-spec §10.7、§11.7：只有**非空**引用才显示材料来源。
+ *
+ * 展示口径与 §10.7 完全一致：
+ *   - 单条：`《实验手册.md》第 12–18 行`；单行写 `第 40 行`，不写 `40–40`；
+ *   - 多条：**分别列出、不合并**（同一份材料的多个片段也各写一句）；
+ *   - 不显示 `materialId` / `segmentId` / `itemId`，也不在文案里追加版本号
+ *     （版本仍保留在数据层，供引用模型与去重使用）；
+ *   - 空数组（含适配层把非法引用逐条剔除后变成空）返回空串：不渲染标签，
+ *     也不出现"依据来自某材料"这类暗示（§11.7 最后一条）；前端不从本地材料补造引用。
+ */
+function chatCitationsText(message: ChatMessage): string {
+  if (message.me || message.citations.length === 0) return ''
+
+  const parts = message.citations.map((ref) =>
+    ref.startLine === ref.endLine
+      ? `《${ref.materialName}》第 ${ref.startLine} 行`
+      : `《${ref.materialName}》第 ${ref.startLine}–${ref.endLine} 行`,
+  )
+  return `依据材料：${parts.join('；')}`
+}
+
 /* -------------------------------------------------------- 提交证据 */
 
 const evidenceForm = ref<InstanceType<typeof EvidenceForm> | null>(null)
@@ -1341,6 +1363,7 @@ watch(
                     <span v-if="chatSourceText(msg)" class="chat-source">{{ chatSourceText(msg) }}</span>
                   </div>
                   <div class="bubble">{{ msg.text }}</div>
+                  <p v-if="chatCitationsText(msg)" class="chat-citations">{{ chatCitationsText(msg) }}</p>
                 </div>
               </div>
               <p v-if="!project.chat.length" class="empty" style="padding-left:0;">
@@ -1641,6 +1664,13 @@ watch(
   margin-left: 6px;
   font-size: 10.5px;
   color: #185fa5;
+}
+
+.chat-citations {
+  margin-top: 4px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: #5f5e5a;
 }
 
 .chat-status {

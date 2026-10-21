@@ -1,4 +1,4 @@
-import { flushPromises, mount } from '@vue/test-utils'
+import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import AiStatus from '@/components/AiStatus.vue'
@@ -1140,6 +1140,149 @@ describe('WorkbenchView', () => {
     expect(chat[1]?.source).toBe('model')
     expect(wrapper.text()).toContain('AI 生成')
     expect(wrapper.find('.chat-error').exists()).toBe(false)
+  })
+
+  /* ------------------------------------------- 聊天引用：材料来源展示 */
+
+  /** 聊天回答替身：身份字段原样回显，响应字段由用例指定 */
+  function stubChatReply(payload: Record<string, unknown>): void {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const request = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+        return new Response(
+          JSON.stringify({
+            contractVersion: '1.0',
+            requestId: request.requestId,
+            projectId: request.projectId,
+            projectRevision: request.projectRevision,
+            source: 'model',
+            fallbackReason: null,
+            ...payload,
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        )
+      }),
+    )
+  }
+
+  async function sendChatFromUi(wrapper: VueWrapper, question: string): Promise<void> {
+    await wrapper.get('.chat-input input').setValue(question)
+    const send = wrapper.findAll('button').find((button) => button.text() === '发送')
+    await send?.trigger('click')
+    await flushPromises()
+  }
+
+  function citationPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      materialId: 'mat_ui_chat',
+      materialName: '实验手册.md',
+      materialVersion: 2,
+      segmentId: 'seg_ui_chat_1',
+      startLine: 10,
+      endLine: 24,
+      itemId: null,
+      ...overrides,
+    }
+  }
+
+  it('聊天回答带引用：用书名号与行号区间展示，不显示版本、不泄露内部 ID', async () => {
+    const store = freshStore()
+    createProject(store, '引用展示项目')
+    stubChatReply({
+      answer: '先补齐样例数据的字段说明，再进入方法对比。',
+      citations: [
+        citationPayload(),
+        citationPayload({
+          materialId: 'mat_ui_chat_2',
+          materialName: '数据说明.md',
+          segmentId: 'seg_ui_chat_2',
+          startLine: 6,
+          endLine: 8,
+        }),
+      ],
+    })
+    const wrapper = mount(WorkbenchView)
+
+    await sendChatFromUi(wrapper, '这一步有材料依据吗？')
+    await vi.waitFor(() => expect(store.current?.chat.length).toBe(2), { timeout: 3_000 })
+    await flushPromises()
+
+    expect(store.current?.chat[1]?.citations).toHaveLength(2)
+    const citations = wrapper.get('.chat-citations').text()
+    // prompt-spec §10.7：`《材料名》第 12–18 行`
+    expect(citations).toContain('依据材料')
+    expect(citations).toContain('《实验手册.md》第 10–24 行')
+    expect(citations).toContain('《数据说明.md》第 6–8 行')
+    // 版本只留在数据层，不进用户可见文案
+    expect(citations).not.toContain('版本')
+
+    // 用户可见文本里不出现内部 ID，也不出现任何字段名
+    expect(visibleTextOf(wrapper)).not.toContain('mat_ui_chat')
+    expect(visibleTextOf(wrapper)).not.toContain('seg_ui_chat')
+    expectNoInternalTokens(visibleTextOf(wrapper))
+  })
+
+  it('同一材料的多个引用分别展示，不合并成一句', async () => {
+    const store = freshStore()
+    createProject(store, '多片段引用项目')
+    stubChatReply({
+      answer: '这两段都要看。',
+      citations: [
+        citationPayload(),
+        citationPayload({ segmentId: 'seg_ui_chat_2', startLine: 30, endLine: 30 }),
+      ],
+    })
+    const wrapper = mount(WorkbenchView)
+
+    await sendChatFromUi(wrapper, '这两段分别是什么？')
+    await vi.waitFor(() => expect(store.current?.chat.length).toBe(2), { timeout: 3_000 })
+    await flushPromises()
+
+    const citations = wrapper.get('.chat-citations').text()
+    expect(citations).toBe('依据材料：《实验手册.md》第 10–24 行；《实验手册.md》第 30 行')
+    // 出现两次书名，说明是分别列出而不是“第 10–24 行、第 30 行”的合并写法
+    expect(citations.split('《实验手册.md》').length - 1).toBe(2)
+  })
+
+  it('单行引用写成“第 40 行”，不出现 40–40', async () => {
+    const store = freshStore()
+    createProject(store, '单行引用项目')
+    stubChatReply({
+      answer: '只看第 40 行即可。',
+      citations: [citationPayload({ segmentId: 'seg_ui_chat_line', startLine: 40, endLine: 40 })],
+    })
+    const wrapper = mount(WorkbenchView)
+
+    await sendChatFromUi(wrapper, '具体看哪一行？')
+    await vi.waitFor(() => expect(store.current?.chat.length).toBe(2), { timeout: 3_000 })
+    await flushPromises()
+
+    const citations = wrapper.get('.chat-citations').text()
+    expect(citations).toContain('《实验手册.md》第 40 行')
+    expect(citations).not.toContain('40–40')
+  })
+
+  it('citations 为空数组或被过滤成空：不显示来源标签，回答照常显示', async () => {
+    const store = freshStore()
+    createProject(store, '无引用项目')
+    const wrapper = mount(WorkbenchView)
+
+    stubChatReply({ answer: '第一条回答：先核对数据的时空覆盖。', citations: [] })
+    await sendChatFromUi(wrapper, '问题一')
+    expect(wrapper.text()).toContain('第一条回答：先核对数据的时空覆盖。')
+
+    // 缺 materialName / 缺 segmentId 的引用会被适配层剔除，最终是空数组
+    stubChatReply({
+      answer: '第二条回答：再决定方法。',
+      citations: [{ materialId: 'mat_ui_chat', materialVersion: 1, startLine: 1, endLine: 2, itemId: null }],
+    })
+    await sendChatFromUi(wrapper, '问题二')
+    expect(wrapper.text()).toContain('第二条回答：再决定方法。')
+
+    expect(wrapper.text()).not.toContain('依据材料')
+    expect(wrapper.find('.chat-citations').exists()).toBe(false)
+    expectNoInternalTokens(visibleTextOf(wrapper))
   })
 
   /* ------------------------------------------- 工作台布局：推进 / 资料 */

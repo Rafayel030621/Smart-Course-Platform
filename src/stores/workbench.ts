@@ -1711,11 +1711,19 @@ export const useWorkbenchStore = defineStore('workbench', () => {
    *
    * `who` 如实标注来源：模型回答署「AI 模型」，服务端规则兜底署「服务端兜底」，
    * 本地不编造任何回答（不用固定回复冒充模型）。
+   *
+   * `citations` 只接受适配层按契约 23.3 校验过的引用；没有引用时存空数组，
+   * 页面据此判断是否显示来源说明。store **不**从本地材料或历史里补造引用。
+   *
+   * 写进本地记录时只保留 `MaterialSourceRef` 的六个展示字段（材料名 / 版本 / 行号等），
+   * 适配层额外解析的 `itemId` 不落盘——聊天记录不该带用不上的内部标识，
+   * 也让「刷新前」与「刷新后」的消息结构完全一致。
    */
   function appendAssistant(
     text: string,
     source: 'model' | 'fallback',
     fallbackReason: string | null,
+    citations: MaterialSourceRef[],
   ): void {
     const project = current.value
     if (project === undefined) return
@@ -1725,6 +1733,14 @@ export const useWorkbenchStore = defineStore('workbench', () => {
       text,
       source,
       fallbackReason,
+      citations: citations.map((ref) => ({
+        materialId: ref.materialId,
+        materialName: ref.materialName,
+        materialVersion: ref.materialVersion,
+        segmentId: ref.segmentId,
+        startLine: ref.startLine,
+        endLine: ref.endLine,
+      })),
     })
     if (!persistOrRollback(() => project.chat.pop())) {
       toast('本地存储不可用，回答没有保存')
@@ -1778,7 +1794,7 @@ export const useWorkbenchStore = defineStore('workbench', () => {
     const last = project.chat[project.chat.length - 1]
     const repeated = last !== undefined && last.me && last.text === question
     if (!repeated) {
-      project.chat.push({ who: '我', me: true, text: question })
+      project.chat.push({ who: '我', me: true, text: question, citations: [] })
       // 提问是展示性写入：不递增 projectRevision，写盘失败就撤销这一条
       if (!persistOrRollback(() => project.chat.pop())) {
         toast('本地存储不可用，消息没有保存')
@@ -1854,7 +1870,13 @@ export const useWorkbenchStore = defineStore('workbench', () => {
       return { ok: false, code: 'STALE_RESPONSE', message: '该聊天响应已过期，已丢弃' }
     }
 
-    appendAssistant(result.data.answer, result.data.source, result.data.fallbackReason)
+    // 契约 23.7：`citations` 只在这里落库（适配层已剔除非法引用）；缺失按空数组处理
+    appendAssistant(
+      result.data.answer,
+      result.data.source,
+      result.data.fallbackReason,
+      result.data.citations ?? [],
+    )
     return { ok: true, data: { answer: result.data.answer, source: result.data.source } }
   }
 
