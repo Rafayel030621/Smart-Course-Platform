@@ -98,3 +98,56 @@ jobs:
             cat "$RUNNER_TEMP/backend.log"
           fi
           exit "$status"
+
+  integration:
+    name: Frontend integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            server/package-lock.json
+      - run: npm ci
+      - run: npm --prefix server ci
+      - run: npm --prefix server run build
+      - name: Start backend and run integration tests
+        env:
+          PORT: '8099'
+          INVITE_CODE: dev-invite-2026
+          SCP_COOKIE_SECURE: '0'
+          SCP_DB_PATH: ${{ runner.temp }}/integration.sqlite
+          V3_LOCAL_API_BASE_URL: http://127.0.0.1:8099
+          V3_LOCAL_INVITE_CODE: dev-invite-2026
+        run: |
+          set -euo pipefail
+          node server/dist/src/index.js > "$RUNNER_TEMP/backend.log" 2>&1 &
+          backend_pid=$!
+          trap 'kill "$backend_pid" 2>/dev/null || true' EXIT
+
+          ready=0
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8099/health >/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+
+          if [ "$ready" -ne 1 ]; then
+            echo "Backend did not become healthy within 30 seconds"
+            cat "$RUNNER_TEMP/backend.log"
+            exit 1
+          fi
+
+          status=0
+          npm run test:integration:v3-local || status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "--- backend log ---"
+            cat "$RUNNER_TEMP/backend.log"
+          fi
+          exit "$status"
