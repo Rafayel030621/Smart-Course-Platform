@@ -298,6 +298,7 @@ E1–E3 是本轮新发现的边界，**尚未写进 `prompt-spec.md` §7 的编
 
 > 对应《V3-V4 任务分配与实施计划》**吴佳璐 · 主要任务 4**。
 > 规格依据：`docs/ai/prompt-spec.md` **第 11 节**。样例：`tests/fixtures/ai/stageScenarios.ts`。
+> 后端契约测试用的六条「输入 + 期望输出」（含 `segmentIds` 与期望回填结果）：`docs/ai/v3-contract-test-samples.md`。
 > **状态（2026-10-21）：评估集已定稿，真实模型一轮尚未执行。** 原因是三条路径的服务端实现还没落地（见 `docs/ai/prompt-spec.md` §9.3 的 D12–D13），发出去的 v3 请求会被 400 拒绝。表里的"实际结果"一律如实写"未实测"，**不拿 mock 结果冒充模型结果**。
 
 ### 9.1 九个必备场景
