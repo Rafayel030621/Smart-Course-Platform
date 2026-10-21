@@ -1,8 +1,10 @@
 import { requestJson, type HttpFailureCause } from './http'
 import {
   ADVISOR_CHAT_PROMPT_VERSION,
+  ADVISOR_CHAT_PROMPT_VERSION_V3,
   CONTRACT_VERSION,
   DEFAULT_PROMPT_VERSION,
+  MILESTONE_PROMPT_VERSION,
   MAX_ADVISOR_CHAT_HISTORY,
   MAX_ADVISOR_CHAT_QUESTION_LENGTH,
   MAX_ADVISOR_CHAT_TEXT_LENGTH,
@@ -21,9 +23,11 @@ import {
   type AdvisorRecommendationsFailure,
   type AdvisorRecommendationsRequest,
   type AdvisorRecommendationsSuccess,
+  type BasisMaterialRef,
   type ConfirmedMaterial,
   type DoubtSnapshot,
   type EvidenceSnapshot,
+  type MilestoneContext,
   type Recommendation,
   type RecommendationSource,
   type Suggestion,
@@ -117,8 +121,14 @@ export interface BuildAdvisorRequestInput {
   /** 契约 17.1：已确认的材料片段。为空数组或不传时请求体里不出现该字段 */
   confirmedMaterials?: ConfirmedMaterial[]
   /**
+   * 契约 23.2：阶段上下文。传入时默认使用 v3 提示词；显式传入 v1/v2 不会被静默改写，
+   * 由服务端按 23.1 返回 400，避免隐藏接线错误。
+   */
+  milestoneContext?: MilestoneContext | null
+  /**
    * 提示词版本。不传时按内容自动选择：
-   * 带 `projectProfile` 或非空 `confirmedMaterials` → v2，否则保持 v1（契约 17.4 第 2 条）。
+   * 带 `milestoneContext` → v3；带 `projectProfile` 或非空 `confirmedMaterials` → v2；
+   * 否则保持 v1（契约 17.4 第 2 条）。
    */
   promptVersion?: string
   /** 对应页面「重新判断下一步」 */
@@ -144,6 +154,10 @@ export function buildAdvisorRequest(input: BuildAdvisorRequestInput): AdvisorRec
     input.confirmedMaterials !== undefined && input.confirmedMaterials.length > 0
       ? input.confirmedMaterials
       : null
+  const milestoneContext =
+    input.milestoneContext === undefined || input.milestoneContext === null
+      ? null
+      : input.milestoneContext
 
   const request: AdvisorRecommendationsRequest = {
     contractVersion: CONTRACT_VERSION,
@@ -157,12 +171,15 @@ export function buildAdvisorRequest(input: BuildAdvisorRequestInput): AdvisorRec
     tasks: input.tasks,
     evidence: input.evidence,
     doubts: input.doubts,
-    promptVersion: input.promptVersion ?? DEFAULT_PROMPT_VERSION,
+    promptVersion:
+      input.promptVersion ??
+      (milestoneContext !== null ? MILESTONE_PROMPT_VERSION : DEFAULT_PROMPT_VERSION),
     forceRefresh: input.forceRefresh ?? false,
   }
 
   if (projectProfile !== null) request.projectProfile = projectProfile
   if (confirmedMaterials !== null) request.confirmedMaterials = confirmedMaterials
+  if (milestoneContext !== null) request.milestoneContext = milestoneContext
 
   return request
 }
@@ -185,6 +202,11 @@ export interface BuildAdvisorChatRequestInput {
   projectProfile?: ProjectProfile | null
   /** 契约 17.1：已确认的材料片段。为空数组或不传时请求体里不出现该字段 */
   confirmedMaterials?: ConfirmedMaterial[]
+  /**
+   * 契约 23.2：阶段上下文。传入时默认使用 `advisor-chat-v3`；
+   * 显式传入 v1/v2 不会被静默改写，由服务端返回 400。
+   */
+  milestoneContext?: MilestoneContext | null
   /**
    * 提示词版本。不传时用 `ADVISOR_CHAT_PROMPT_VERSION`（`advisor-chat-v2`）；
    * 显式传入的值原样保留，由服务端按契约 17.4 校验。
@@ -223,11 +245,17 @@ export function buildAdvisorChatRequest(input: BuildAdvisorChatRequestInput): Ad
     input.confirmedMaterials !== undefined && input.confirmedMaterials.length > 0
       ? input.confirmedMaterials
       : null
+  const milestoneContext =
+    input.milestoneContext === undefined || input.milestoneContext === null
+      ? null
+      : input.milestoneContext
 
   const question = (input.question ?? '').trim()
   const request: AdvisorChatRequest = {
     contractVersion: CONTRACT_VERSION,
-    promptVersion: input.promptVersion ?? ADVISOR_CHAT_PROMPT_VERSION,
+    promptVersion:
+      input.promptVersion ??
+      (milestoneContext !== null ? ADVISOR_CHAT_PROMPT_VERSION_V3 : ADVISOR_CHAT_PROMPT_VERSION),
     requestId: input.requestId ?? createRequestId(),
     projectId: input.projectId,
     projectRevision: input.projectRevision,
@@ -246,6 +274,7 @@ export function buildAdvisorChatRequest(input: BuildAdvisorChatRequestInput): Ad
 
   if (projectProfile !== null) request.projectProfile = projectProfile
   if (confirmedMaterials !== null) request.confirmedMaterials = confirmedMaterials
+  if (milestoneContext !== null) request.milestoneContext = milestoneContext
 
   return request
 }
@@ -257,6 +286,23 @@ export function buildAdvisorChatRequest(input: BuildAdvisorChatRequestInput): Ad
  * 关键点：`existingTaskId` 是**必填可空**——必须是 string 或 null；
  * 缺失/其它类型都不接受，尤其**不能**转成空字符串。
  */
+function asBasisMaterialRef(value: unknown): BasisMaterialRef | null {
+  if (!isPlainObject(value)) return null
+  const { materialId, materialName, materialVersion, segmentId, startLine, endLine, itemId } = value
+  if (
+    typeof materialId !== 'string' ||
+    typeof materialName !== 'string' ||
+    typeof materialVersion !== 'number' ||
+    typeof segmentId !== 'string' ||
+    typeof startLine !== 'number' ||
+    typeof endLine !== 'number'
+  ) {
+    return null
+  }
+  if (itemId !== null && typeof itemId !== 'string') return null
+  return { materialId, materialName, materialVersion, segmentId, startLine, endLine, itemId }
+}
+
 function asSuggestion(value: unknown): Suggestion | null {
   if (!isPlainObject(value)) return null
 
@@ -266,7 +312,7 @@ function asSuggestion(value: unknown): Suggestion | null {
   if (!Array.isArray(basisEvidenceIds) || !basisEvidenceIds.every((id) => typeof id === 'string')) return null
   if (!Array.isArray(basisDoubtIds) || !basisDoubtIds.every((id) => typeof id === 'string')) return null
 
-  return {
+  const suggestion: Suggestion = {
     title,
     whyNow,
     doneCriteria,
@@ -274,6 +320,19 @@ function asSuggestion(value: unknown): Suggestion | null {
     basisEvidenceIds: [...basisEvidenceIds] as string[],
     basisDoubtIds: [...basisDoubtIds] as string[],
   }
+
+  // 契约 23.3：v3 可选；未知/非法引用逐条剔除，不影响整份建议
+  if (value.basisMaterialRefs !== undefined) {
+    if (!Array.isArray(value.basisMaterialRefs)) return null
+    const refs: BasisMaterialRef[] = []
+    for (const item of value.basisMaterialRefs) {
+      const ref = asBasisMaterialRef(item)
+      if (ref !== null) refs.push(ref)
+    }
+    suggestion.basisMaterialRefs = refs
+  }
+
+  return suggestion
 }
 
 /** 契约 4.3 / 4.4：成功响应的必需字段齐全，且 source 只能是 model / fallback */
@@ -298,6 +357,15 @@ function asSuccess(value: unknown): AdvisorRecommendationsSuccess | null {
     parsedSuggestions.push(suggestion)
   }
 
+  const milestoneRevision = value.milestoneRevision
+  if (
+    milestoneRevision !== undefined &&
+    milestoneRevision !== null &&
+    typeof milestoneRevision !== 'number'
+  ) {
+    return null
+  }
+
   return {
     contractVersion,
     requestId,
@@ -307,6 +375,9 @@ function asSuccess(value: unknown): AdvisorRecommendationsSuccess | null {
     fallbackReason: fallbackReason as AdvisorFallbackReason | null,
     cached,
     promptVersion,
+    ...(milestoneRevision === undefined
+      ? {}
+      : { milestoneRevision: milestoneRevision as number | null }),
     suggestions: parsedSuggestions,
   }
 }
@@ -488,6 +559,9 @@ export function toRecommendations(success: AdvisorRecommendationsSuccess): Recom
     existingTaskId: suggestion.existingTaskId,
     basisEvidenceIds: [...suggestion.basisEvidenceIds],
     basisDoubtIds: [...suggestion.basisDoubtIds],
+    ...(suggestion.basisMaterialRefs === undefined
+      ? {}
+      : { basisMaterialRefs: [...suggestion.basisMaterialRefs] }),
     id: buildRecommendationId(success.source, success.requestId, success.projectRevision, index),
     source: success.source,
     requestId: success.requestId,
@@ -534,6 +608,25 @@ function asChatSuccess(value: unknown, requestPromptVersion: string): AdvisorCha
   const fallbackReason = value.fallbackReason
   if (fallbackReason !== null && typeof fallbackReason !== 'string') return null
 
+  const milestoneRevision = value.milestoneRevision
+  if (
+    milestoneRevision !== undefined &&
+    milestoneRevision !== null &&
+    typeof milestoneRevision !== 'number'
+  ) {
+    return null
+  }
+
+  let citations: BasisMaterialRef[] | undefined
+  if (value.citations !== undefined) {
+    if (!Array.isArray(value.citations)) return null
+    citations = []
+    for (const item of value.citations) {
+      const ref = asBasisMaterialRef(item)
+      if (ref !== null) citations.push(ref)
+    }
+  }
+
   return {
     contractVersion,
     requestId,
@@ -542,6 +635,10 @@ function asChatSuccess(value: unknown, requestPromptVersion: string): AdvisorCha
     source,
     fallbackReason: fallbackReason as AdvisorFallbackReason | null,
     promptVersion: typeof promptVersion === 'string' ? promptVersion : requestPromptVersion,
+    ...(milestoneRevision === undefined
+      ? {}
+      : { milestoneRevision: milestoneRevision as number | null }),
+    ...(citations === undefined ? {} : { citations }),
     answer,
   }
 }

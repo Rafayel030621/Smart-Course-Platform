@@ -31,11 +31,16 @@ npm run dev        # 打开 http://localhost:5173/
 npm run build      # 产物到 dist/
 npm run typecheck
 npm test           # 前端 Vitest 测试（用例数以命令输出为准，不在此处固化）
+npm run test:integration:v3-local   # 可选：本地真实后端集成测试（需要本机 V3 后端）
 ```
 
 Node 20.19+ 或 22.12+（Vite 8 的要求）。
 
 建议接口由独立的 `server/` 服务提供。启动方式和模型环境变量见 [后端配置说明](docs/mvp-backend-setup.md)；前端通过 `VITE_API_BASE_URL` 指向 API 域名（不含 `/api`）。后端使用自己的 `cd server && npm test`，与根目录的前端测试分开运行。
+
+`npm test` 只跑离线单测，不会连接后端。本地真实后端集成测试是 opt-in 的：需要本机
+loopback 上的 V3 后端与邀请码，环境变量、测试写入的数据与残留数据处理见
+[本地 V3 后端集成测试](docs/integration-v3-local.md)。
 
 后端端到端冒烟（建议使用本地或临时数据库，不要指向生产库）：
 

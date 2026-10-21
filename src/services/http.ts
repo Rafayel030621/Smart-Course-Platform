@@ -63,13 +63,22 @@ export type HttpResult =
   | { ok: false; status: number | null; cause: HttpFailureCause; data: unknown }
 
 export interface HttpRequestOptions {
-  method?: 'GET' | 'POST'
+  /**
+   * V2 只用 GET/POST；V3 契约（阶段、任务、证据等）使用 PATCH，故在此扩展。
+   * 仍保持默认 GET，不改变既有调用方行为。
+   */
+  method?: 'GET' | 'POST' | 'PATCH' | 'DELETE'
   /** 会被 JSON.stringify；不要放敏感字段 */
   body?: unknown
   timeoutMs?: number
   /** 外部取消信号（与内部超时联动） */
   signal?: AbortSignal
   headers?: Record<string, string>
+  /**
+   * 仅 V3 账号会话使用 `include`（Cookie 由浏览器管理）。
+   * 默认不设置，避免改变 V2 跨域请求的 CORS 行为；前端永不读取/保存 Cookie。
+   */
+  credentials?: RequestCredentials
   /** 注入 fetch，便于测试替换；默认用全局 fetch */
   fetchImpl?: typeof fetch
 }
@@ -106,6 +115,7 @@ export async function requestJson(path: string, options: HttpRequestOptions = {}
     timeoutMs = DEFAULT_TIMEOUT_MS,
     signal,
     headers,
+    credentials,
     fetchImpl = fetch,
   } = options
 
@@ -134,6 +144,7 @@ export async function requestJson(path: string, options: HttpRequestOptions = {}
       },
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: controller.signal,
+      ...(credentials === undefined ? {} : { credentials }),
     })
 
     const json = await readJson(response)

@@ -418,3 +418,426 @@ export interface Project {
   /** ← doubtRecords 里 status === 'open' 的文本 */
   doubts: string[]
 }
+
+/* ========================================================================== *
+ * V3/V4 契约类型（docs/contracts.md v3.3，2026-10-19 冻结）
+ *
+ * 这些类型只描述**云端契约**，不改变上面的本地 `Project` 结构，因此不需要
+ * 提升 localStorage schemaVersion。云端状态必须由服务端确认后再写入 store，
+ * 禁止用本地假数据伪装云端成功。
+ * ========================================================================== */
+
+/** 云端契约版本，随写请求提交并由服务端校验 */
+export const V3_CONTRACT_VERSION = '3.0'
+/** V2 建议/聊天契约版本；无阶段上下文时继续使用 */
+export const V2_CONTRACT_VERSION = '1.0'
+
+export type V3UserStatus = 'active' | 'disabled'
+
+/** GET /api/auth/me、POST /api/auth/login 返回的用户 */
+export interface V3User {
+  userId: string
+  account: string
+  displayName: string
+  status: V3UserStatus
+  revision: number
+  createdAt: string
+  updatedAt: string
+}
+
+/** 启动鉴权的显式状态：loading / 已登录 / 未登录 / 失败互斥 */
+export type AuthStatus = 'idle' | 'loading' | 'authenticated' | 'unauthenticated' | 'error'
+
+export interface AuthSnapshot {
+  status: AuthStatus
+  user: V3User | null
+  sessionExpiresAt: string | null
+}
+
+/** 阶段任务统计（服务端聚合，客户端只读） */
+export interface MilestoneTaskStats {
+  total: number
+  done: number
+  doing: number
+  todo: number
+  archived: number
+  progress: number
+}
+
+export type CloudMilestoneStatus = 'planned' | 'active' | 'completed' | 'archived'
+
+export interface CloudMilestone {
+  milestoneId: string
+  name: string
+  goal: string
+  doneCriteria: string
+  dueAt: string | null
+  status: CloudMilestoneStatus
+  orderIndex: number
+  revision: number
+  source: 'manual' | 'ai-candidate' | 'migration'
+  createdAt: string
+  updatedAt: string
+  completedAt: string | null
+  archivedAt: string | null
+  taskStats: MilestoneTaskStats
+}
+
+export interface CloudTask {
+  taskId: string
+  projectId: string
+  milestoneId: string | null
+  milestoneName: string | null
+  title: string
+  doneCriteria: string
+  status: TaskStatus
+  assigneeUserId: string | null
+  orderIndex: number
+  source: 'manual' | 'ai-suggestion' | 'migration'
+  revision: number
+  createdAt: string
+  updatedAt: string
+  startedAt: string | null
+  completedAt: string | null
+  archivedAt: string | null
+}
+
+export interface CloudEvidence {
+  evidenceId: string
+  projectId: string
+  taskId: string | null
+  milestoneId: string | null
+  /** 提交时阶段名快照；任务换阶段后历史仍可读 */
+  milestoneNameSnapshot: string | null
+  submissionId: string | null
+  didWhat: string
+  foundWhat: string
+  stillUnsure: string | null
+  attachmentName: string | null
+  status: 'active' | 'redacted'
+  revision: number
+  createdAt: string
+  updatedAt: string
+  redactedAt: string | null
+}
+
+export interface CloudDoubt {
+  doubtId: string
+  /** 证据创建响应里的疑问没有 projectId（归属由证据本身保证） */
+  projectId: string | null
+  text: string
+  status: DoubtStatus
+  sourceEvidenceId: string | null
+  createdAt: string
+  resolvedAt: string | null
+}
+
+export interface ProgressRecord {
+  progressId: string
+  summary: string
+  milestoneId: string | null
+  taskId: string | null
+  evidenceIds: string[]
+  occurredAt: string
+  status: 'active' | 'superseded'
+  supersedesProgressId: string | null
+  revision: number
+  createdAt: string
+  updatedAt: string
+}
+
+/** 契约 22.11：时间线条目；无读取端点时只作为类型预留 */
+export interface ProjectTimelineItem {
+  itemId: string
+  itemType: 'milestone' | 'task' | 'evidence' | 'progress' | 'doubt'
+  summary: string
+  milestoneId: string | null
+  taskId: string | null
+  evidenceId: string | null
+  occurredAt: string
+  details: Record<string, unknown>
+}
+
+export interface CloudProjectSummary {
+  projectId: string
+  name: string
+  short: string | null
+  status: 'active' | 'archived'
+  projectRevision: number
+  currentMilestoneId: string | null
+  currentMilestone: string | null
+  milestoneCount: number
+  taskCount: number
+  doneTaskCount: number
+  updatedAt: string
+}
+
+export interface CloudProject {
+  projectId: string
+  /** 契约 22.1：项目所有者；store 用它复核“当前登录用户 = 项目所有者” */
+  ownerUserId: string
+  name: string
+  short: string | null
+  profile: ProjectProfile
+  status: 'active' | 'archived' | 'deleted'
+  visibility: 'private'
+  projectRevision: number
+  currentMilestoneId: string | null
+  currentMilestone: string | null
+  createdAt: string
+  updatedAt: string
+  archivedAt: string | null
+  deletedAt: string | null
+  milestones: CloudMilestone[]
+  taskStats: {
+    total: number
+    done: number
+    doing: number
+    todo: number
+    progress: number
+  }
+}
+
+/** 云端项目同步状态（单一来源，由 cloud store 维护） */
+export type CloudSyncStatus = 'idle' | 'loading' | 'saving' | 'ready' | 'error' | 'unauthorized'
+
+export interface CloudProjectSyncState {
+  status: CloudSyncStatus
+  projectId: string | null
+  projectRevision: number
+  lastSyncedAt: string | null
+  errorCode: string | null
+  errorMessage: string | null
+}
+
+/** 本地项目迁移的显式状态，供 UI 显示“待确认/迁移中/成功/失败” */
+export type LocalMigrationStatus =
+  | 'idle'
+  | 'pending-confirmation'
+  | 'migrating'
+  | 'succeeded'
+  | 'failed'
+  | 'blocked'
+
+export type LocalMigrationBlockReason =
+  | 'schema-outdated'
+  | 'schema-unsupported'
+  | 'malformed'
+  | 'duplicate-id'
+  | 'missing-reference'
+
+export interface LocalMigrationCandidate {
+  localProjectId: string
+  name: string
+  short: string
+  schemaVersion: number
+  taskCount: number
+  evidenceCount: number
+  doubtCount: number
+  materialCount: number
+  chatCount: number
+  status: LocalMigrationStatus
+  migrationId: string | null
+  cloudProjectId: string | null
+  blockReason: LocalMigrationBlockReason | null
+  errorMessage: string | null
+}
+
+/** 持久化的迁移幂等记录（不含任何会话令牌） */
+export interface LocalMigrationRecord {
+  clientProjectId: string
+  migrationId: string
+  status: 'migrating' | 'succeeded' | 'failed'
+  cloudProjectId: string | null
+  importedAt: string | null
+  updatedAt: string
+}
+
+/* ---- 迁移请求 DTO（契约 24.2 / 24.3 / 24.3.1） ---- */
+
+export interface LocalMigrationMilestoneInput {
+  clientId: string
+  name: string
+  goal: string | null
+  doneCriteria: string | null
+  dueAt: string | null
+  status: 'planned' | 'active' | 'completed' | 'archived'
+  orderIndex: number
+}
+
+export interface LocalMigrationTaskInput {
+  clientId: string
+  milestoneClientId: string | null
+  title: string
+  doneCriteria: string | null
+  status: TaskStatus
+  createdAt: string
+  updatedAt: string
+}
+
+export interface LocalMigrationEvidenceInput {
+  clientId: string
+  taskClientId: string | null
+  milestoneClientId: string | null
+  submissionId: string | null
+  didWhat: string
+  foundWhat: string | null
+  stillUnsure: string | null
+  attachmentName: string | null
+  createdAt: string
+}
+
+export interface LocalMigrationDoubtInput {
+  clientId: string
+  text: string
+  status: DoubtStatus
+  sourceEvidenceClientId: string | null
+  createdAt: string
+  resolvedAt: string | null
+}
+
+export interface LocalMigrationMaterialSegmentInput {
+  segmentId: string
+  index: number
+  startLine: number
+  endLine: number
+  text: string
+}
+
+export interface LocalMigrationUnderstandingItemInput {
+  clientId: string
+  clientItemId: string | null
+  kind: UnderstandingBlockKind
+  text: string
+  originalText: string | null
+  sourceSegmentIds: string[]
+  status: UnderstandingBlockStatus
+}
+
+export interface LocalMigrationMaterialInput {
+  clientId: string
+  name: string
+  type: string
+  size: number
+  encoding: MaterialEncoding
+  status: string
+  version: number
+  createdAt: string
+  updatedAt: string
+  segments: LocalMigrationMaterialSegmentInput[]
+  understandingItems: LocalMigrationUnderstandingItemInput[]
+}
+
+export interface LocalMigrationChatMessageInput {
+  clientId: string
+  role: 'user' | 'assistant'
+  text: string
+  createdAt?: string | null
+  source: 'model' | 'fallback' | 'error' | null
+  fallbackReason: string | null
+}
+
+export interface LocalMigrationProjectInput {
+  name: string
+  short: string | null
+  projectRevision: number
+  profile: ProjectProfile
+  milestones: LocalMigrationMilestoneInput[]
+  tasks: LocalMigrationTaskInput[]
+  evidence: LocalMigrationEvidenceInput[]
+  doubts: LocalMigrationDoubtInput[]
+  progress: []
+  materials: LocalMigrationMaterialInput[]
+  chats: LocalMigrationChatMessageInput[]
+}
+
+export interface LocalMigrationRequest {
+  contractVersion: string
+  requestId: string
+  idempotencyKey: string
+  migrationId: string
+  userConfirmed: true
+  userConfirmedAt: string
+  source: {
+    schemaVersion: number
+    clientProjectId: string
+    appVersion?: string
+    exportedAt?: string
+  }
+  localProject: LocalMigrationProjectInput
+}
+
+export interface LocalMigrationIdMap {
+  milestones: Record<string, string>
+  tasks: Record<string, string>
+  evidence: Record<string, string>
+  progress: Record<string, string>
+  materials: Record<string, string>
+  understandingItems: Record<string, string>
+  doubts: Record<string, string>
+  chats: Record<string, string>
+}
+
+export interface LocalMigrationResponse {
+  contractVersion: string
+  requestId: string
+  projectId: string
+  projectRevision: number
+  migrationId: string
+  status: 'completed'
+  replayed: boolean
+  deduplicated: boolean
+  appliedChanges: boolean
+  idMap: LocalMigrationIdMap
+  counts: {
+    milestones: number
+    tasks: number
+    evidence: number
+    progress: number
+    materials: number
+    materialSegments: number
+    understandingItems: number
+    doubts: number
+    chatMessages: number
+  }
+  warnings: Array<{ code: string; message: string; count: number }>
+  importedAt: string
+}
+
+/* ---- 云端材料理解（仅用于 v3 建议/聊天的已确认材料上下文） ---- */
+
+export interface CloudMaterialSegment {
+  materialId: string
+  materialVersion: number
+  segmentId: string
+  orderIndex: number
+  startLine: number
+  endLine: number
+  text: string
+}
+
+export interface CloudMaterial {
+  materialId: string
+  projectId: string
+  name: string
+  type: MaterialType
+  size: number
+  encoding: MaterialEncoding
+  version: number
+  status: 'registered' | 'parsed' | 'parse-failed' | 'unsupported'
+  createdAt: string
+}
+
+export interface CloudUnderstandingItem {
+  itemId: string
+  materialId: string
+  materialVersion: number
+  kind: UnderstandingBlockKind
+  text: string
+  originalText: string
+  sourceSegmentIds: string[]
+  status: UnderstandingBlockStatus
+  revision: number
+  createdAt: string
+  updatedAt: string
+}
