@@ -100,7 +100,7 @@ export function createAdvisorHandler(
   function sendFailure(
     res: ServerResponse,
     statusCode: number,
-    code: AdvisorRuntimeErrorCode | 'INVALID_INPUT',
+    code: AdvisorRuntimeErrorCode | 'INVALID_INPUT' | 'CONTRACT_VERSION_MISMATCH',
     requestId: string | null,
     message: string,
     retryable: boolean,
@@ -171,7 +171,7 @@ export function createAdvisorHandler(
         sendFailure(
           res,
           400,
-          'INVALID_INPUT',
+          parsed.code ?? 'INVALID_INPUT',
           parsed.requestId,
           `请求内容不合法：${parsed.issues[0] ?? '未知字段问题'}`,
           false,

@@ -3189,7 +3189,7 @@ v3 规则：
 
 1. 客户端传来的 `name`、`startLine`、`endLine`、`text` **不作为可信内容**；服务端一律用数据库值覆盖；
 2. 片段未确认、属于待确认草稿、属于归档材料或旧版本：返回 400 `UNCONFIRMED_MATERIAL` 或 409 `MATERIAL_VERSION_OUTDATED`；
-3. 模型只能返回 `segmentId`；材料名、版本、行号由服务端回填；
+3. 模型只能返回 `segmentId`；材料名、版本、行号由服务端回填；提示词内可用带材料前缀的虚拟引用标识（如 `m1:seg_1`），由服务端映射回真实 `materialId + segmentId`；响应一律输出真实 `segmentId`；
 4. 响应中的 `basisMaterialRefs` / `citations` 只允许包含本次请求中已确认的片段；
 5. 未确认材料不得进入系统提示词、用户消息或任何缓存键；
 6. 旧客户端继续使用 v1/v2，行为不变；v3 前端不得再依赖客户端自报的材料名和行号。

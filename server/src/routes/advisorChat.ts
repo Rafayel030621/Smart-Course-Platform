@@ -19,8 +19,8 @@ function readBody(req: IncomingMessage, maxBytes: number): Promise<string> {
 export function createAdvisorChatHandler(options: { service: AdvisorService; logger?: AdvisorLogger; maxBodyBytes?: number }): (req: IncomingMessage, res: ServerResponse) => Promise<boolean> {
   const logger = options.logger ?? createConsoleLogger('advisor-chat')
   const maxBodyBytes = options.maxBodyBytes ?? LIMITS.bodyBytes
-  function failure(res: ServerResponse, status: number, requestId: string | null, message: string): void {
-    const body: AdvisorFailureResponse = { contractVersion: CONTRACT_VERSION, requestId, code: 'INVALID_INPUT', message, retryable: false, retryAfterSeconds: null }
+  function failure(res: ServerResponse, status: number, requestId: string | null, message: string, code: AdvisorFailureResponse['code'] = 'INVALID_INPUT'): void {
+    const body: AdvisorFailureResponse = { contractVersion: CONTRACT_VERSION, requestId, code, message, retryable: false, retryAfterSeconds: null }
     sendJson(res, status, body)
   }
   return async (req, res) => {
@@ -34,7 +34,7 @@ export function createAdvisorChatHandler(options: { service: AdvisorService; log
     let body: unknown
     try { body = JSON.parse(raw) } catch { failure(res, 400, null, '请求体不是合法 JSON'); return true }
     const parsed = parseAdvisorChatRequest(body)
-    if (!parsed.ok) { logger.warn('聊天请求未通过校验', { requestId: parsed.requestId, issues: parsed.issues }); failure(res, 400, parsed.requestId, `请求内容不合法：${parsed.issues[0] ?? '未知字段问题'}`); return true }
+    if (!parsed.ok) { logger.warn('聊天请求未通过校验', { requestId: parsed.requestId, issues: parsed.issues }); failure(res, 400, parsed.requestId, `请求内容不合法：${parsed.issues[0] ?? '未知字段问题'}`, parsed.code ?? 'INVALID_INPUT'); return true }
     try {
       const result = await options.service.chat(parsed.value)
       if (!result.ok) { sendJson(res, 503, { contractVersion: CONTRACT_VERSION, requestId: parsed.value.requestId, code: result.code, message: '模型服务暂不可用，请稍后重试', retryable: result.retryable, retryAfterSeconds: result.retryAfterSeconds }); return true }

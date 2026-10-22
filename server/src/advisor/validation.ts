@@ -10,6 +10,8 @@ import {
   type DoubtSnapshot,
   type DoubtStatus,
   type EvidenceSnapshot,
+  type MilestoneContext,
+  type ProgressSnapshot,
   type ProjectProfile,
   type Suggestion,
   type TaskSnapshot,
@@ -60,6 +62,13 @@ export const LIMITS = {
   confirmedMaterialSegments: 20,
   confirmedMaterialTextChars: 8_000,
   confirmedMaterialSegmentLength: 2000,
+  /* ---------------- v3：阶段上下文（契约 23.2） ---------------- */
+  milestoneContextGoalLength: 300,
+  milestoneContextDoneCriteriaLength: 300,
+  milestoneContextTasks: 50,
+  milestoneContextProgress: 20,
+  milestoneContextEvidence: 20,
+  progressSummaryLength: 1000,
 } as const
 
 const TASK_STATUSES: readonly TaskStatus[] = ['todo', 'doing', 'done']
@@ -238,8 +247,13 @@ function readStringArray(
 
 /* --------------------------------------------------------- 请求：快照解析 */
 
-function parseTask(raw: unknown, index: number, issues: string[]): TaskSnapshot | undefined {
-  const path = `tasks[${index}]`
+function parseTask(
+  raw: unknown,
+  index: number,
+  issues: string[],
+  pathKey = 'tasks',
+): TaskSnapshot | undefined {
+  const path = `${pathKey}[${index}]`
   if (!isPlainObject(raw)) {
     issues.push(`${path} 必须是对象`)
     return undefined
@@ -289,8 +303,13 @@ function parseTask(raw: unknown, index: number, issues: string[]): TaskSnapshot 
   }
 }
 
-function parseEvidence(raw: unknown, index: number, issues: string[]): EvidenceSnapshot | undefined {
-  const path = `evidence[${index}]`
+function parseEvidence(
+  raw: unknown,
+  index: number,
+  issues: string[],
+  pathKey = 'evidence',
+): EvidenceSnapshot | undefined {
+  const path = `${pathKey}[${index}]`
   if (!isPlainObject(raw)) {
     issues.push(`${path} 必须是对象`)
     return undefined
@@ -571,6 +590,212 @@ function parseConfirmedMaterials(raw: unknown, issues: string[]): ConfirmedMater
 /** v1 取值：携带 v2 字段时不允许继续使用（契约 17.4） */
 const V1_PROMPT_VERSIONS: readonly string[] = ['mvp-prompt-v1', 'advisor-chat-v1']
 
+const V3_PROMPT_VERSIONS: readonly string[] = ['mvp-prompt-v3', 'advisor-chat-v3']
+const MILESTONE_CONTEXT_STATUSES = ['planned', 'active'] as const
+
+function readNullablePositiveInteger(
+  source: Record<string, unknown>,
+  key: string,
+  issues: string[],
+  path: string,
+): number | null | undefined {
+  const value = source[key]
+  if (value === undefined) {
+    issues.push(`${path} 缺失`)
+    return undefined
+  }
+  if (value === null) return null
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
+    issues.push(`${path} 必须是 ≥ 1 的整数或 null`)
+    return undefined
+  }
+  return value
+}
+
+function parseProgressSnapshot(
+  raw: unknown,
+  index: number,
+  issues: string[],
+  pathKey = 'recentProgress',
+): ProgressSnapshot | undefined {
+  const path = `${pathKey}[${index}]`
+  if (!isPlainObject(raw)) {
+    issues.push(`${path} 必须是对象`)
+    return undefined
+  }
+  const progressId = readRequiredString(raw, 'progressId', LIMITS.idLength, issues, `${path}.progressId`)
+  const summary = readRequiredString(
+    raw,
+    'summary',
+    LIMITS.progressSummaryLength,
+    issues,
+    `${path}.summary`,
+  )
+  const milestoneId = readNullableString(
+    raw,
+    'milestoneId',
+    LIMITS.idLength,
+    issues,
+    `${path}.milestoneId`,
+  )
+  const taskId = readNullableString(raw, 'taskId', LIMITS.idLength, issues, `${path}.taskId`)
+  const occurredAt = readRequiredString(raw, 'occurredAt', 40, issues, `${path}.occurredAt`)
+  if (occurredAt !== undefined && !isIsoTime(occurredAt)) {
+    issues.push(`${path}.occurredAt 必须是 ISO 8601 时间`)
+    return undefined
+  }
+  if (
+    progressId === undefined ||
+    summary === undefined ||
+    milestoneId === undefined ||
+    taskId === undefined ||
+    occurredAt === undefined
+  ) {
+    return undefined
+  }
+  return { progressId, summary, milestoneId, taskId, occurredAt }
+}
+
+/**
+ * 解析 v3 阶段上下文（契约 23.2）。只做结构与字段校验；
+ * 不访问数据库，因此“实体属于该项目 + 该阶段”由调用方/后续 D15 切片保证。
+ */
+function parseMilestoneContext(
+  raw: unknown,
+  topCurrentMilestone: string | null,
+  issues: string[],
+): MilestoneContext | undefined {
+  if (!isPlainObject(raw)) {
+    issues.push('milestoneContext 必须是对象')
+    return undefined
+  }
+
+  const milestoneId = readNullableString(
+    raw,
+    'milestoneId',
+    LIMITS.idLength,
+    issues,
+    'milestoneContext.milestoneId',
+  )
+  if (milestoneId !== undefined && milestoneId !== null && !milestoneId.startsWith('ms_')) {
+    issues.push('milestoneContext.milestoneId 必须以 "ms_" 开头或为 null')
+  }
+  const currentMilestone = readNullableString(
+    raw,
+    'currentMilestone',
+    LIMITS.milestoneLength,
+    issues,
+    'milestoneContext.currentMilestone',
+  )
+  const milestoneRevision = readNullablePositiveInteger(
+    raw,
+    'milestoneRevision',
+    issues,
+    'milestoneContext.milestoneRevision',
+  )
+  const milestoneGoal = readNullableString(
+    raw,
+    'milestoneGoal',
+    LIMITS.milestoneContextGoalLength,
+    issues,
+    'milestoneContext.milestoneGoal',
+  )
+  const milestoneDoneCriteria = readNullableString(
+    raw,
+    'milestoneDoneCriteria',
+    LIMITS.milestoneContextDoneCriteriaLength,
+    issues,
+    'milestoneContext.milestoneDoneCriteria',
+  )
+  const milestoneStatus = readNullableString(
+    raw,
+    'milestoneStatus',
+    16,
+    issues,
+    'milestoneContext.milestoneStatus',
+  )
+  if (
+    milestoneStatus !== undefined &&
+    milestoneStatus !== null &&
+    !MILESTONE_CONTEXT_STATUSES.includes(milestoneStatus as 'planned' | 'active')
+  ) {
+    issues.push('milestoneContext.milestoneStatus 只能是 planned / active 或 null')
+  }
+
+  const milestoneTasks = parseArray(
+    raw,
+    'milestoneTasks',
+    LIMITS.milestoneContextTasks,
+    issues,
+    parseTask,
+    'milestoneContext.milestoneTasks',
+  )
+  const recentProgress = parseArray(
+    raw,
+    'recentProgress',
+    LIMITS.milestoneContextProgress,
+    issues,
+    parseProgressSnapshot,
+    'milestoneContext.recentProgress',
+  )
+  const milestoneEvidence = parseArray(
+    raw,
+    'milestoneEvidence',
+    LIMITS.milestoneContextEvidence,
+    issues,
+    parseEvidence,
+    'milestoneContext.milestoneEvidence',
+  )
+
+  if (currentMilestone !== undefined && currentMilestone !== null && topCurrentMilestone !== null) {
+    if (currentMilestone !== topCurrentMilestone) {
+      issues.push('milestoneContext.currentMilestone 必须与顶层 currentMilestone 一致')
+    }
+  }
+
+  if (
+    milestoneId === undefined ||
+    currentMilestone === undefined ||
+    milestoneRevision === undefined ||
+    milestoneGoal === undefined ||
+    milestoneDoneCriteria === undefined ||
+    milestoneStatus === undefined ||
+    milestoneTasks === undefined ||
+    recentProgress === undefined ||
+    milestoneEvidence === undefined
+  ) {
+    return undefined
+  }
+
+  if (milestoneId === null) {
+    if (
+      topCurrentMilestone !== null ||
+      currentMilestone !== null ||
+      milestoneRevision !== null ||
+      milestoneGoal !== null ||
+      milestoneDoneCriteria !== null ||
+      milestoneStatus !== null ||
+      milestoneTasks.length > 0 ||
+      recentProgress.length > 0 ||
+      milestoneEvidence.length > 0
+    ) {
+      issues.push('空白项目的 milestoneContext 必须全部为 null 且三个数组为空')
+    }
+  }
+
+  return {
+    milestoneId,
+    currentMilestone,
+    milestoneRevision,
+    milestoneGoal,
+    milestoneDoneCriteria,
+    milestoneStatus: milestoneStatus as 'planned' | 'active' | null,
+    milestoneTasks,
+    recentProgress,
+    milestoneEvidence,
+  }
+}
+
 /* ------------------------------------------------------------- 请求：入口 */
 
 export interface ParseSuccess {
@@ -583,6 +808,8 @@ export interface ParseFailure {
   /** 能取到就回显，取不到就是 null（契约 4.5） */
   requestId: string | null
   issues: string[]
+  /** 版本组合错误必须返回 CONTRACT_VERSION_MISMATCH，其余仍是 INVALID_INPUT */
+  code?: 'INVALID_INPUT' | 'CONTRACT_VERSION_MISMATCH'
 }
 
 export type ParseResult = ParseSuccess | ParseFailure
@@ -615,6 +842,7 @@ export function parseAdvisorRequest(
 
   const requestId = extractRequestId(body)
   const issues: string[] = []
+  let failureCode: ParseFailure['code'] = 'INVALID_INPUT'
 
   const contractVersion = readRequiredString(body, 'contractVersion', LIMITS.idLength, issues)
   if (contractVersion !== undefined && contractVersion !== CONTRACT_VERSION) {
@@ -678,7 +906,32 @@ export function parseAdvisorRequest(
     issues.push('携带 projectProfile 或 confirmedMaterials 时必须使用 v2 提示词版本')
   }
 
-  if (issues.length > 0) return { ok: false, requestId, issues }
+  // v3 版本配对（契约 20.1.1 / 23.4）：v3 必须有 context，v1/v2 必须没有
+  const hasMilestoneContext = Object.prototype.hasOwnProperty.call(body, 'milestoneContext')
+  const promptVersionKnown =
+    promptVersion !== undefined && allowedPromptVersions.includes(promptVersion)
+  const isV3Prompt = promptVersion !== undefined && V3_PROMPT_VERSIONS.includes(promptVersion)
+  let milestoneContext: MilestoneContext | null = null
+  if (promptVersionKnown) {
+    if (isV3Prompt) {
+      if (!hasMilestoneContext || body.milestoneContext === null) {
+        failureCode = 'CONTRACT_VERSION_MISMATCH'
+        issues.push('使用 v3 提示词时必须携带 milestoneContext')
+      } else {
+        const parsedContext = parseMilestoneContext(
+          body.milestoneContext,
+          currentMilestone ?? null,
+          issues,
+        )
+        milestoneContext = parsedContext ?? null
+      }
+    } else if (hasMilestoneContext) {
+      failureCode = 'CONTRACT_VERSION_MISMATCH'
+      issues.push('v1/v2 提示词不能携带 milestoneContext')
+    }
+  }
+
+  if (issues.length > 0) return { ok: false, requestId, issues, code: failureCode }
 
   return {
     ok: true,
@@ -696,6 +949,7 @@ export function parseAdvisorRequest(
       forceRefresh: forceRefresh as boolean,
       projectProfile: projectProfile ?? null,
       confirmedMaterials: confirmedMaterials ?? [],
+      milestoneContext,
     },
   }
 }
@@ -742,7 +996,12 @@ export function parseAdvisorChatRequest(body: unknown): ChatParseResult {
   const base = parseAdvisorRequest(synthetic, ADVISOR_CHAT_PROMPT_VERSIONS)
   if (!base.ok) issues.push(...base.issues)
   if (issues.length > 0 || !base.ok || question === undefined || requestId === null) {
-    return { ok: false, requestId, issues: issues.length > 0 ? issues : ['请求内容不合法'] }
+    return {
+      ok: false,
+      requestId,
+      issues: issues.length > 0 ? issues : ['请求内容不合法'],
+      code: base.ok ? 'INVALID_INPUT' : (base.code ?? 'INVALID_INPUT'),
+    }
   }
   return {
     ok: true,
@@ -760,6 +1019,7 @@ export function parseAdvisorChatRequest(body: unknown): ChatParseResult {
       promptVersion: base.value.promptVersion,
       projectProfile: base.value.projectProfile ?? null,
       confirmedMaterials: base.value.confirmedMaterials ?? [],
+      milestoneContext: base.value.milestoneContext ?? null,
     },
   }
 }
@@ -769,24 +1029,25 @@ function parseArray<T>(
   key: string,
   maxItems: number,
   issues: string[],
-  parseItem: (raw: unknown, index: number, issues: string[]) => T | undefined,
+  parseItem: (raw: unknown, index: number, issues: string[], pathKey?: string) => T | undefined,
+  pathKey = key,
 ): T[] | undefined {
   const value = body[key]
   if (value === undefined) {
-    issues.push(`${key} 缺失`)
+    issues.push(`${pathKey} 缺失`)
     return undefined
   }
   if (!Array.isArray(value)) {
-    issues.push(`${key} 必须是数组`)
+    issues.push(`${pathKey} 必须是数组`)
     return undefined
   }
   if (value.length > maxItems) {
-    issues.push(`${key} 最多 ${maxItems} 条`)
+    issues.push(`${pathKey} 最多 ${maxItems} 条`)
     return undefined
   }
   const parsed: T[] = []
   value.forEach((item, index) => {
-    const result = parseItem(item, index, issues)
+    const result = parseItem(item, index, issues, pathKey)
     if (result !== undefined) parsed.push(result)
   })
   return parsed
