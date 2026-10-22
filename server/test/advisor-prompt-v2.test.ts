@@ -84,9 +84,17 @@ function parsedV2(materialText?: string): AdvisorRequest {
 /* ------------------------------------------------------------ 版本支持列表 */
 
 describe('promptVersion 支持列表（契约 §17.4）', () => {
-  test('四个取值都在支持列表里，旧值不删除', () => {
-    assert.deepEqual(ADVISOR_PROMPT_VERSIONS, ['mvp-prompt-v1', 'mvp-prompt-v2'])
-    assert.deepEqual(ADVISOR_CHAT_PROMPT_VERSIONS, ['advisor-chat-v1', 'advisor-chat-v2'])
+  test('六个取值都在支持列表里，旧值不删除', () => {
+    assert.deepEqual(ADVISOR_PROMPT_VERSIONS, [
+      'mvp-prompt-v1',
+      'mvp-prompt-v2',
+      'mvp-prompt-v3',
+    ])
+    assert.deepEqual(ADVISOR_CHAT_PROMPT_VERSIONS, [
+      'advisor-chat-v1',
+      'advisor-chat-v2',
+      'advisor-chat-v3',
+    ])
   })
 
   test('v1 与 v2 取值都能通过各自接口的校验', () => {

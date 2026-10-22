@@ -10,12 +10,22 @@ export const CONTRACT_VERSION = '1.0'
 
 /**
  * 服务端支持的提示词版本（契约 4.1 / 17.4）：不在列表内的请求直接拒绝，不做静默降级。
- * - 建议接口：mvp-prompt-v1（兼容保留）与 mvp-prompt-v2（携带项目基本信息或材料摘录时使用）；
- * - 聊天接口：advisor-chat-v1（兼容保留）与 advisor-chat-v2（同上）；
+ * - 建议接口：mvp-prompt-v1（兼容保留）、mvp-prompt-v2（项目基本信息/材料摘录）、
+ *   mvp-prompt-v3（阶段化建议，必须携带 milestoneContext）；
+ * - 聊天接口：advisor-chat-v1（兼容保留）、advisor-chat-v2（同上）、
+ *   advisor-chat-v3（阶段化聊天，必须携带 milestoneContext）；
  * - 材料理解接口的版本号在 materials/types.ts（material-understanding-v1）。
  */
-export const ADVISOR_PROMPT_VERSIONS: readonly string[] = ['mvp-prompt-v1', 'mvp-prompt-v2']
-export const ADVISOR_CHAT_PROMPT_VERSIONS: readonly string[] = ['advisor-chat-v1', 'advisor-chat-v2']
+export const ADVISOR_PROMPT_VERSIONS: readonly string[] = [
+  'mvp-prompt-v1',
+  'mvp-prompt-v2',
+  'mvp-prompt-v3',
+]
+export const ADVISOR_CHAT_PROMPT_VERSIONS: readonly string[] = [
+  'advisor-chat-v1',
+  'advisor-chat-v2',
+  'advisor-chat-v3',
+]
 export const SUPPORTED_PROMPT_VERSIONS: readonly string[] = [
   ...ADVISOR_PROMPT_VERSIONS,
   ...ADVISOR_CHAT_PROMPT_VERSIONS,
@@ -53,6 +63,27 @@ export interface DoubtSnapshot {
   status: DoubtStatus
   sourceEvidenceId: string | null
   createdAt: string
+}
+
+export interface ProgressSnapshot {
+  progressId: string
+  summary: string
+  milestoneId: string | null
+  taskId: string | null
+  occurredAt: string
+}
+
+/** 契约 23.2：v3 建议/聊天的阶段上下文；空白项目全部为空。 */
+export interface MilestoneContext {
+  milestoneId: string | null
+  currentMilestone: string | null
+  milestoneRevision: number | null
+  milestoneGoal: string | null
+  milestoneDoneCriteria: string | null
+  milestoneStatus: 'planned' | 'active' | null
+  milestoneTasks: TaskSnapshot[]
+  recentProgress: ProgressSnapshot[]
+  milestoneEvidence: EvidenceSnapshot[]
 }
 
 /**
@@ -101,6 +132,8 @@ export interface AdvisorRequest {
   projectProfile?: ProjectProfile | null
   /** v2：学生已确认的材料摘录；缺失按空数组处理 */
   confirmedMaterials?: ConfirmedMaterial[]
+  /** v3：阶段上下文；v3 必填，v1/v2 必须不出现 */
+  milestoneContext?: MilestoneContext | null
 }
 
 export interface ChatMessage {
@@ -123,9 +156,22 @@ export interface AdvisorChatRequest {
   /** v2：同 AdvisorRequest */
   projectProfile?: ProjectProfile | null
   confirmedMaterials?: ConfirmedMaterial[]
+  /** v3：同 AdvisorRequest */
+  milestoneContext?: MilestoneContext | null
 }
 
 /* ------------------------------------------------------------------ 输出侧 */
+
+/** v3 材料引用（契约 23.6 / 23.7）；D15 前由服务端返回空数组 */
+export interface BasisMaterialRef {
+  materialId: string
+  materialName: string
+  materialVersion: number
+  segmentId: string
+  startLine: number
+  endLine: number
+  itemId: string | null
+}
 
 /** 一条建议的线格式（契约 2.5a）。字段名必须与契约一致 */
 export interface Suggestion {
@@ -136,12 +182,28 @@ export interface Suggestion {
   existingTaskId: string | null
   basisEvidenceIds: string[]
   basisDoubtIds: string[]
+  /** 仅 v3 建议响应必须出现；v1/v2 不得出现 */
+  basisMaterialRefs?: BasisMaterialRef[]
+}
+
+/** 聊天成功响应（v3 额外带 milestoneRevision + citations） */
+export interface AdvisorChatSuccessResponse {
+  contractVersion: string
+  requestId: string
+  projectId: string
+  projectRevision: number
+  source: AdvisorSource
+  fallbackReason: AdvisorFallbackReason | null
+  answer: string
+  milestoneRevision?: number | null
+  citations?: BasisMaterialRef[]
 }
 
 export type AdvisorSource = 'model' | 'fallback'
 
 export type AdvisorErrorCode =
   | 'INVALID_INPUT'
+  | 'CONTRACT_VERSION_MISMATCH'
   | 'RATE_LIMITED'
   | 'MODEL_TIMEOUT'
   | 'INVALID_MODEL_OUTPUT'
@@ -150,10 +212,16 @@ export type AdvisorErrorCode =
   | 'INTERNAL'
 
 /** 兜底原因：能进入 fallback 的原因集合（INVALID_INPUT 在进入服务前就被拒了） */
-export type AdvisorFallbackReason = Exclude<AdvisorErrorCode, 'INVALID_INPUT' | 'INTERNAL'>
+export type AdvisorFallbackReason = Exclude<
+  AdvisorErrorCode,
+  'INVALID_INPUT' | 'CONTRACT_VERSION_MISMATCH' | 'INTERNAL'
+>
 
 /** 运行期错误码：服务层可能返回给路由层、并映射成 HTTP 状态码的集合 */
-export type AdvisorRuntimeErrorCode = Exclude<AdvisorErrorCode, 'INVALID_INPUT'>
+export type AdvisorRuntimeErrorCode = Exclude<
+  AdvisorErrorCode,
+  'INVALID_INPUT' | 'CONTRACT_VERSION_MISMATCH'
+>
 
 /** 成功响应体（契约 4.3 / 4.4） */
 export interface AdvisorSuccessResponse {
