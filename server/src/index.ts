@@ -6,7 +6,13 @@ import { createRuleFallback } from './advisor/fallback.js'
 import { createMockProvider, type MockProviderMode } from './advisor/mockProvider.js'
 import { createOpenAiCompatibleProvider } from './advisor/openaiCompatibleProvider.js'
 import { createAdvisorService, type AdvisorService } from './advisor/service.js'
-import { createConsoleLogger, type AdvisorLogger, type AdvisorProvider } from './advisor/types.js'
+import {
+  createConsoleLogger,
+  type AdvisorLogger,
+  type AdvisorProvider,
+  type MilestoneContext,
+} from './advisor/types.js'
+import { invalidInput, type V3Error } from './v3/errors.js'
 import { createAdvisorHandler } from './routes/advisor.js'
 import { createAdvisorChatHandler } from './routes/advisorChat.js'
 import { handleHealth, sendJson } from './routes/health.js'
@@ -103,6 +109,73 @@ function createAdvisorProvider(logger: AdvisorLogger): AdvisorProvider {
   })
 }
 
+/**
+ * 契约 23.2 规则 1/4：阶段上下文中的实体必须属于请求项目和当前阶段。
+ * 只做数据库归属校验；失败返回 INVALID_INPUT，由路由在调用模型前拒绝。
+ */
+function createMilestoneContextValidator(
+  runtime: V3Runtime,
+): (projectId: string, context: MilestoneContext) => V3Error | null {
+  return (projectId, context) => {
+    if (context.milestoneId === null) return null
+    const db = runtime.getDb()
+
+    const milestone = db
+      .prepare(
+        `SELECT status, archived_at FROM milestones
+          WHERE milestone_id = ? AND project_id = ?`,
+      )
+      .get(context.milestoneId, projectId) as
+      | { status: string; archived_at: string | null }
+      | undefined
+    if (
+      milestone === undefined ||
+      milestone.archived_at !== null ||
+      (milestone.status !== 'planned' && milestone.status !== 'active')
+    ) {
+      return invalidInput('当前阶段不存在、已归档或不可编辑')
+    }
+
+    const taskStatement = db.prepare(
+      'SELECT milestone_id FROM tasks WHERE task_id = ? AND project_id = ?',
+    )
+    for (const task of context.milestoneTasks) {
+      const row = taskStatement.get(task.taskId, projectId) as
+        | { milestone_id: string | null }
+        | undefined
+      if (row === undefined || row.milestone_id !== context.milestoneId) {
+        return invalidInput('阶段任务不属于当前项目或当前阶段')
+      }
+    }
+
+    const evidenceStatement = db.prepare(
+      'SELECT milestone_id FROM evidence WHERE evidence_id = ? AND project_id = ?',
+    )
+    for (const evidence of context.milestoneEvidence) {
+      const row = evidenceStatement.get(evidence.evidenceId, projectId) as
+        | { milestone_id: string | null }
+        | undefined
+      if (row === undefined || row.milestone_id !== context.milestoneId) {
+        return invalidInput('阶段证据不属于当前项目或当前阶段')
+      }
+    }
+
+    const progressStatement = db.prepare(
+      'SELECT milestone_id FROM progress_records WHERE progress_id = ? AND project_id = ?',
+    )
+    for (const progress of context.recentProgress) {
+      const row = progressStatement.get(progress.progressId, projectId) as
+        | { milestone_id: string | null }
+        | undefined
+      if (row === undefined || row.milestone_id !== context.milestoneId) {
+        return invalidInput('阶段进展不属于当前项目或当前阶段')
+      }
+    }
+
+    return null
+  }
+}
+
 /** 创建服务实例但不监听端口。参数可注入，便于测试用随机端口启动 */
 export function createApp(serverConfig: ServerConfig = config, deps: AppDependencies = {}): Server {
   const logger = deps.logger ?? createConsoleLogger('server')
@@ -127,15 +200,24 @@ export function createApp(serverConfig: ServerConfig = config, deps: AppDependen
       logger,
     })
 
-  const handleAdvisor = createAdvisorHandler({ service: advisorService, logger })
-  const handleAdvisorChat = createAdvisorChatHandler({ service: advisorService, logger })
+  const v3Runtime = deps.v3Runtime ?? createV3Runtime(deps.v3 ?? {})
+  const validateMilestoneContext = createMilestoneContextValidator(v3Runtime)
+
+  const handleAdvisor = createAdvisorHandler({
+    service: advisorService,
+    logger,
+    validateMilestoneContext,
+  })
+  const handleAdvisorChat = createAdvisorChatHandler({
+    service: advisorService,
+    logger,
+    validateMilestoneContext,
+  })
   const handleMaterials = createMaterialsHandler({ service: materialsService, logger })
   const handleMaterialsUnderstanding = createMaterialsUnderstandingHandler({
     service: materialsService,
     logger,
   })
-
-  const v3Runtime = deps.v3Runtime ?? createV3Runtime(deps.v3 ?? {})
 
   const server = createServer((req, res) => {
     if (handleApiCors(req, res)) return

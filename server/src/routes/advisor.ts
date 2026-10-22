@@ -8,7 +8,9 @@ import {
   type AdvisorSuccessResponse,
 } from '../advisor/types.js'
 import type { AdvisorService } from '../advisor/service.js'
+import type { MilestoneContext } from '../advisor/types.js'
 import { LIMITS, parseAdvisorRequest } from '../advisor/validation.js'
+import type { V3Error } from '../v3/errors.js'
 import { sendJson } from './health.js'
 
 /**
@@ -47,6 +49,8 @@ export interface AdvisorRouteOptions {
   logger?: AdvisorLogger
   /** 请求体上限，默认取契约规定的 256 KB */
   maxBodyBytes?: number
+  /** 契约 23.2 规则 1/4：项目级实体归属校验；返回错误时不调用模型 */
+  validateMilestoneContext?: (projectId: string, context: MilestoneContext) => V3Error | null
 }
 
 class BodyTooLargeError extends Error {
@@ -179,9 +183,38 @@ export function createAdvisorHandler(
         return true
       }
 
+      if (parsed.value.milestoneContext && options.validateMilestoneContext) {
+        const validationError = options.validateMilestoneContext(
+          parsed.value.projectId,
+          parsed.value.milestoneContext,
+        )
+        if (validationError !== null) {
+          logger.warn('阶段上下文未通过项目级校验', {
+            requestId: parsed.value.requestId,
+            code: validationError.code,
+          })
+          sendFailure(
+            res,
+            400,
+            'INVALID_INPUT',
+            parsed.value.requestId,
+            validationError.publicMessage,
+            false,
+          )
+          return true
+        }
+      }
+
       const result = await service.recommend(parsed.value)
 
       if (result.ok) {
+        const suggestions =
+          parsed.value.promptVersion === 'mvp-prompt-v3'
+            ? result.suggestions.map((suggestion) => ({
+                ...suggestion,
+                basisMaterialRefs: [],
+              }))
+            : result.suggestions.map(({ basisMaterialRefs: _ignored, ...suggestion }) => suggestion)
         const successBody: AdvisorSuccessResponse = {
           contractVersion: CONTRACT_VERSION,
           requestId: parsed.value.requestId,
@@ -191,7 +224,7 @@ export function createAdvisorHandler(
           fallbackReason: result.fallbackReason,
           cached: result.cached,
           promptVersion: parsed.value.promptVersion,
-          suggestions: result.suggestions,
+          suggestions,
         }
         sendJson(res, 200, successBody)
         return true

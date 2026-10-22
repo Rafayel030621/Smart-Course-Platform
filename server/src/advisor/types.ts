@@ -162,6 +162,17 @@ export interface AdvisorChatRequest {
 
 /* ------------------------------------------------------------------ 输出侧 */
 
+/** v3 材料引用（契约 23.6 / 23.7）；D15 前由服务端返回空数组 */
+export interface BasisMaterialRef {
+  materialId: string
+  materialName: string
+  materialVersion: number
+  segmentId: string
+  startLine: number
+  endLine: number
+  itemId: string | null
+}
+
 /** 一条建议的线格式（契约 2.5a）。字段名必须与契约一致 */
 export interface Suggestion {
   title: string
@@ -171,6 +182,21 @@ export interface Suggestion {
   existingTaskId: string | null
   basisEvidenceIds: string[]
   basisDoubtIds: string[]
+  /** 仅 v3 建议响应必须出现；v1/v2 不得出现 */
+  basisMaterialRefs?: BasisMaterialRef[]
+}
+
+/** 聊天成功响应（v3 额外带 milestoneRevision + citations） */
+export interface AdvisorChatSuccessResponse {
+  contractVersion: string
+  requestId: string
+  projectId: string
+  projectRevision: number
+  source: AdvisorSource
+  fallbackReason: AdvisorFallbackReason | null
+  answer: string
+  milestoneRevision?: number | null
+  citations?: BasisMaterialRef[]
 }
 
 export type AdvisorSource = 'model' | 'fallback'

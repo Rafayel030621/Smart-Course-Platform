@@ -1,6 +1,9 @@
 import { after, before, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'node:fs'
 import type { AddressInfo } from 'node:net'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import { createApp } from '../src/index.js'
 import { createAdvisorService } from '../src/advisor/service.js'
 import { createRuleFallback } from '../src/advisor/fallback.js'
@@ -16,6 +19,7 @@ import {
   parseAdvisorChatRequest,
   parseAdvisorRequest,
 } from '../src/advisor/validation.js'
+import { createV3Runtime } from '../src/v3/runtime.js'
 
 const config: ServerConfig = {
   host: '127.0.0.1',
@@ -148,10 +152,74 @@ function blankContext(): Record<string, unknown> {
 
 let server: ReturnType<typeof createApp>
 let baseUrl: string
+let tempDir: string
+
+function seedContextFixture(runtime: ReturnType<typeof createV3Runtime>): void {
+  const db = runtime.getDb()
+  const now = '2026-10-20T00:00:00.000Z'
+  const projectId = 'prj_v3_context'
+  const userId = 'usr_v3_context'
+  db.prepare(
+    `INSERT INTO users
+       (user_id, account, account_normalized, display_name, password_hash, password_algo,
+        status, role, revision, created_at, updated_at)
+     VALUES (?, 'v3ctx', 'v3ctx', '上下文测试', 'x', 'bcrypt', 'active', 'student', 1, ?, ?)`,
+  ).run(userId, now, now)
+  db.prepare(
+    `INSERT INTO projects
+       (project_id, owner_user_id, name, short, profile_json, status, visibility,
+        project_revision, current_milestone_id, last_activity_at, created_at, updated_at,
+        created_by_user_id)
+     VALUES (?, ?, '海洋极端事件分析', '海洋分析', '{}', 'active', 'private', 8, 'ms_v3', ?, ?, ?, ?)`,
+  ).run(projectId, userId, now, now, now, userId)
+  db.prepare(
+    `INSERT INTO milestones
+       (milestone_id, project_id, user_id, name, name_key, goal, done_criteria, due_at,
+        status, order_index, source, revision, created_at, updated_at, completed_at,
+        archived_at, archived_from_status, created_by_user_id)
+     VALUES ('ms_v3', ?, ?, '数据获取与预处理', '数据获取与预处理', '拿到数据', '字段完整',
+             NULL, 'active', 0, 'manual', 1, ?, ?, NULL, NULL, NULL, ?)`,
+  ).run(projectId, userId, now, now, userId)
+  db.prepare(
+    `INSERT INTO tasks
+       (task_id, project_id, milestone_id, user_id, title, done_criteria, status,
+        assignee_user_id, order_index, source, revision, created_at, updated_at,
+        started_at, completed_at, archived_at, created_by_user_id)
+     VALUES ('tsk_a', ?, 'ms_v3', ?, '完成任务 A', '能验证', 'done', NULL, 0, 'manual', 1,
+             ?, ?, NULL, ?, NULL, ?)`,
+  ).run(projectId, userId, now, now, now, userId)
+  db.prepare(
+    `INSERT INTO tasks
+       (task_id, project_id, milestone_id, user_id, title, done_criteria, status,
+        assignee_user_id, order_index, source, revision, created_at, updated_at,
+        started_at, completed_at, archived_at, created_by_user_id)
+     VALUES ('tsk_b', ?, 'ms_v3', ?, '完成任务 B', '能验证', 'todo', NULL, 1, 'manual', 1,
+             ?, ?, NULL, NULL, NULL, ?)`,
+  ).run(projectId, userId, now, now, userId)
+  db.prepare(
+    `INSERT INTO evidence
+       (evidence_id, project_id, task_id, milestone_id, milestone_name_snapshot, user_id,
+        submission_id, did_what, found_what, still_unsure, attachment_name, status,
+        author_user_id, revision, created_at, updated_at, redacted_at)
+     VALUES ('evd_a', ?, 'tsk_a', 'ms_v3', '数据获取与预处理', ?, 'sub_a',
+             '下载数据', '确认字段', NULL, NULL, 'active', ?, 1, ?, ?, NULL)`,
+  ).run(projectId, userId, userId, now, now)
+  db.prepare(
+    `INSERT INTO progress_records
+       (progress_id, project_id, milestone_id, task_id, user_id, summary, evidence_ids_json,
+        occurred_at, status, supersedes_progress_id, author_user_id, revision,
+        created_at, updated_at, archived_at)
+     VALUES ('prg_a', ?, 'ms_v3', 'tsk_a', ?, '完成下载', '[]', ?, 'active', NULL, ?, 1, ?, ?, NULL)`,
+  ).run(projectId, userId, now, userId, now, now)
+}
 
 before(async () => {
+  tempDir = mkdtempSync(path.join(tmpdir(), 'advisor-v3-context-'))
+  const runtime = createV3Runtime({ databasePath: path.join(tempDir, 'v3.sqlite') })
+  seedContextFixture(runtime)
   server = createApp(config, {
     logger: silentLogger,
+    v3Runtime: runtime,
     advisorService: createAdvisorService({
       provider: createMockProvider(),
       fallback: createRuleFallback(),
@@ -165,6 +233,7 @@ before(async () => {
 
 after(async () => {
   await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())))
+  rmSync(tempDir, { recursive: true, force: true })
 })
 
 async function post(path: string, payload: unknown): Promise<{ status: number; body: Record<string, unknown> }> {

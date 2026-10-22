@@ -1,7 +1,15 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { CONTRACT_VERSION, createConsoleLogger, type AdvisorFailureResponse, type AdvisorLogger } from '../advisor/types.js'
+import {
+  CONTRACT_VERSION,
+  createConsoleLogger,
+  type AdvisorChatSuccessResponse,
+  type AdvisorFailureResponse,
+  type AdvisorLogger,
+  type MilestoneContext,
+} from '../advisor/types.js'
 import type { AdvisorService } from '../advisor/service.js'
 import { LIMITS, parseAdvisorChatRequest } from '../advisor/validation.js'
+import type { V3Error } from '../v3/errors.js'
 import { sendJson } from './health.js'
 
 export const ADVISOR_CHAT_PATH = '/api/advisor/chat'
@@ -16,7 +24,15 @@ function readBody(req: IncomingMessage, maxBytes: number): Promise<string> {
   })
 }
 
-export function createAdvisorChatHandler(options: { service: AdvisorService; logger?: AdvisorLogger; maxBodyBytes?: number }): (req: IncomingMessage, res: ServerResponse) => Promise<boolean> {
+export interface AdvisorChatRouteOptions {
+  service: AdvisorService
+  logger?: AdvisorLogger
+  maxBodyBytes?: number
+  /** 契约 23.2 规则 1/4：项目级实体归属校验；返回错误时不调用模型 */
+  validateMilestoneContext?: (projectId: string, context: MilestoneContext) => V3Error | null
+}
+
+export function createAdvisorChatHandler(options: AdvisorChatRouteOptions): (req: IncomingMessage, res: ServerResponse) => Promise<boolean> {
   const logger = options.logger ?? createConsoleLogger('advisor-chat')
   const maxBodyBytes = options.maxBodyBytes ?? LIMITS.bodyBytes
   function failure(res: ServerResponse, status: number, requestId: string | null, message: string, code: AdvisorFailureResponse['code'] = 'INVALID_INPUT'): void {
@@ -35,10 +51,37 @@ export function createAdvisorChatHandler(options: { service: AdvisorService; log
     try { body = JSON.parse(raw) } catch { failure(res, 400, null, '请求体不是合法 JSON'); return true }
     const parsed = parseAdvisorChatRequest(body)
     if (!parsed.ok) { logger.warn('聊天请求未通过校验', { requestId: parsed.requestId, issues: parsed.issues }); failure(res, 400, parsed.requestId, `请求内容不合法：${parsed.issues[0] ?? '未知字段问题'}`, parsed.code ?? 'INVALID_INPUT'); return true }
+    if (parsed.value.milestoneContext && options.validateMilestoneContext) {
+      const validationError = options.validateMilestoneContext(
+        parsed.value.projectId,
+        parsed.value.milestoneContext,
+      )
+      if (validationError !== null) {
+        logger.warn('聊天阶段上下文未通过项目级校验', {
+          requestId: parsed.value.requestId,
+          code: validationError.code,
+        })
+        failure(res, 400, parsed.value.requestId, validationError.publicMessage)
+        return true
+      }
+    }
     try {
       const result = await options.service.chat(parsed.value)
       if (!result.ok) { sendJson(res, 503, { contractVersion: CONTRACT_VERSION, requestId: parsed.value.requestId, code: result.code, message: '模型服务暂不可用，请稍后重试', retryable: result.retryable, retryAfterSeconds: result.retryAfterSeconds }); return true }
-      sendJson(res, 200, { contractVersion: CONTRACT_VERSION, requestId: parsed.value.requestId, projectId: parsed.value.projectId, projectRevision: parsed.value.projectRevision, source: result.source, fallbackReason: result.fallbackReason, answer: result.answer })
+      const successBody: AdvisorChatSuccessResponse = {
+        contractVersion: CONTRACT_VERSION,
+        requestId: parsed.value.requestId,
+        projectId: parsed.value.projectId,
+        projectRevision: parsed.value.projectRevision,
+        source: result.source,
+        fallbackReason: result.fallbackReason,
+        answer: result.answer,
+      }
+      if (parsed.value.promptVersion === 'advisor-chat-v3') {
+        successBody.milestoneRevision = parsed.value.milestoneContext?.milestoneRevision ?? null
+        successBody.citations = []
+      }
+      sendJson(res, 200, successBody)
       return true
     } catch (error) { logger.warn('处理聊天请求时发生未预期异常', { detail: error instanceof Error ? error.name : 'unknown' }); failure(res, 500, null, '服务内部错误'); return true }
   }
