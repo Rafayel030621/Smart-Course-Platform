@@ -116,14 +116,22 @@
 
 | 状态 | 能力 | 现状 | 影响谁 |
 | --- | --- | --- | --- |
-| ✅ | V2 建议 `POST /api/advisor/recommendations` | 可用，`contractVersion: "1.0"` | 吴（提示词） |
-| 🟡 | V2 聊天 `POST /api/advisor/chat` | 可用，但**不落库**；每次由前端回传历史 | 吴、李 |
+| ✅ | 建议 v1/v2 `POST /api/advisor/recommendations` | 可用，`contractVersion: "1.0"` | 吴（提示词） |
+| ✅ | 建议 v3 `mvp-prompt-v3` | 已实现（D13）；**必须带 `milestoneContext`，且只对云端项目可用**；响应每条 suggestion 含 `basisMaterialRefs`（现恒为 `[]`，D15 未做） | 吴、李 |
+| 🟡 | 聊天 v1/v2 `POST /api/advisor/chat` | 可用，但**不落库**；每次由前端回传历史 | 吴、李 |
+| ✅ | 聊天 v3 `advisor-chat-v3` | 已实现（D13）；必须带 `milestoneContext`，仅云端项目；响应含 `milestoneRevision` 与 `citations`（现恒为 `[]`，D15 未做） | 吴、李、雍 |
 | ⬜ | V3 材料理解生成 | 未实现；当前仍走 V2 `POST /api/materials/understanding` | 吴 |
 | ⬜ | 阶段候选 | 未实现（表已建） | 吴、李 |
 | ⬜ | 聊天读写（会话/消息持久化） | 未实现；**迁移已写入 `chat_sessions` / `chat_messages`，但没有读取接口** | 李、雍 |
 | ⬜ | 疑问手工创建/解决/归档 | 未实现；只有证据自动创建与迁移导入 | 李、雍 |
 | ⬜ | 项目时间线 `GET /projects/{id}/timeline` | 未实现 | 李、雍 |
-| ⬜ | V3 AI 服务端上下文门禁（仅 confirmed 草稿进入上下文） | 未实现 | 吴、后端 |
+| ⬜ | V3 AI 材料门禁（仅 `confirmed` 片段进入上下文） | 未实现（D15）；当前材料仍由前端过滤 | 吴、后端 |
+
+> **v3 只对云端项目可用**：服务端按 `projectId + milestoneId` 查库校验上下文实体（契约 §23.2），
+> 本地项目的实体 ID 不在库中，发 v3 会返回 400 `INVALID_INPUT`。本地工作台继续用 v2，迁移后再切。
+>
+> **引用字段现为占位**：`basisMaterialRefs` / `citations` 按契约必须返回，但 D15 未做前一律为 `[]`，
+> 因此这一阶段的评估只能覆盖“结构与安全边界”，不能覆盖“引用准确性”。
 
 ## 9. 前端接入前必读（六条）
 
