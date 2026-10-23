@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 建议接口的领域类型与线上 DTO
  * ----------------------------------------------------------------------------
  * 唯一依据：docs/contracts.md（第 2 节领域对象、第 4 节建议接口、第 6 节错误码）。
@@ -57,14 +57,31 @@ export const ADVISOR_CHAT_PROMPT_VERSION_V3 = 'advisor-chat-v3'
  * 契约 23.4 / 23.7：**阶段候选接口**（`POST /api/projects/{projectId}/milestones/candidates`）
  * 的提示词版本。
  *
- * D12 状态：契约已定义取值与请求体，但服务端路由尚未确认存在（`server/src/v3/router.ts`
- * 没有该路径）。因此这里**只定义常量**：候选接口一旦确认可用，直接用它装配请求，
+ * 契约已定义取值与请求体，但 `server/src/v3/router.ts` 仍没有该路径，因此这里**只定义常量**：
  * 不要拿建议接口的 `mvp-prompt-v3` 顶替，也不要提前发请求。
  */
 export const MILESTONE_CANDIDATE_PROMPT_VERSION = 'milestone-candidate-v1'
 
 /** 契约 17.4：材料理解接口的提示词版本，只此一值 */
 export const MATERIAL_UNDERSTANDING_PROMPT_VERSION = 'material-understanding-v1'
+
+/**
+ * 哪些**项目来源**允许发送 v3 阶段上下文（契约 23.1 / 23.2）。
+ *
+ * v3 要求 `projectId` / `milestoneId` / `taskId` / `evidenceId` / `progressId` 都是服务端真实 ID，
+ * 且服务端会按 `projectId` 做归属校验。本地工作台的项目和实体 ID 只存在于 localStorage，
+ * 服务端不认识 → 发 v3 必然 400。所以这里按来源判定，而不是一个全局开/关：
+ *
+ * - `cloud`：走 cloud store，`buildAdvisorContext()` 产出真实云端 ID → v3；
+ * - `local`：本地工作台继续 v2，请求体不带 `milestoneContext`。
+ */
+export const V3_CONTEXT_SOURCES: readonly ProjectSource[] = ['cloud'] as const
+
+export type ProjectSource = 'local' | 'cloud'
+
+export function supportsMilestoneContext(source: ProjectSource): boolean {
+  return V3_CONTEXT_SOURCES.includes(source)
+}
 
 /** 契约 6.4：聊天问题 ≤ 2,000 字、历史 ≤ 20 条、每条文本 ≤ 2,000 字 */
 /** 契约 4.1 / 15.2：`projectName` 最多 120 字（超长会让整个请求被 400 拒绝） */
@@ -414,6 +431,8 @@ export interface MaterialsUnderstandingSuccess extends MaterialContractIdentity 
 /** 契约 6.1 本轮启用的错误码 + 6.2 保留码 + 16 材料相关码 */
 export type AdvisorErrorCode =
   | 'INVALID_INPUT'
+  /** 契约 23.1 / 23.4：v3 与 milestoneContext 的组合不成立时服务端返回它（不静默降级） */
+  | 'CONTRACT_VERSION_MISMATCH'
   | 'RATE_LIMITED'
   | 'MODEL_TIMEOUT'
   | 'INVALID_MODEL_OUTPUT'
@@ -653,6 +672,7 @@ export interface Recommendation extends Suggestion {
 /** 契约 6.1 / 16：retryable 的权威值是响应里的字段，这里只在字段缺失时兜底 */
 export const RETRYABLE_BY_CODE: Record<AdvisorErrorCode, boolean> = {
   INVALID_INPUT: false,
+  CONTRACT_VERSION_MISMATCH: false,
   RATE_LIMITED: true,
   MODEL_TIMEOUT: true,
   INVALID_MODEL_OUTPUT: true,
@@ -900,6 +920,7 @@ export interface ConfirmAllUnderstandingResult {
 
 const ADVISOR_FAILURE_TEXT: Partial<Record<AdvisorErrorCode, string>> = {
   INVALID_INPUT: '请求内容不合法，请检查后重试',
+  CONTRACT_VERSION_MISMATCH: '前端与后端的契约版本不一致，本次请求已被拒绝，请刷新页面后重试',
   RATE_LIMITED: '请求过于频繁，请稍后重试',
   MODEL_TIMEOUT: '模型响应超时，可稍后重试',
   INVALID_MODEL_OUTPUT: '模型返回内容不合法，可稍后重试',
@@ -919,6 +940,7 @@ const ADVISOR_FAILURE_TEXT: Partial<Record<AdvisorErrorCode, string>> = {
  * 上游原文；一旦原样渲染就会泄漏内部细节。这里只按 code 出文案。
  */
 const CHAT_FAILURE_TEXT: Partial<Record<AdvisorErrorCode, string>> = {
+  CONTRACT_VERSION_MISMATCH: '前端与后端的契约版本不一致，这次提问没有发出，请刷新页面后再试',
   INVALID_INPUT: '这次提问没有被服务端接受，项目里的数据不受影响，可以改一下问法再试',
   RATE_LIMITED: '提问有点频繁，稍等一会儿再问',
   MODEL_TIMEOUT: '模型响应超时，问题已经保存，可以稍后重试',

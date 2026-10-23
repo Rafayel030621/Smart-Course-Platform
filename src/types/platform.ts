@@ -812,40 +812,98 @@ export interface LocalMigrationResponse {
   importedAt: string
 }
 
-/* ---- 云端材料理解（仅用于 v3 建议/聊天的已确认材料上下文） ---- */
+/* ---- 云端材料与理解草稿（契约 22.8；字段逐项对齐 server/src/v3/materialReads.ts） ---- */
 
-export interface CloudMaterialSegment {
-  materialId: string
-  materialVersion: number
-  segmentId: string
-  orderIndex: number
-  startLine: number
-  endLine: number
-  text: string
-}
+/** 契约 22.8：`parse_failed` 用下划线，与 DTO 一致（v2 的 `parse_failed` 同名） */
+export type CloudMaterialStatus = 'registered' | 'parsed' | 'parse_failed' | 'unsupported' | 'archived'
 
 export interface CloudMaterial {
   materialId: string
-  projectId: string
+  /** 内容版本，≥ 1；列表默认只返回当前版本 */
+  materialVersion: number
   name: string
-  type: MaterialType
+  /** 上传白名单只有 md/txt；迁移来的旧材料可能保留 csv/xlsx/pdf/docx */
+  type: string
   size: number
-  encoding: MaterialEncoding
-  version: number
-  status: 'registered' | 'parsed' | 'parse-failed' | 'unsupported'
+  /** 服务端实际解码编码 */
+  encoding: string
+  status: CloudMaterialStatus
+  /** 元数据/归档版本，与 materialVersion 不同 */
+  revision: number
+  sha256: string | null
+  failureReason: string | null
   createdAt: string
+  updatedAt: string
+  archivedAt: string | null
+  /** 是否为该 materialId 的当前版本 */
+  isCurrent: boolean
+  /** 历史版本、材料归档或项目归档时为 true */
+  readOnly: boolean
+}
+
+export interface CloudMaterialSegment {
+  segmentId: string
+  materialId: string
+  materialVersion: number
+  /** 服务端字段名是 `index`（不是 orderIndex） */
+  index: number
+  startLine: number
+  endLine: number
+  text: string
+  charCount: number
+  /** 当前版本 active，历史版本 superseded */
+  status: 'active' | 'superseded'
+  createdAt: string
+}
+
+/** 契约 22.8：理解条目的来源片段；行号由服务端按真实片段回填 */
+export interface CloudUnderstandingSource {
+  materialId: string
+  materialName: string
+  materialVersion: number
+  segmentId: string
+  startLine: number
+  endLine: number
 }
 
 export interface CloudUnderstandingItem {
   itemId: string
-  materialId: string
-  materialVersion: number
   kind: UnderstandingBlockKind
   text: string
-  originalText: string
-  sourceSegmentIds: string[]
-  status: UnderstandingBlockStatus
+  /** 学生修改前的原文；未修改时为 null */
+  originalText: string | null
+  sources: CloudUnderstandingSource[]
+  /** pending / confirmed / modified / archived */
+  status: UnderstandingBlockStatus | 'archived'
   revision: number
-  createdAt: string
-  updatedAt: string
+  confirmedAt: string | null
+  confirmedByUserId: string | null
+  removedAt: string | null
 }
+
+/* ---- 云端聊天（契约 6.4 / 23.7；后端暂不持久化，消息只存在于本次会话内存） ---- */
+
+/** 契约 23.7：与 domain/recommendation.ts 的 `BasisMaterialRef` 同形（此处不复用类型，避免 domain ↔ types 循环依赖） */
+export interface CloudCitation {
+  materialId: string
+  materialName: string
+  materialVersion: number
+  segmentId: string
+  startLine: number
+  endLine: number
+  itemId: string | null
+}
+
+export interface CloudChatMessage {
+  /** 客户端稳定 ID，用于去重与渲染 key；服务端没有消息 ID */
+  clientId: string
+  role: 'user' | 'assistant'
+  text: string
+  source: 'model' | 'fallback'
+  fallbackReason: string | null
+  /** 契约 23.7：只包含已确认片段；v1/v2 响应没有该字段 */
+  citations: CloudCitation[]
+  createdAt: string
+}
+
+export type CloudAiStatus = 'idle' | 'loading' | 'ready' | 'error'

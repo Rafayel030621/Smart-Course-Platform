@@ -130,6 +130,7 @@ export const V3_ERROR_MESSAGES: Record<string, string> = {
   DUPLICATE_REQUEST: '该操作正在处理，请稍候',
   NOT_LOADED: '项目尚未加载完成，请稍后重试',
   TASKS_NOT_AVAILABLE: '任务列表尚未加载完整，请刷新后重试',
+  MATERIALS_NOT_AVAILABLE: '材料理解条目还没有读取完成，暂时不能作为 AI 依据',
   TIMELINE_NOT_AVAILABLE: '时间线读取接口尚未提供',
 }
 

@@ -1,6 +1,6 @@
-# V3 前端交付说明（李焰彬）
+﻿# V3 前端交付说明（李焰彬）
 
-> 状态：**D14 独立修复分支 `fix/v3-d14-chat-citations`（基于 main `ee6cc2d`；PR #22 已合并）**。本文只描述该分支里的实现与验证结果，不宣称已合并或已部署。
+> 状态：**工作区未提交**。本文只描述当前工作区里的实现与验证结果，不宣称已合并或已部署。
 > 相关记录：`李焰彬_v2联调与交接记录.md` §14（历史测试失败诊断）与 §14.7/§14.9（A/B/C 决策）。
 >
 > 一句话结论：**V3 数据层与本地真实后端联调已完成；页面只接入了只读的云端视图，登录、云端新建项目、云端写入入口仍未接线。**
@@ -41,42 +41,12 @@
 
 ### 1.4 受接口缺口阻塞（未实现，不伪造）
 
-- 时间线、阶段候选、evidence/progress 单条读取仍未实现；材料读取与进展 supersede 已由后端实现但前端尚未接入；**任务列表已在本 PR 接入**（详见 §3）。
-- 因此「刷新后恢复任务」「云端 AI 上下文」「云端证据/材料写入」在页面上仍不可用，界面已如实提示，不用空数组冒充成功。
-
-### 1.5 D14：提示词常量区分 + 聊天引用展示（PR #22 合并后的独立修复）
-
-**前置**：原数据层 PR #22 已于 2026-10-21 合并（head `e1c605e`，merge commit `4cf7b2a`），其中**不含**本节内容。本分支从合并后的 main `ee6cc2d` 新建，只做 D14 这一件事。
-
-**1）提示词常量（`src/domain/recommendation.ts`）**
-
-| 常量 | 值 | 允许使用的接口 |
-| --- | --- | --- |
-| `ADVISOR_V3_PROMPT_VERSION` | `mvp-prompt-v3` | **仅**建议接口 `POST /api/advisor/recommendations`（必须与 `milestoneContext` 成对出现） |
-| `MILESTONE_CANDIDATE_PROMPT_VERSION` | `milestone-candidate-v1` | **仅**阶段候选接口 `POST /api/projects/{projectId}/milestones/candidates`；**只定义、不使用** |
-
-- 旧的 `MILESTONE_PROMPT_VERSION` 已删除，`buildAdvisorRequest()` 的 v3 分支改用 `ADVISOR_V3_PROMPT_VERSION`；全仓检索旧名 0 命中。
-- **D12 仍受阻**：`server/src/v3/router.ts` 的 `milestones` 分支没有 `candidates` 路由（请求会被当成 `milestoneId` 走 PATCH），因此本轮没有装配候选请求、没有猜端点、没有发请求；常量的存在不代表候选能力可用。
-- 依据说明：以 main 上已有的规格为准——`docs/ai/prompt-spec.md` §9.3 的 **D14**（“阶段候选没有前端常量，且 v3 常量命名易混”，负责人李焰彬）、§10.7 / §11.7（引用格式与展示规则）、§11.5（阶段化聊天 A3：引用已确认材料才叫依据）。本分支未改写规格文件。
-
-**2）聊天 citations 全链路（契约 23.3 / 23.7）**
-
-| 环节 | 位置 | 行为 |
-| --- | --- | --- |
-| 解析 | `src/services/advisorApi.ts`（`asChatSuccess`） | 已有实现：逐条校验引用，非法条目剔除；`citations` 不是数组 → 整份响应按 `invalid-response` 丢弃；字段完全缺失 → 不补造 |
-| 保存 | `src/stores/workbench.ts`（`sendChat` → `appendAssistant`） | 成功回答把适配层校验后的引用写进消息；只保留 `MaterialSourceRef` 的六个展示字段，适配层多解析的 `itemId` 不落盘；用户消息、失败回答、无引用回答一律 `[]` |
-| 类型 | `src/types/platform.ts`（`ChatMessage.citations`） | 必填 `MaterialSourceRef[]`，与「无引用 = 空数组」一致 |
-| 旧数据 | `src/stores/persistence.ts`（`normalizeChatMessage`） | 旧 localStorage 记录没有该字段 → 补 `[]`，**消息一条不丢**；引用逐条校验，缺材料名的引用剔除（不拿 `materialId` 顶替）；学生消息的引用强制清空 |
-| 展示 | `src/views/WorkbenchView.vue`（`chatCitationsText`） | **仅非空时**显示 `依据材料：《实验手册.md》第 10–24 行`；单行写 `第 40 行`；**多条分别列出、不合并**（同一材料的多个片段也各写一句）；只显示材料名与行号，不显示版本、`materialId`/`segmentId`/`itemId` |
-
-空引用行为（契约 23.7：不得暗示存在材料依据）：服务端返回 `[]`、字段缺失、或非法引用被全部过滤成空时，**不渲染任何来源标签**，`answer` 照常显示；前端不从本地材料或聊天历史补造引用。
-
-兼容性：属于附加字段 + 读取归一化，**未升 `schemaVersion`（仍为 3）**，不需要新增迁移分支；旧版本代码读到新记录会忽略该字段。
-
-**3）本分支明确未做**
-
-- suggestion 的 `basisMaterialRefs` **仍未展示**：`src/components/SuggestionCard.vue` 的「依据」只有证据与疑问（`basisCount = evidence + doubts`），建议卡上的材料引用既没有渲染也没有测试；不属于本 PR 范围。
-- D12 阶段候选接入未开始：只定义 `MILESTONE_CANDIDATE_PROMPT_VERSION`，不装配候选请求、不猜端点。
+- 时间线、阶段候选、evidence/progress 单条读取仍未实现。
+- 任务列表、材料读取（列表/单份/片段/理解条目）、进展 supersede **数据层已接入**（见 §2.5 / §2.5.1），页面尚未接线。
+- 云端聊天仍是无状态接口（不落库）：会话/消息读写端点缺失，聊天历史只存在本次会话内存（见 §3 第 10 项）。
+- 建议/聊天已支持 v3 阶段上下文（D13 `f83291d`）：云端项目发 v3 + `milestoneContext`，本地工作台仍发 v2（见 §2.5）。
+- 聊天回答的 `citations` 服务端目前恒为空（D15 未做），客户端已能解析，但界面不要暗示「有材料依据」（见 §3 第 11 项）。
+- 因此「云端聊天历史」在页面上仍不可用，界面已如实提示，不用空数组冒充成功。
 
 ---
 
@@ -150,7 +120,125 @@
 - **同一逻辑操作重试**：同一 `projectRevision` + 同一 `idempotencyKey` → 服务端回放，`replayed=true`；
 - **版本推进后的同内容**：属于新的逻辑操作，默认幂等键必须变化，否则服务端 `IDEMPOTENCY_CONFLICT`。
 
-### 2.5 页面必须遵守的展示规则
+### 2.5 材料、进展更正与云端 AI（本次新增）
+
+**材料读取（契约 22.8）**——`cloud.openProject()` 会自动调用 `refreshMaterials()`；页面也可以手动刷新：
+
+| 入口 | 入参 | 返回 `data` | 状态与失败 |
+| --- | --- | --- | --- |
+| `cloud.refreshMaterials({ includeArchived?, limit?, silent?, projectId? })` | 分页拉全（内部按 `nextCursor` 循环） | `CloudMaterial[]` | `materialsStatus`（`idle/loading/ready/error`）、`materialsError`、`materialsHydrated`；失败保留原列表，不把「没读到」当「没有材料」 |
+| `cloud.loadMaterialDetail(materialId, { version?, includeArchived? })` | 读历史版本传 `version` | `CloudMaterial` | 当前版本会同步回 `materials`；失败 `lastError` |
+| `cloud.loadMaterialSegments(materialId, { version?, forceRefresh? })` | — | `CloudMaterialSegment[]` | 按 `materialId@version` 缓存（`cloud.cachedSegments()`），重复调用不发请求；`includeArchived=true` 不走缓存 |
+| `cloud.loadMaterialUnderstanding(materialId, { version?, forceRefresh? })` | — | `CloudUnderstandingItem[]` | 同上（`cloud.cachedUnderstanding()`）；`sources[].startLine/endLine` 由服务端回填 |
+| `cloud.buildConfirmedMaterialsContext()` | 无 | `ConfirmedMaterial[]` | 需要材料已读；任一份可入 AI 的材料还没读 → `MATERIALS_NOT_AVAILABLE`，不返回「空材料」 |
+| `cloud.archiveMaterial(materialId)` / `cloud.restoreMaterial(materialId)` | 无需 `expectedRevision`（服务端只校验 `projectRevision`） | `CloudMaterial` | 归档后本地保留该行（`status='archived'`、`readOnly=true`）供页面展示，随后不带 `includeArchived` 的 `refreshMaterials()` 会把它移除；重复归档/恢复 → `INVALID_STATE_TRANSITION` |
+| `cloud.reparseMaterial(materialId)` | 同上 | `CloudMaterial`（新 `materialVersion`） | 新版本片段直接写入缓存；新版本理解条目需重新生成，`buildConfirmedMaterialsContext()` 返回 `MATERIALS_NOT_AVAILABLE`，**不会**沿用旧版本的已确认内容 |
+
+> 材料上传（`POST /materials`，base64 正文）已由后端实现，但上传入口属于「项目资料」页的写入 UI（当前页面走本地 v2 上传），本次未接线。
+
+字段以服务端 DTO 为准：材料是 `materialVersion`（内容版本）+ `revision`（元数据/归档版本）、`parse_failed`（下划线）、`isCurrent`、`readOnly`、`failureReason`、`sha256`；片段是 `index`（不是 `orderIndex`）、`charCount`、`status`；理解条目是 `sources[]`，`status` 为 `pending/confirmed/modified/archived`。
+
+**进展更正（契约 22.4）**
+
+`cloud.supersedeProgress({ progressId, expectedRevision, summary?, taskId?, milestoneId?, evidenceIds?, occurredAt? })` → `data` 为新 `ProgressRecord`。成功后旧记录本地置 `superseded`（正文保留），新记录 `active`，并应用响应里的 `milestoneStats` 与 `projectRevision`；`buildAdvisorContext()` 只取 `active`，所以更正后的正文必然进入 AI 上下文。已 `superseded` 的记录重复更正返回 `INVALID_STATE_TRANSITION`。
+
+**云端 AI（契约 23.1 / 23.5 / 23.7，D13 `f83291d` 之后）**
+
+| 入口 | 说明 |
+| --- | --- |
+| `cloud.refreshAdvisor({ forceRefresh?, projectId? })` | 组装 `milestoneContext` + `confirmedMaterials` + 任务/证据快照后调用 `POST /api/advisor/recommendations`（**固定 v3**）；状态见 `cloud.advisor`（`status/suggestions/source/cached/fallbackReason/error/contextAttached`） |
+| `cloud.sendChat({ question, projectId? })` | 调用 `POST /api/advisor/chat`（**固定 `advisor-chat-v3`**），历史由客户端 `chatHistory` 回传；成功后用户消息与回答一起入列，失败保留 `chat.pendingQuestion` |
+| `cloud.retryChat()` / `cloud.clearChat()` | 重发失败的问题 / 清空本次会话消息 |
+| `cloud.chat` | `messages`（`clientId/role/text/source/fallbackReason/citations/createdAt`）、`status`、`error`、`pendingQuestion` |
+
+版本选择（不要再加开关）：
+- 只有**云端项目**能发 v3：`supportsMilestoneContext('cloud') === true`，cloud store 里的建议/聊天都走 `mvp-prompt-v3` / `advisor-chat-v3` 并携带 `milestoneContext`；
+- **本地工作台**继续 v2：`workbench` store 走 `mvp-prompt-v2` / `advisor-chat-v2`，请求体不带 `milestoneContext`（本地实体 ID 服务端不认识，发 v3 必 400）；
+- 服务端按 `projectId` 校验阶段/任务/证据/进展归属，失败返回 400 `INVALID_INPUT`；契约 23.1 禁止自动降级，客户端原样报错，不重发 v2。
+
+约束：
+- `milestoneContext` 由 `cloud.buildAdvisorContext()` 产出：阶段只允许 `planned/active`，已完成/已归档阶段给全 null 的空上下文，顶层 `currentMilestone` 同步为 null；
+- `doubts` 目前只能发空数组（V3 没有疑问读取端点），这是已知信息缺口；
+- 同一时刻只允许一个在途建议/聊天请求；切项目、退出登录会清空 `advisor`/`chat` 并丢弃迟到响应；
+- 聊天**不落库**：刷新、换设备都看不到历史，页面不要展示「云端会话列表」；
+- 回答里的 `citations` 已按契约解析（名称/版本/行号全部用服务端回填值），但服务端 D15 之前恒返回 `[]`，页面不要暗示「有材料依据」。
+
+### 2.5.1 「项目资料」页接线（给雍蕾的可复制入口）
+
+四个读取函数都在 `src/services/projectsApi.ts`，全部 `export`，签名固定（页面不要自己拼 URL）：
+
+```ts
+import type { CloudMaterial, CloudMaterialSegment, CloudUnderstandingItem } from '@/types/platform'
+import type {
+  CloudMaterialPage,
+  CloudMaterialSegmentsPage,
+  CloudMaterialUnderstandingPage,
+  MaterialListQuery,
+  MaterialPageQuery,
+  MaterialReadQuery,
+} from '@/services/projectsApi'
+
+// 列表：默认只返回每个 materialId 的当前版本；includeArchived 才会带上已归档
+listMaterials(
+  projectId: string,
+  query?: MaterialListQuery,          // { includeArchived?: boolean; limit?: number; cursor?: string }
+  options?: ProjectApiOptions,        // { signal?, timeoutMs?, fetchImpl? }
+): Promise<V3Result<CloudMaterialPage>>          // data: { materials: CloudMaterial[]; nextCursor: string | null }
+
+// 单份：version 不传 = 当前版本，传了读历史版本（此时 readOnly=true）
+getMaterial(
+  projectId: string,
+  materialId: string,
+  query?: MaterialReadQuery,          // { version?: number; includeArchived?: boolean }
+  options?: ProjectApiOptions,
+): Promise<V3Result<{ material: CloudMaterial }>>
+
+// 片段：按 index 升序；响应头自带 materialVersion / isCurrent / readOnly
+listMaterialSegments(
+  projectId: string,
+  materialId: string,
+  query?: MaterialPageQuery,          // { version?; includeArchived?; limit?; cursor? }
+  options?: ProjectApiOptions,
+): Promise<V3Result<CloudMaterialSegmentsPage>>  // data: { materialId, materialVersion, isCurrent, readOnly, segments, nextCursor }
+
+// 理解条目（草稿）：sources[] 里的行号由服务端回填
+listMaterialUnderstanding(
+  projectId: string,
+  materialId: string,
+  query?: MaterialPageQuery,
+  options?: ProjectApiOptions,
+): Promise<V3Result<CloudMaterialUnderstandingPage>> // data: { materialId, materialVersion, isCurrent, readOnly, items, nextCursor }
+```
+
+`V3Result<T>` 是 `{ ok: true, data: T, requestId, projectRevision, replayed, changed } | { ok: false, code, message }`（`code: V3ErrorCode`）。
+`nextCursor !== null` 表示还有下一页：把 `cursor` 传回去继续拉（store 的 `refreshMaterials()` 已经内部循环拉全，页面一般不需要自己翻页）。
+
+**推荐直接用 store**（已包含分页拉全、loading/error/清空、切项目隔离）：
+
+```ts
+const cloud = useCloudStore()
+
+// 打开项目时会自动加载一次：cloud.materials / materialsStatus / materialsError / materialsHydrated
+await cloud.openProject(projectId)
+
+// 手动刷新（forceRefresh 用于「重新读取并丢弃缓存」的按钮）
+await cloud.refreshMaterials({ forceRefresh: true })
+
+// 详情面板
+const segments = await cloud.loadMaterialSegments(materialId)      // 命中缓存则不发请求
+const drafts = await cloud.loadMaterialUnderstanding(materialId)
+if (segments.ok) renderSegments(segments.data)                     // CloudMaterialSegment[]
+else toast(segments.message)                                       // 中文原因，直接展示 message
+```
+
+渲染时注意：
+- 判断「空」要看 `cloud.materialsHydrated && cloud.materialsStatus === 'ready'`，`materialsError !== null` 时是「没读到」而不是「没有材料」；
+- 材料状态是 `registered / parsed / parse_failed / unsupported / archived`；`readOnly=true` 时不要渲染编辑/删除按钮；
+- 片段序号用 `index`（服务端字段名，不是 `orderIndex`），行号用 `startLine/endLine`；
+- 归档用 `cloud.archiveMaterial(materialId)`、恢复用 `cloud.restoreMaterial(materialId)`、重新解析用 `cloud.reparseMaterial(materialId)`；
+- **上传还没有客户端函数**：`POST /api/projects/{id}/materials`（`name` + `contentBase64`）后端已实现，但页面当前走本地 v2 上传，接线时需要新增 `uploadMaterial()` 并同步 `openProject()` 刷新（本次未做，见 §3 第 13 项）。
+
+### 2.6 页面必须遵守的展示规则
 
 1. 云端模式下隐藏/禁用本地写入口（`guardCloudWrite` 已提供示例），并显示「只读接入」说明。
 2. `tasksHydrated=false` 时不要展示「暂无任务」以外的结论；需提示契约缺口（`cloud.contractBlockers`）。
@@ -168,13 +256,18 @@
 | 1 | 任务列表/单条读取（`GET /projects/:id/tasks`、`GET /tasks/:id`） | **已接入（本 PR）** | `server/src/v3/taskReads.ts`（支持 `milestoneId`/`status`/`includeArchived`/`limit`/`cursor`） | `refreshTasks()` 在打开项目、切换阶段、任务写成功后校正列表：分页合并、按 `taskId` 去重、失败保留原任务且不置 `tasksHydrated`；成功后 AI 上下文可用 |
 | 2 | 时间线（契约 22.11） | **缺实现** | 后端 `server/src/v3` 无 timeline 路由 | `loadTimeline()` 恒返回 `TIMELINE_NOT_AVAILABLE`，页面无时间线 |
 | 3 | 阶段候选（契约 23.7 `POST .../milestones/candidates`） | **缺实现（表已建）** | 后端 router 无该路由 | 客户端未实现调用；AI 生成阶段候选不可用 |
-| 4 | 进展 supersede（契约 22.4） | **后端已实现；前端未接入** | `POST /progress/:id/supersede`，旧记录转 `superseded` | 页面无法修正已提交进展 |
-| 5 | 材料读取（`GET /materials`、`/materials/:id`、`/segments`、`/understanding`） | **后端已实现；前端未接入** | `server/src/v3/materialReads.ts` | `confirmedMaterials` 仍需调用方显式传入；页面无法回读 |
+| 4 | 进展 supersede（契约 22.4） | **已接入（本次）** | `server/src/v3/progress.ts#handleProgressSupersede`：`expectedRevision` 必填，`summary/taskId/milestoneId/evidenceIds/occurredAt` 可选，响应 `{progress, supersededProgressId, milestoneStats}` | `cloud.supersedeProgress()` 已可用；**契约正文仍没有请求字段表**，需补文档 |
+| 5 | 材料读取（`GET /materials`、`/materials/:id`、`/segments`、`/understanding`） | **已接入（本次）** | `server/src/v3/materialReads.ts`（`includeArchived`/`version`/`limit`/`cursor`） | `cloud.refreshMaterials()/loadMaterialSegments()/loadMaterialUnderstanding()` 已可用；页面尚未接线（§2.5） |
 | 6 | evidence/progress 单条读取 | **缺实现** | 后端无 `GET /evidence/:id`、`GET /progress/:id` | 详情只能从列表筛 |
 | 7 | 服务端聊天问题长度校验（契约 6.4，≤2000 字） | **两者不一致（历史遗留）** | 前端已在 store 前置拒绝；服务端应返回 400 `INVALID_INPUT` | 若后端仍截断，用户会误以为问题已完整提交 |
 | 8 | 创建项目不得注入模板阶段（契约 22.1） | **实现一致性防御已加** | 客户端请求体不含 `milestones`，且服务端返回阶段时以 `INVALID_RESPONSE` 拒绝 | 后端若改变行为，会立即被测试与客户端拦下 |
+| 9 | 顾问/聊天接受 v3 阶段上下文（契约 23.1 / 23.4） | **已实现并已接入（D13 `f83291d`）** | `server/src/advisor/types.ts` 的 `ADVISOR_PROMPT_VERSIONS` / `ADVISOR_CHAT_PROMPT_VERSIONS` 含 v3；`validation.ts#parseMilestoneContext` 校验 23.2；`index.ts#createMilestoneContextValidator` 按 `projectId` 校验阶段/任务/证据/进展归属 | cloud store 固定发 v3 并携带 `milestoneContext`；本地工作台仍发 v2（`supportsMilestoneContext()` 按来源判定）；真实联调用例见 `tests/integration/advisorV3.integration.test.ts` |
+| 10 | 云端聊天会话/消息持久化（`chat_sessions` / `chat_messages` 读写） | **缺实现** | 后端只有 `POST /api/advisor/chat`（无状态、不落库）；`chat_sessions`/`chat_messages` 表存在，但 `server/src/v3/router.ts` 没有任何会话/消息读写路由 | `cloud.sendChat()` 只在本次会话内存里维护消息，刷新/换设备即丢失；页面不要展示「云端历史会话」。需要后端补：会话列表、会话消息分页、按会话继续聊 |
+| 11 | 聊天响应 `citations` / `milestoneRevision`（契约 23.7） | **字段已回显，引用为空（D15 未做）** | `server/src/routes/advisorChat.ts` 现在返回 `promptVersion`/`milestoneRevision`，但 `citations` 恒为空数组：`validation.ts` 还没有解析模型返回的 `segmentId`，`prompt.ts` 只生成了 `m1:seg_x` 虚拟标识 | 客户端已按契约解析真实 `segmentId/materialName/startLine/endLine`；后端补上映射后前端无需改动 |
+| 12 | 疑问读取（V3 doubts） | **缺实现** | 无 `GET /projects/:id/doubts` | 建议/聊天的 `doubts` 只能发空数组，未解决疑问不进 AI 上下文 |
+| 13 | 材料上传的客户端函数（`POST /projects/:id/materials`） | **后端已实现；前端未接入** | `server/src/v3/materialWrites.ts#handleMaterialUpload`（`name` + `contentBase64`） | 「项目资料」页仍走本地 v2 上传；接云端时需要新增 `uploadMaterial()` 并在成功后 `openProject()` 刷新（分页/大小/编码错误码已有：`MATERIAL_TOO_LARGE`、`EMPTY_MATERIAL`、`MATERIAL_ENCODING_UNREADABLE`…） |
 
-> 第 2、3、6 项是真实的后端缺口；第 4、5 项属"后端就绪、前端待接"的后续任务；第 1 项已在本 PR 接入。客户端已预留 `contractBlockers` 与错误码，补接线不需要改数据层结构。
+> 第 2、3、6、10、11、12 项是真实的后端缺口；第 4、5 项数据层已接入、页面待接线（§2.5.1）；第 9 项已由 D13 完成并被客户端用上；第 1 项在上一 PR 接入。客户端已把缺口收敛到 `cloud.contractBlockers`、`advisor.contextAttached` 与对应错误码。
 
 ---
 
@@ -189,20 +282,19 @@
 | **PR-1 分支** `feature/v3-frontend-data-layer`（`origin/main` + V3 数据层，不含页面） | **815/815，34 文件** | **0 错误** | 通过 | 通过 |
 | PR-1 分支合并 main `2cde85f` 后（HEAD `251dfb3`） | **815/815，34 文件** | **0 错误** | 通过 | 通过 |
 | **PR-1 分支评审修复后（本次修复提交）** | **820/820，35 文件** | **0 错误** | 通过 | 通过 |
-| D14 初版（#22 分支上的本地提交，未合并，已由本分支取代） | 835/835，35 文件 | 0 错误 | 通过 | 通过 |
-| **D14 独立修复分支** `fix/v3-d14-chat-citations`（main `ee6cc2d` + D14） | **875/875，37 文件** | **0 错误** | 通过 | 通过 |
+| **本次补齐（`origin/main` 基线 `ee6cc2d`，材料/上下文/更正/聊天）** | **899/899，42 文件** | **0 错误** | 通过 | 通过 |
+| **对齐 v3.10（工作区已同步 `origin/main` 内容至 `90956b8`/`f83291d`）** | **927/927，42 文件** | **0 错误** | 通过 | 通过 |
 | 隔离验证目录 `scp-v3-verify-main-data` | 815/815，34 文件 | 0 错误 | 通过 | 通过 |
 | 完整混合工作区（主目录，基线 `ac65287`） | 787/787，35 文件 | 0 错误 | 通过 | 通过 |
 | 严格 A 组（`ac65287` + 仅 V3 hunk） | 789 用例：727 通过 / 62 失败 | 23 错误（基线 21 + 2） | 通过 | 通过 |
 | 纯净基线 `ac65287` | 717 用例：655 通过 / 62 失败 | 21 错误 | — | — |
 
 - V3 专项 11 个文件 72/72 通过（在 `ac65287` 基线上测得）。
-- D14 用例规模：#22 分支上为 820 → 835（+15）；**本分支**为 **875/37（+17）**，main `ee6cc2d` 的 858/36 为按新增 17 条推算的基线值，构成为 parser 4、store 4、持久化 4、常量 1，UI 由初版 2 条扩为 **4 条**（书名号+区间行号、同材料多段分别展示、单行 `第 40 行`、空引用/全部剔除后不显示标签）。UI 旧断言中的“版本 2”按 §10.7 移除（文案不得带版本），断言为改写而非放宽。
 - A 组与基线的失败用例集合逐条一致（62 条，零差异），说明 V3 未引入测试回归，但旧基线本身不绿。
 - `npm run test:integration:v3-local`：**12/12**，2026-10-20 最近一次实际运行；该次运行在混合工作区（旧基线）上，**未在 `origin/main` 基线上重跑**，后端来源见 §4.3。
 
 验证目录（保留供复核）：`D:/bdana_program/scp-v3-verify-baseline`、`scp-v3-verify-ac65287`、`scp-v3-verify-agroup-strict`、`scp-v3-verify-main`、`scp-v3-verify-main-data`。
-实际提交分支工作区：`D:/bdana_program/scp-v3-d14`（分支 `fix/v3-d14-chat-citations`，基于 main `ee6cc2d`；PR #22 的 6 个提交已随合并进入 main）。
+实际提交分支工作区：`D:/bdana_program/Smart-Course-Platform-v3-data-layer`（分支 `feature/v3-frontend-data-layer`，6 个提交）。
 
 ### 4.2 集成测试运行方式
 
@@ -223,6 +315,33 @@ npm run test:integration:v3-local
 - 该后端位于工作区 `.tmp-v3-backend/`（**未纳入版本库**，无 `.git`，`package.json` 版本 `0.1.0`），**无法给出分支或提交 SHA**；
 - 该次运行时间早于 `origin/main` 合并 V3 后端（PR #19，`codex/v3-v4-backend`），其构建产物与 main 的 `server/src/v3/**` 是否同源**无法证明**；因此**不能据此断言可从当前仓库复现这 12 条用例**；
 - 复现前置：负责人提供与 main 同源的后端（分支/提交/构建产物任一可核验标识），再重跑并记录结果。
+
+### 4.4 本次真实联调（后端来源可核验）
+
+2026-10-22 本次验证改用**仓库内 `server/`**（工作区已同步到 `origin/main` 内容，含 D13 `f83291d`），不再是 `.tmp-v3-backend/`：
+
+```powershell
+cd server; npm install; npm run build          # 生成 server/dist
+$env:PORT='8099'; $env:HOST='127.0.0.1'
+$env:SCP_DB_PATH='d:/.../.tmp-it/advisor-v3.sqlite'
+$env:INVITE_CODE='<本地联调邀请码>'; $env:SCP_COOKIE_SECURE='0'
+$env:ADVISOR_PROVIDER='mock'
+node server/dist/src/index.js                  # 后台运行
+
+$env:V3_LOCAL_API_BASE_URL='http://127.0.0.1:8099'
+$env:V3_LOCAL_INVITE_CODE='<同一邀请码>'
+npx vitest run --config vitest.integration.config.ts tests/integration/advisorV3.integration.test.ts   # 5/5
+npx vitest run --config vitest.integration.config.ts tests/integration/v3LocalBackend.integration.test.ts  # 12/12
+```
+
+覆盖范围：
+- 材料四个读取接口（`/materials`、`/materials/:id`、`/segments`、`/understanding`）真实 200，字段（`materialVersion/revision/isCurrent/readOnly/index/charCount/startLine`）逐项断言；
+- cloud store 链路：`openProject → materials`、`loadMaterialSegments/Understanding` 命中缓存（第二次调用不发请求）；
+- 云端建议 v3：请求体 `promptVersion=mvp-prompt-v3` + 完整 `milestoneContext`，服务端 200；
+- 负向：把**另一个项目的任务 ID**塞进 `milestoneTasks` → 服务端 400 `INVALID_INPUT`（message 含「任务」），客户端不降级重发；
+- 聊天 `advisor-chat-v3` 200，响应 `citations` 缺失/空数组都能解析。
+
+未覆盖：模型真实输出（provider 用 `mock`）、材料上传后的理解草稿生成、D15 引用回填（服务端尚未实现）。
 
 ---
 
@@ -279,20 +398,6 @@ tests/support/v3Fixtures.ts  tests/support/v3LocalHarness.ts  tests/support/v3Lo
 
 **文档（4）**：`docs/integration-v3-local.md`、`docs/v3-frontend-delivery.md`、`docs/v3-pr-draft.md`、`docs/v3-commit-plan.md`（`李焰彬_v2联调与交接记录.md` §14 属 v2 记录，已在 main）。
 
-### 5.1.1 D14 追加文件（独立修复分支，覆盖 §5.1 中的“不纳入”表述）
-
-D14 要保存并展示聊天引用，因此该分支**修改了 3 个此前标为“不纳入”的文件**；改动只限引用链路，不夹带 v2 修复或云端接线：
-
-| 文件 | 本轮改动 | 为什么必须动 |
-| --- | --- | --- |
-| `src/stores/persistence.ts` | 新增 `normalizeChatMessage` / `normalizeCitationRef`，`chat` 改为逐条归一化 | 旧 localStorage 没有 `citations`，必须补空数组且不丢消息 |
-| `src/stores/workbench.ts` | `appendAssistant` 增加 `citations` 参数；`sendChat` 成功时落库 | 引用要进聊天记录，页面才有数据可展示 |
-| `src/views/WorkbenchView.vue` | 新增 `chatCitationsText()` 与 `.chat-citations` 渲染 | 契约 23.7：有引用才显示来源，空引用不得暗示材料依据 |
-
-其余 9 个文件：`src/domain/recommendation.ts`、`src/services/advisorApi.ts`、`src/types/platform.ts`（常量、类型与解析接线），以及 `tests/domain/v3Advisor.test.ts`、`tests/services/advisorApi.test.ts`、`tests/stores/materials.test.ts`、`tests/stores/migration.test.ts`（仅类型必填补 `citations: []`）、`tests/stores/persistence.test.ts`、`tests/ui/WorkbenchView.test.ts`。
-
-> 范围提醒：`WorkbenchView.vue` 的这次改动**只是聊天引用渲染**，不包含 §1.2 列出的云端接线（来源切换、`guardCloudWrite`、迁移弹窗）。
-
 ### 5.2 应排除（本地文件，不提交）
 
 | 路径 | 类别 | 说明 |
@@ -306,4 +411,4 @@ D14 要保存并展示聊天引用，因此该分支**修改了 3 个此前标�
 
 - §5.1 的源码/测试/文档均属本次 V3 交付内容；
 - `liyanbin-fix.patch`、`debug.log`、`f2.log`~`f7.log`、`m1.log` 在本轮开始前已存在，**归属不明**，本轮未删除、未移动、未暂存；
-- 仅 `src/views/WorkbenchView.vue` 在 D14 中被修改（聊天引用渲染）；`src/App.vue` 与 `src/views/ProjectMapView.vue` 本轮未改，云端只读接线仍由雍蕾在后续 PR 完成。
+- 页面文件（`src/App.vue`、`src/views/*.vue`）属于只读云端接入的页面改动，后续页面工作由雍蕾继续；本轮未再修改它们。

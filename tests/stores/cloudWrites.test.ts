@@ -260,6 +260,41 @@ describe('阶段状态动作（契约 22.2）', () => {
     expect(store.currentMilestoneId).toBe('ms_1')
   })
 
+  it('新建 active 阶段后当前阶段随之更新，AI 上下文立刻拿到它', async () => {
+    const project = baseProject({ currentMilestoneId: null, milestones: [] })
+    installRoutes(project, (url, init) => {
+      if (init.method !== 'POST' || !url.endsWith(`/api/projects/${project.projectId}/milestones`)) {
+        return undefined
+      }
+      return jsonResponse(
+        echoEnvelope(
+          init,
+          {
+            milestone: makeCloudMilestone({
+              milestoneId: 'ms_new',
+              name: '数据获取与预处理',
+              status: 'active',
+              revision: 1,
+              taskStats: makeMilestoneStats(),
+            }),
+          },
+          { projectRevision: 2 },
+        ),
+      )
+    })
+    const store = await openProject(project)
+    expect(store.currentMilestoneId).toBeNull()
+
+    const created = await store.createMilestone({ name: '数据获取与预处理', status: 'active' })
+
+    expect(created.ok).toBe(true)
+    // 契约 22.2：currentMilestoneId = 第一个 active（创建响应只回 milestone，本地按同一规则重算）
+    expect(store.currentMilestoneId).toBe('ms_new')
+    const context = store.buildAdvisorContext()
+    expect(context.ok).toBe(true)
+    if (context.ok) expect(context.data.milestoneId).toBe('ms_new')
+  })
+
   it('版本不一致时本地拒绝，服务端 409 也不改状态', async () => {
     const project = baseProject()
     let requests = 0

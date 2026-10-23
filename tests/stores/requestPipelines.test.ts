@@ -189,9 +189,12 @@ describe('未确认内容不进请求体（契约 17.2 / 13.2）', () => {
     expect(advisor.body?.confirmedContext).toEqual([])
     // 聊天不发 confirmedContext（契约 6.4 字段表）
     expect('confirmedContext' in (chat.body ?? {})).toBe(false)
-    // 版本取值（契约 17.4）
+    // 版本取值（契约 17.4）：本地工作台固定 v2，不因为云端支持 v3 而升级
     expect(advisor.body?.promptVersion).toBe('mvp-prompt-v2')
     expect(chat.body?.promptVersion).toBe('advisor-chat-v2')
+    // 本地实体 ID 不是云端 ID，契约 23.1/23.2 不允许本地项目发 v3 上下文
+    expect('milestoneContext' in (advisor.body ?? {})).toBe(false)
+    expect('milestoneContext' in (chat.body ?? {})).toBe(false)
     // 项目基本信息走 projectProfile（契约 13.2），不重复写进 confirmedContext
     expect(advisor.body?.projectProfile).toMatchObject({ goal: '构建极端风浪事件识别与预警的原型系统' })
     expect(chat.body?.projectProfile).toMatchObject({ goal: '构建极端风浪事件识别与预警的原型系统' })

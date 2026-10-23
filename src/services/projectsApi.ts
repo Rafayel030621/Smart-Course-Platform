@@ -1,29 +1,36 @@
 /**
- * V3 项目 / 阶段 / 任务 / 证据 / 进展接口（契约 22、24）。
+ * V3 项目 / 阶段 / 任务 / 证据 / 进展 / 材料读取接口（契约 22、24）。
  *
  * 约定：
  * - 所有写请求都带 20.1 包络（contractVersion / requestId / idempotencyKey /
  *   projectId / projectRevision）；
  * - 成功响应必须由 `requestV3Envelope` 校验后才进入 store；
  * - 这里只做“请求与解析”，不做归属/顺序等业务判断（由 cloud store 校验）；
- * - 任务列表/单条读取按契约 22.3 接入；仍缺失的读取端点（材料理解列表、时间线）**不在这里伪造**。
+ * - 任务列表（22.3）与材料/片段/理解草稿读取（22.8）按已合并后端接入；
+ *   仍缺实现的时间线端点（22.11）**不在这里伪造**。
  */
 import { normalizeProjectProfile } from '@/domain/materials'
 import { V3_CONTRACT_VERSION } from '@/types/platform'
 import type {
   CloudDoubt,
   CloudEvidence,
+  CloudMaterial,
+  CloudMaterialSegment,
   CloudMilestone,
   CloudProject,
   CloudProjectSummary,
   CloudTask,
+  CloudUnderstandingItem,
+  CloudUnderstandingSource,
   LocalMigrationResponse,
   MilestoneTaskStats,
   ProjectProfile,
   ProjectTimelineItem,
   ProgressRecord,
+  UnderstandingBlockKind,
   V3User,
 } from '@/types/platform'
+import { UNDERSTANDING_BLOCK_ORDER } from '@/domain/materials'
 import {
   asArray,
   asBoolean,
@@ -364,6 +371,165 @@ export function parseTimelineItem(value: unknown): ProjectTimelineItem | null {
     evidenceId: nullableString(record, 'evidenceId'),
     occurredAt,
     details: asRecord(record['details']) ?? {},
+  }
+}
+
+/* -------------------------------------------------------------- 材料解析 */
+
+/** 契约 22.8：Material DTO 的 status 取值（`parse_failed` 是下划线，不要写成 v2 的 kebab） */
+const CLOUD_MATERIAL_STATUSES = ['registered', 'parsed', 'parse_failed', 'unsupported', 'archived'] as const
+const UNDERSTANDING_STATUSES = ['pending', 'confirmed', 'modified', 'archived'] as const
+
+export function parseCloudMaterial(value: unknown): CloudMaterial | null {
+  const record = asRecord(value)
+  if (record === null) return null
+  const materialId = stringField(record, 'materialId')
+  const materialVersion = asNumber(record['materialVersion'])
+  const name = stringField(record, 'name')
+  const type = stringField(record, 'type')
+  const size = asNumber(record['size'])
+  const encoding = stringField(record, 'encoding')
+  const status = stringField(record, 'status')
+  const revision = asNumber(record['revision'])
+  const createdAt = stringField(record, 'createdAt')
+  const updatedAt = stringField(record, 'updatedAt')
+  const isCurrent = asBoolean(record['isCurrent'])
+  const readOnly = asBoolean(record['readOnly'])
+  if (
+    materialId === null ||
+    materialVersion === null ||
+    name === null ||
+    type === null ||
+    type.trim() === '' ||
+    size === null ||
+    size < 0 ||
+    encoding === null ||
+    status === null ||
+    !(CLOUD_MATERIAL_STATUSES as readonly string[]).includes(status) ||
+    revision === null ||
+    createdAt === null ||
+    updatedAt === null ||
+    isCurrent === null ||
+    readOnly === null
+  ) {
+    return null
+  }
+  return {
+    materialId,
+    materialVersion,
+    name,
+    type,
+    size,
+    encoding,
+    status: status as CloudMaterial['status'],
+    revision,
+    sha256: nullableString(record, 'sha256'),
+    failureReason: nullableString(record, 'failureReason'),
+    createdAt,
+    updatedAt,
+    archivedAt: nullableString(record, 'archivedAt'),
+    isCurrent,
+    readOnly,
+  }
+}
+
+export function parseCloudMaterialSegment(value: unknown): CloudMaterialSegment | null {
+  const record = asRecord(value)
+  if (record === null) return null
+  const segmentId = stringField(record, 'segmentId')
+  const materialId = stringField(record, 'materialId')
+  const materialVersion = asNumber(record['materialVersion'])
+  const index = asNumber(record['index'])
+  const startLine = asNumber(record['startLine'])
+  const endLine = asNumber(record['endLine'])
+  const text = stringField(record, 'text')
+  const charCount = asNumber(record['charCount'])
+  const status = stringField(record, 'status')
+  const createdAt = stringField(record, 'createdAt')
+  if (
+    segmentId === null ||
+    materialId === null ||
+    materialVersion === null ||
+    index === null ||
+    startLine === null ||
+    endLine === null ||
+    text === null ||
+    charCount === null ||
+    (status !== 'active' && status !== 'superseded') ||
+    createdAt === null
+  ) {
+    return null
+  }
+  return {
+    segmentId,
+    materialId,
+    materialVersion,
+    index,
+    startLine,
+    endLine,
+    text,
+    charCount,
+    status,
+    createdAt,
+  }
+}
+
+function parseUnderstandingSource(value: unknown): CloudUnderstandingSource | null {
+  const record = asRecord(value)
+  if (record === null) return null
+  const materialId = stringField(record, 'materialId')
+  const materialName = stringField(record, 'materialName')
+  const materialVersion = asNumber(record['materialVersion'])
+  const segmentId = stringField(record, 'segmentId')
+  const startLine = asNumber(record['startLine'])
+  const endLine = asNumber(record['endLine'])
+  if (
+    materialId === null ||
+    materialName === null ||
+    materialVersion === null ||
+    segmentId === null ||
+    startLine === null ||
+    endLine === null
+  ) {
+    return null
+  }
+  return { materialId, materialName, materialVersion, segmentId, startLine, endLine }
+}
+
+export function parseCloudUnderstandingItem(value: unknown): CloudUnderstandingItem | null {
+  const record = asRecord(value)
+  if (record === null) return null
+  const itemId = stringField(record, 'itemId')
+  const kind = stringField(record, 'kind')
+  const text = stringField(record, 'text')
+  const status = stringField(record, 'status')
+  const revision = asNumber(record['revision'])
+  const sourcesRaw = asArray(record['sources'])
+  if (
+    itemId === null ||
+    kind === null ||
+    !(UNDERSTANDING_BLOCK_ORDER as readonly string[]).includes(kind) ||
+    text === null ||
+    status === null ||
+    !(UNDERSTANDING_STATUSES as readonly string[]).includes(status) ||
+    revision === null ||
+    sourcesRaw === null
+  ) {
+    return null
+  }
+  const sources = sourcesRaw.map(parseUnderstandingSource)
+  if (sources.some((source) => source === null)) return null
+  return {
+    itemId,
+    kind: kind as UnderstandingBlockKind,
+    text,
+    originalText: nullableString(record, 'originalText'),
+    sources: sources as CloudUnderstandingSource[],
+    status: status as CloudUnderstandingItem['status'],
+    revision,
+    confirmedAt: nullableString(record, 'confirmedAt'),
+    confirmedByUserId: nullableString(record, 'confirmedByUserId'),
+    removedAt: nullableString(record, 'removedAt'),
   }
 }
 
@@ -1238,6 +1404,433 @@ export async function submitProgress(
     timeoutMs: options.timeoutMs,
     fetchImpl: options.fetchImpl,
   })
+}
+
+/* ------------------------------------------------------------ 进展更正 */
+
+export interface SupersedeProgressInput {
+  projectId: string
+  projectRevision: number
+  /** 被更正的进展；服务端把它置 superseded，并新建一条 active 记录 */
+  progressId: string
+  /** 被更正进展的当前 revision（服务端强校验，不匹配返回 STALE_REVISION） */
+  expectedRevision: number
+  /** 以下字段不传则沿用原进展的值（服务端行为） */
+  summary?: string
+  taskId?: string | null
+  milestoneId?: string | null
+  evidenceIds?: string[]
+  occurredAt?: string
+}
+
+/**
+ * POST /api/projects/{projectId}/progress/{progressId}/supersede（契约 22.4 更正语义）。
+ *
+ * 契约正文只写了「创建新记录，旧记录置 superseded，正文保留」，**没有请求字段表**；
+ * 字段以已合并后端 `server/src/v3/progress.ts#handleProgressSupersede` 为准：
+ * `expectedRevision` 必填，`summary` / `taskId` / `milestoneId` / `evidenceIds` / `occurredAt` 可选。
+ * 响应 data：`progress`（新记录）、`supersededProgressId`、`milestoneStats`。
+ */
+export async function supersedeProgress(
+  input: SupersedeProgressInput,
+  options: WriteOptions = {},
+): Promise<
+  V3Result<{ progress: ProgressRecord; supersededProgressId: string; milestoneStats: MilestoneTaskStats | null }>
+> {
+  const identity = writeIdentity('progress.supersede', options, input.projectId, {
+    projectRevision: input.projectRevision,
+    progressId: input.progressId,
+    expectedRevision: input.expectedRevision,
+    summary: input.summary ?? null,
+    taskId: input.taskId ?? null,
+    milestoneId: input.milestoneId ?? null,
+    evidenceIds: input.evidenceIds ?? null,
+    occurredAt: input.occurredAt ?? null,
+  })
+  return requestV3Envelope(
+    `/api/projects/${encodeURIComponent(input.projectId)}/progress/${encodeURIComponent(input.progressId)}/supersede`,
+    {
+      method: 'POST',
+      requestId: identity.requestId,
+      idempotencyKey: identity.idempotencyKey,
+      expectedProjectId: input.projectId,
+      expectedMinRevision: input.projectRevision,
+      body: {
+        ...envelope({
+          requestId: identity.requestId,
+          idempotencyKey: identity.idempotencyKey,
+          projectId: input.projectId,
+          projectRevision: input.projectRevision,
+        }),
+        expectedRevision: input.expectedRevision,
+        ...(input.summary === undefined ? {} : { summary: input.summary }),
+        ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
+        ...(input.milestoneId === undefined ? {} : { milestoneId: input.milestoneId }),
+        ...(input.evidenceIds === undefined ? {} : { evidenceIds: input.evidenceIds }),
+        ...(input.occurredAt === undefined ? {} : { occurredAt: input.occurredAt }),
+      },
+      parseData: (data) => {
+        const record = asRecord(data)
+        const progress = record === null ? null : parseProgress(record['progress'])
+        const supersededProgressId = record === null ? null : stringField(record, 'supersededProgressId')
+        if (progress === null || supersededProgressId === null) return null
+        // 响应必须指向本次更正的那条进展，否则视为串包
+        if (supersededProgressId !== input.progressId) return null
+        if (progress.progressId === input.progressId) return null
+        return {
+          progress,
+          supersededProgressId,
+          milestoneStats: parseTaskStats(record?.['milestoneStats']),
+        }
+      },
+      signal: options.signal,
+      timeoutMs: options.timeoutMs,
+      fetchImpl: options.fetchImpl,
+    },
+  )
+}
+
+/* ------------------------------------------------------------ 材料读取 */
+
+export interface MaterialListQuery {
+  includeArchived?: boolean
+  limit?: number
+  cursor?: string
+}
+
+export interface MaterialReadQuery {
+  /** 读历史版本；不传读当前版本 */
+  version?: number
+  includeArchived?: boolean
+}
+
+export interface MaterialPageQuery extends MaterialReadQuery {
+  limit?: number
+  cursor?: string
+}
+
+export interface CloudMaterialPage {
+  materials: CloudMaterial[]
+  nextCursor: string | null
+}
+
+export interface CloudMaterialSegmentsPage {
+  materialId: string
+  materialVersion: number
+  isCurrent: boolean
+  readOnly: boolean
+  segments: CloudMaterialSegment[]
+  nextCursor: string | null
+}
+
+export interface CloudMaterialUnderstandingPage {
+  materialId: string
+  materialVersion: number
+  isCurrent: boolean
+  readOnly: boolean
+  items: CloudUnderstandingItem[]
+  nextCursor: string | null
+}
+
+function pageCursor(record: Record<string, unknown>): string | null | undefined {
+  const raw = record['nextCursor']
+  if (raw === undefined) return null
+  if (raw === null) return null
+  const text = asString(raw)
+  return text === null || text === '' ? undefined : text
+}
+
+/** GET /api/projects/{projectId}/materials（契约 22.8）：默认只返回每个 materialId 的当前版本 */
+export async function listMaterials(
+  projectId: string,
+  query: MaterialListQuery = {},
+  options: ProjectApiOptions = {},
+): Promise<V3Result<CloudMaterialPage>> {
+  const requestId = newRequestId()
+  return requestV3Envelope(`/api/projects/${encodeURIComponent(projectId)}/materials`, {
+    method: 'GET',
+    requestId,
+    expectedProjectId: projectId,
+    query: {
+      includeArchived: query.includeArchived === true ? true : undefined,
+      limit: query.limit,
+      cursor: query.cursor,
+    },
+    parseData: (data) => {
+      const record = asRecord(data)
+      const list = record === null ? null : asArray(record['materials'])
+      if (record === null || list === null) return null
+      const materials = list.map(parseCloudMaterial)
+      if (materials.some((material) => material === null)) return null
+      const nextCursor = pageCursor(record)
+      if (nextCursor === undefined) return null
+      return { materials: materials as CloudMaterial[], nextCursor }
+    },
+    signal: options.signal,
+    timeoutMs: options.timeoutMs,
+    fetchImpl: options.fetchImpl,
+  })
+}
+
+/** GET /api/projects/{projectId}/materials/{materialId}（契约 22.8） */
+export async function getMaterial(
+  projectId: string,
+  materialId: string,
+  query: MaterialReadQuery = {},
+  options: ProjectApiOptions = {},
+): Promise<V3Result<{ material: CloudMaterial }>> {
+  const requestId = newRequestId()
+  return requestV3Envelope(
+    `/api/projects/${encodeURIComponent(projectId)}/materials/${encodeURIComponent(materialId)}`,
+    {
+      method: 'GET',
+      requestId,
+      expectedProjectId: projectId,
+      query: {
+        version: query.version,
+        includeArchived: query.includeArchived === true ? true : undefined,
+      },
+      parseData: (data) => {
+        const record = asRecord(data)
+        const material = record === null ? null : parseCloudMaterial(record['material'])
+        if (material === null) return null
+        if (material.materialId !== materialId) return null
+        return { material }
+      },
+      signal: options.signal,
+      timeoutMs: options.timeoutMs,
+      fetchImpl: options.fetchImpl,
+    },
+  )
+}
+
+function parseMaterialReadHeader(
+  record: Record<string, unknown>,
+  materialId: string,
+): { materialVersion: number; isCurrent: boolean; readOnly: boolean } | null {
+  const responseMaterialId = stringField(record, 'materialId')
+  const materialVersion = asNumber(record['materialVersion'])
+  const isCurrent = asBoolean(record['isCurrent'])
+  const readOnly = asBoolean(record['readOnly'])
+  if (responseMaterialId !== materialId || materialVersion === null || isCurrent === null || readOnly === null) {
+    return null
+  }
+  return { materialVersion, isCurrent, readOnly }
+}
+
+/** GET /api/projects/{projectId}/materials/{materialId}/segments（契约 22.8）：按 index 升序、分页 */
+export async function listMaterialSegments(
+  projectId: string,
+  materialId: string,
+  query: MaterialPageQuery = {},
+  options: ProjectApiOptions = {},
+): Promise<V3Result<CloudMaterialSegmentsPage>> {
+  const requestId = newRequestId()
+  return requestV3Envelope(
+    `/api/projects/${encodeURIComponent(projectId)}/materials/${encodeURIComponent(materialId)}/segments`,
+    {
+      method: 'GET',
+      requestId,
+      expectedProjectId: projectId,
+      query: {
+        version: query.version,
+        includeArchived: query.includeArchived === true ? true : undefined,
+        limit: query.limit,
+        cursor: query.cursor,
+      },
+      parseData: (data) => {
+        const record = asRecord(data)
+        if (record === null) return null
+        const header = parseMaterialReadHeader(record, materialId)
+        const list = asArray(record['segments'])
+        if (header === null || list === null) return null
+        const segments = list.map(parseCloudMaterialSegment)
+        if (segments.some((segment) => segment === null)) return null
+        const typed = segments as CloudMaterialSegment[]
+        // 响应只允许包含本次请求的材料 + 版本，混入其它版本视为串包
+        if (typed.some((segment) => segment.materialId !== materialId)) return null
+        if (typed.some((segment) => segment.materialVersion !== header.materialVersion)) return null
+        const nextCursor = pageCursor(record)
+        if (nextCursor === undefined) return null
+        return {
+          materialId,
+          materialVersion: header.materialVersion,
+          isCurrent: header.isCurrent,
+          readOnly: header.readOnly,
+          segments: typed,
+          nextCursor,
+        }
+      },
+      signal: options.signal,
+      timeoutMs: options.timeoutMs,
+      fetchImpl: options.fetchImpl,
+    },
+  )
+}
+
+/** GET /api/projects/{projectId}/materials/{materialId}/understanding（契约 22.8） */
+export async function listMaterialUnderstanding(
+  projectId: string,
+  materialId: string,
+  query: MaterialPageQuery = {},
+  options: ProjectApiOptions = {},
+): Promise<V3Result<CloudMaterialUnderstandingPage>> {
+  const requestId = newRequestId()
+  return requestV3Envelope(
+    `/api/projects/${encodeURIComponent(projectId)}/materials/${encodeURIComponent(materialId)}/understanding`,
+    {
+      method: 'GET',
+      requestId,
+      expectedProjectId: projectId,
+      query: {
+        version: query.version,
+        includeArchived: query.includeArchived === true ? true : undefined,
+        limit: query.limit,
+        cursor: query.cursor,
+      },
+      parseData: (data) => {
+        const record = asRecord(data)
+        if (record === null) return null
+        const header = parseMaterialReadHeader(record, materialId)
+        const list = asArray(record['items'])
+        if (header === null || list === null) return null
+        const items = list.map(parseCloudUnderstandingItem)
+        if (items.some((item) => item === null)) return null
+        const typed = items as CloudUnderstandingItem[]
+        if (typed.some((item) => item.sources.some((source) => source.materialId !== materialId))) return null
+        if (typed.some((item) => item.sources.some((source) => source.materialVersion !== header.materialVersion))) {
+          return null
+        }
+        const nextCursor = pageCursor(record)
+        if (nextCursor === undefined) return null
+        return {
+          materialId,
+          materialVersion: header.materialVersion,
+          isCurrent: header.isCurrent,
+          readOnly: header.readOnly,
+          items: typed,
+          nextCursor,
+        }
+      },
+      signal: options.signal,
+      timeoutMs: options.timeoutMs,
+      fetchImpl: options.fetchImpl,
+    },
+  )
+}
+
+/* ------------------------------------------------------------ 材料写入 */
+/* 契约 22.9：归档 / 恢复 / 重新解析都不需要 expectedRevision（服务端只校验 projectRevision）。 */
+
+async function materialStateAction(
+  projectId: string,
+  materialId: string,
+  action: 'archive' | 'restore',
+  projectRevision: number,
+  options: WriteOptions,
+): Promise<V3Result<{ material: CloudMaterial }>> {
+  const identity = writeIdentity(`material.${action}`, options, projectId, {
+    projectRevision,
+    materialId,
+  })
+  return requestV3Envelope(
+    `/api/projects/${encodeURIComponent(projectId)}/materials/${encodeURIComponent(materialId)}/${action}`,
+    {
+      method: 'POST',
+      requestId: identity.requestId,
+      idempotencyKey: identity.idempotencyKey,
+      expectedProjectId: projectId,
+      expectedMinRevision: projectRevision,
+      body: envelope({
+        requestId: identity.requestId,
+        idempotencyKey: identity.idempotencyKey,
+        projectId,
+        projectRevision,
+      }),
+      parseData: (data) => {
+        const record = asRecord(data)
+        const material = record === null ? null : parseCloudMaterial(record['material'])
+        if (material === null || material.materialId !== materialId) return null
+        return { material }
+      },
+      signal: options.signal,
+      timeoutMs: options.timeoutMs,
+      fetchImpl: options.fetchImpl,
+    },
+  )
+}
+
+/** POST .../materials/{materialId}/archive（契约 22.9）：归档后 readOnly=true，默认不再出现在列表 */
+export function archiveMaterial(
+  projectId: string,
+  materialId: string,
+  projectRevision: number,
+  options: WriteOptions = {},
+): Promise<V3Result<{ material: CloudMaterial }>> {
+  return materialStateAction(projectId, materialId, 'archive', projectRevision, options)
+}
+
+/** POST .../materials/{materialId}/restore（契约 22.9）：只恢复当前版本 */
+export function restoreMaterial(
+  projectId: string,
+  materialId: string,
+  projectRevision: number,
+  options: WriteOptions = {},
+): Promise<V3Result<{ material: CloudMaterial }>> {
+  return materialStateAction(projectId, materialId, 'restore', projectRevision, options)
+}
+
+/**
+ * POST .../materials/{materialId}/reparse（契约 22.9）。
+ * 服务端基于已有正文生成**新的 materialVersion**，并把该版本置为当前版本，
+ * 响应带新版本的片段列表；旧版本的片段与理解条目仍然保留（只读）。
+ */
+export async function reparseMaterial(
+  projectId: string,
+  materialId: string,
+  projectRevision: number,
+  options: WriteOptions = {},
+): Promise<V3Result<{ material: CloudMaterial; segments: CloudMaterialSegment[]; segmentCount: number }>> {
+  const identity = writeIdentity('material.reparse', options, projectId, { projectRevision, materialId })
+  return requestV3Envelope(
+    `/api/projects/${encodeURIComponent(projectId)}/materials/${encodeURIComponent(materialId)}/reparse`,
+    {
+      method: 'POST',
+      requestId: identity.requestId,
+      idempotencyKey: identity.idempotencyKey,
+      expectedProjectId: projectId,
+      expectedMinRevision: projectRevision,
+      body: envelope({
+        requestId: identity.requestId,
+        idempotencyKey: identity.idempotencyKey,
+        projectId,
+        projectRevision,
+      }),
+      parseData: (data) => {
+        const record = asRecord(data)
+        const material = record === null ? null : parseCloudMaterial(record['material'])
+        const list = record === null ? null : asArray(record['segments'])
+        const segmentCount = record === null ? null : asNumber(record['segmentCount'])
+        if (material === null || list === null || segmentCount === null) return null
+        if (material.materialId !== materialId) return null
+        const segments = list.map(parseCloudMaterialSegment)
+        if (segments.some((segment) => segment === null)) return null
+        const typed = segments as CloudMaterialSegment[]
+        if (
+          typed.some(
+            (segment) =>
+              segment.materialId !== materialId || segment.materialVersion !== material.materialVersion,
+          )
+        ) {
+          return null
+        }
+        return { material, segments: typed, segmentCount }
+      },
+      signal: options.signal,
+      timeoutMs: options.timeoutMs,
+      fetchImpl: options.fetchImpl,
+    },
+  )
 }
 
 /* ------------------------------------------------------------------ 证据 */
