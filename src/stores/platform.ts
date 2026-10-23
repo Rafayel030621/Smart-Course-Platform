@@ -77,6 +77,10 @@ export const usePlatformStore = defineStore('platform', () => {
   const cloudLoading = computed(() => cloud.loadingProject)
   const cloudError = computed(() => cloud.lastError)
   const cloudSync = computed(() => cloud.sync)
+  const migrationCandidates = computed(() => migration.candidates)
+  const migrationStatus = computed(() => migration.status)
+  const migrationError = computed(() => migration.error)
+  const migrationActiveCandidate = computed(() => migration.activeCandidate)
 
   const isCloudSource = computed(() => source.value === 'cloud')
 
@@ -152,6 +156,15 @@ export const usePlatformStore = defineStore('platform', () => {
     return result
   }
 
+  async function register(
+    input: { account: string; displayName: string; password: string; inviteCode: string },
+    options: SessionApiOptions = {},
+  ): Promise<ActionResult<AuthSnapshot>> {
+    const result = await session.register(input, options)
+    if (result.ok) source.value = 'cloud'
+    return result
+  }
+
   /** 退出：只清会话与云端状态，本地项目原样保留 */
   async function logout(options: SessionApiOptions = {}): Promise<ActionResult<{ loggedOut: true }>> {
     const result = await session.logout(options)
@@ -215,6 +228,11 @@ export const usePlatformStore = defineStore('platform', () => {
     source.value = 'local'
   }
 
+  /** 进入云端界面；具体项目仍由页面通过 selectCloudProject 选择 */
+  function useCloudSource(): void {
+    if (session.isAuthenticated) source.value = 'cloud'
+  }
+
   /** 只读检测本地项目，不发请求；由页面显式触发 */
   function detectLocalMigration(): LocalMigrationCandidate[] {
     return migration.detect()
@@ -271,6 +289,10 @@ export const usePlatformStore = defineStore('platform', () => {
     cloudLoading,
     cloudError,
     cloudSync,
+    migrationCandidates,
+    migrationStatus,
+    migrationError,
+    migrationActiveCandidate,
 
     /* 本地项目 */
     localProjects,
@@ -283,11 +305,13 @@ export const usePlatformStore = defineStore('platform', () => {
     initialize,
     retryInitialize,
     login,
+    register,
     logout,
     refreshCloudProjects,
     selectCloudProject,
     createCloudProject,
     useLocalSource,
+    useCloudSource,
 
     /* 迁移（只有显式调用） */
     detectLocalMigration,
