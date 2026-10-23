@@ -133,8 +133,9 @@
 | `cloud.buildConfirmedMaterialsContext()` | 无 | `ConfirmedMaterial[]` | 需要材料已读；任一份可入 AI 的材料还没读 → `MATERIALS_NOT_AVAILABLE`，不返回「空材料」 |
 | `cloud.archiveMaterial(materialId)` / `cloud.restoreMaterial(materialId)` | 无需 `expectedRevision`（服务端只校验 `projectRevision`） | `CloudMaterial` | 归档后本地保留该行（`status='archived'`、`readOnly=true`）供页面展示，随后不带 `includeArchived` 的 `refreshMaterials()` 会把它移除；重复归档/恢复 → `INVALID_STATE_TRANSITION` |
 | `cloud.reparseMaterial(materialId)` | 同上 | `CloudMaterial`（新 `materialVersion`） | 新版本片段直接写入缓存；新版本理解条目需重新生成，`buildConfirmedMaterialsContext()` 返回 `MATERIALS_NOT_AVAILABLE`，**不会**沿用旧版本的已确认内容 |
+| `cloud.uploadMaterial({ name, contentBase64 })` | `name` 扩展名必须是 md/txt；`contentBase64` 是标准 base64（不带 data URL 前缀），解码后 ≤ 1 MB | `CloudMaterial` | 提交状态见 `cloud.materialUpload`（`idle/submitting/done/error` + `error` + `lastUpload`）；成功后列表立即包含该材料并推进 `projectRevision`；`deduplicated=true` 表示同项目同 sha256 命中既有材料（无新版本、revision 不变）；`parse_failed` 仍是提交成功，但**理解草稿未生成** |
 
-> 材料上传（`POST /materials`，base64 正文）已由后端实现，但上传入口属于「项目资料」页的写入 UI（当前页面走本地 v2 上传），本次未接线。
+> 上传不是 multipart：服务端只接受 `name` + `contentBase64` 的 JSON 包络，`materialId` / `materialVersion` 由服务端生成（上传固定 `version=1`）。
 
 字段以服务端 DTO 为准：材料是 `materialVersion`（内容版本）+ `revision`（元数据/归档版本）、`parse_failed`（下划线）、`isCurrent`、`readOnly`、`failureReason`、`sha256`；片段是 `index`（不是 `orderIndex`）、`charCount`、`status`；理解条目是 `sources[]`，`status` 为 `pending/confirmed/modified/archived`。
 
@@ -236,7 +237,35 @@ else toast(segments.message)                                       // 中文原�
 - 材料状态是 `registered / parsed / parse_failed / unsupported / archived`；`readOnly=true` 时不要渲染编辑/删除按钮；
 - 片段序号用 `index`（服务端字段名，不是 `orderIndex`），行号用 `startLine/endLine`；
 - 归档用 `cloud.archiveMaterial(materialId)`、恢复用 `cloud.restoreMaterial(materialId)`、重新解析用 `cloud.reparseMaterial(materialId)`；
-- **上传还没有客户端函数**：`POST /api/projects/{id}/materials`（`name` + `contentBase64`）后端已实现，但页面当前走本地 v2 上传，接线时需要新增 `uploadMaterial()` 并同步 `openProject()` 刷新（本次未做，见 §3 第 13 项）。
+- 上传用 `cloud.uploadMaterial({ name, contentBase64 })`，`File` → base64 直接复用 `@/services/materialsApi` 的 `bytesToBase64(new Uint8Array(await file.arrayBuffer()))`。
+
+**上传接线示例**（页面只做 UI，不做协议）：
+
+```ts
+const cloud = useCloudStore()
+
+async function onPick(file: File) {
+  const bytes = new Uint8Array(await file.arrayBuffer())
+  const result = await cloud.uploadMaterial({
+    name: file.name,                       // 扩展名必须是 md/txt，否则服务端返回 UNSUPPORTED_MATERIAL_TYPE
+    contentBase64: bytesToBase64(bytes),   // 不带 data URL 前缀；> 1 MB 客户端会直接拒绝
+  })
+  if (!result.ok) {
+    // code: MATERIAL_TOO_LARGE / EMPTY_MATERIAL / UNSUPPORTED_MATERIAL_TYPE /
+    //       MATERIAL_ENCODING_UNREADABLE / STALE_REVISION / PROJECT_ARCHIVED / DUPLICATE_REQUEST …
+    toast(result.message)                  // 中文原因，直接展示；STALE_REVISION 时先 refreshProject 再重试
+    return
+  }
+  const { material, status } = result.data
+  // 提交成功 ≠ 理解已生成：status='parse_failed' 时提示「解析失败，可重新上传」；
+  // 想把新材料作为 AI 依据，必须先确认理解条目（loadMaterialUnderstanding + 确认流程），
+  // 否则 buildConfirmedMaterialsContext() 不会包含它。
+  await cloud.refreshMaterials({ forceRefresh: true })   // 需要服务端顺序/归档过滤时以服务端为准
+}
+```
+
+`cloud.materialUpload` 用于驱动「上传中」按钮与错误提示：`status`（`idle/submitting/done/error`）、`error {code,message}`、`lastUpload {materialId, materialVersion, materialStatus, deduplicated, segmentCount}`。
+注意：上传响应的 `segments` 最多只有前 20 条（`segmentCount` 是真实总数），需要完整片段时调 `loadMaterialSegments()`。
 
 ### 2.6 页面必须遵守的展示规则
 
@@ -265,9 +294,9 @@ else toast(segments.message)                                       // 中文原�
 | 10 | 云端聊天会话/消息持久化（`chat_sessions` / `chat_messages` 读写） | **缺实现** | 后端只有 `POST /api/advisor/chat`（无状态、不落库）；`chat_sessions`/`chat_messages` 表存在，但 `server/src/v3/router.ts` 没有任何会话/消息读写路由 | `cloud.sendChat()` 只在本次会话内存里维护消息，刷新/换设备即丢失；页面不要展示「云端历史会话」。需要后端补：会话列表、会话消息分页、按会话继续聊 |
 | 11 | 聊天响应 `citations` / `milestoneRevision`（契约 23.7） | **字段已回显，引用为空（D15 未做）** | `server/src/routes/advisorChat.ts` 现在返回 `promptVersion`/`milestoneRevision`，但 `citations` 恒为空数组：`validation.ts` 还没有解析模型返回的 `segmentId`，`prompt.ts` 只生成了 `m1:seg_x` 虚拟标识 | 客户端已按契约解析真实 `segmentId/materialName/startLine/endLine`；后端补上映射后前端无需改动 |
 | 12 | 疑问读取（V3 doubts） | **缺实现** | 无 `GET /projects/:id/doubts` | 建议/聊天的 `doubts` 只能发空数组，未解决疑问不进 AI 上下文 |
-| 13 | 材料上传的客户端函数（`POST /projects/:id/materials`） | **后端已实现；前端未接入** | `server/src/v3/materialWrites.ts#handleMaterialUpload`（`name` + `contentBase64`） | 「项目资料」页仍走本地 v2 上传；接云端时需要新增 `uploadMaterial()` 并在成功后 `openProject()` 刷新（分页/大小/编码错误码已有：`MATERIAL_TOO_LARGE`、`EMPTY_MATERIAL`、`MATERIAL_ENCODING_UNREADABLE`…） |
+| 13 | 材料上传的客户端函数（`POST /projects/:id/materials`） | **已接入（材料上传分支）** | `server/src/v3/materialWrites.ts#handleMaterialUpload`（`name` + `contentBase64`，非 multipart）；服务端按解码后字节判 1 MB，响应 `segments` 只回前 20 条 | `uploadMaterial()` + `cloud.uploadMaterial()` 已可用；真实联调用例 `tests/integration/materialUpload.integration.test.ts`；页面接线见 §2.5.1 |
 
-> 第 2、3、6、10、11、12 项是真实的后端缺口；第 4、5 项数据层已接入、页面待接线（§2.5.1）；第 9 项已由 D13 完成并被客户端用上；第 1 项在上一 PR 接入。客户端已把缺口收敛到 `cloud.contractBlockers`、`advisor.contextAttached` 与对应错误码。
+> 第 2、3、6、10、11、12 项是真实的后端缺口；第 4、5、13 项数据层已接入、页面待接线（§2.5.1）；第 9 项已由 D13 完成并被客户端用上；第 1 项在上一 PR 接入。客户端已把缺口收敛到 `cloud.contractBlockers`、`advisor.contextAttached` 与对应错误码。
 
 ---
 
@@ -284,6 +313,8 @@ else toast(segments.message)                                       // 中文原�
 | **PR-1 分支评审修复后（本次修复提交）** | **820/820，35 文件** | **0 错误** | 通过 | 通过 |
 | **本次补齐（`origin/main` 基线 `ee6cc2d`，材料/上下文/更正/聊天）** | **899/899，42 文件** | **0 错误** | 通过 | 通过 |
 | **对齐 v3.10（工作区已同步 `origin/main` 内容至 `90956b8`/`f83291d`）** | **927/927，42 文件** | **0 错误** | 通过 | 通过 |
+| **交付分支 `feature/liyanbin-v3-delivery`（`1a1eed9`）** | **927/927，42 文件** | **0 错误** | 通过 | 通过 |
+| **材料上传分支 `feature/liyanbin-v3-material-upload`（基于 `1a1eed9`）** | **947/947，44 文件** | **0 错误** | 通过 | 通过 |
 | 隔离验证目录 `scp-v3-verify-main-data` | 815/815，34 文件 | 0 错误 | 通过 | 通过 |
 | 完整混合工作区（主目录，基线 `ac65287`） | 787/787，35 文件 | 0 错误 | 通过 | 通过 |
 | 严格 A 组（`ac65287` + 仅 V3 hunk） | 789 用例：727 通过 / 62 失败 | 23 错误（基线 21 + 2） | 通过 | 通过 |
@@ -342,6 +373,22 @@ npx vitest run --config vitest.integration.config.ts tests/integration/v3LocalBa
 - 聊天 `advisor-chat-v3` 200，响应 `citations` 缺失/空数组都能解析。
 
 未覆盖：模型真实输出（provider 用 `mock`）、材料上传后的理解草稿生成、D15 引用回填（服务端尚未实现）。
+
+### 4.5 材料上传的真实联调
+
+同一套本地后端（`server/`，基线 `90956b8`，`ADVISOR_PROVIDER=mock`）：
+
+```
+npx vitest run --config vitest.integration.config.ts tests/integration/materialUpload.integration.test.ts   # 5/5
+npx vitest run --config vitest.integration.config.ts                                                        # 3 文件 / 22 条
+```
+
+覆盖：
+- store 上传 → 列表立即可见、`projectRevision` +1、`materialUpload.lastUpload.segmentCount` 为服务端真实总数；
+- **分段规则实测**：`parseText` 会把连续非空行合并到 2,000 字以内，所以「片段数 > 20（响应截断）」必须用 ≥ 20 个 2,000 字块构造（本次用 12 段 × 2,100 字 ≈ 24 段）；截断响应**不写入**版本缓存，`loadMaterialSegments()` 能拿全；
+- 同内容重传 → `deduplicated=true`、`projectRevision` 不变、列表不重复；
+- 过期 `projectRevision` → 409 `STALE_REVISION`（带 `currentProjectRevision`），随后重试成功；
+- 理解条目读取端点可读，但本环境未配置真实模型，**未验证**上传后的理解草稿生成。
 
 ---
 

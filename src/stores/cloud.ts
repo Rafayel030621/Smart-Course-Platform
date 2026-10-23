@@ -45,6 +45,7 @@ import {
   reparseMaterial as reparseMaterialApi,
   restoreMaterial as restoreMaterialApi,
   submitProgress as submitProgressApi,
+  uploadMaterial as uploadMaterialApi,
   supersedeProgress as supersedeProgressApi,
   taskAction as taskActionApi,
   updateMilestone as updateMilestoneApi,
@@ -95,6 +96,7 @@ import type {
   CloudEvidence,
   CloudMaterial,
   CloudMaterialSegment,
+  CloudMaterialUploadState,
   CloudMilestone,
   CloudProject,
   CloudProjectSyncState,
@@ -263,6 +265,14 @@ export interface RefreshMaterialsActionInput {
   limit?: number
 }
 
+export interface UploadMaterialActionInput {
+  projectId?: string
+  /** 文件名，扩展名必须是 md/txt（服务端白名单） */
+  name: string
+  /** 标准 base64（不带 data URL 前缀） */
+  contentBase64: string
+}
+
 export interface SupersedeProgressActionInput {
   projectId?: string
   /** 被更正的进展 */
@@ -393,6 +403,12 @@ export const useCloudStore = defineStore('cloud', () => {
   const materialUnderstanding = ref<Record<string, CloudUnderstandingItem[]>>({})
   const materialReadLoading = ref<Record<string, boolean>>({})
   const materialReadError = ref<{ key: string; code: string; message: string } | null>(null)
+  /** 材料上传（契约 22.9）：提交生命周期与列表读取分开，失败可重试 */
+  const materialUpload = ref<CloudMaterialUploadState>({
+    status: 'idle',
+    error: null,
+    lastUpload: null,
+  })
 
   /* -------- AI（契约 23）：建议与聊天都是单项目状态，切项目即清空 -------- */
   const advisor = ref<CloudAdvisorState>(emptyAdvisorState())
@@ -543,6 +559,7 @@ export const useCloudStore = defineStore('cloud', () => {
     materialUnderstanding.value = {}
     materialReadLoading.value = {}
     materialReadError.value = null
+    materialUpload.value = { status: 'idle', error: null, lastUpload: null }
   }
 
   function isStale(token: number, projectId: string): boolean {
@@ -1922,12 +1939,105 @@ export const useCloudStore = defineStore('cloud', () => {
     }
   }
 
+  /** 新上传的材料插到列表最前；已存在（去重命中/刷新）则原位替换 */
+  function upsertMaterial(material: CloudMaterial): void {
+    const index = materials.value.findIndex((item) => item.materialId === material.materialId)
+    if (index < 0) {
+      materials.value = [material, ...materials.value]
+      indexEntity(material.materialId, activeProjectId ?? '')
+      return
+    }
+    const next = [...materials.value]
+    next[index] = material
+    materials.value = next
+  }
+
   function replaceMaterial(material: CloudMaterial): void {
     const index = materials.value.findIndex((item) => item.materialId === material.materialId)
     if (index < 0) return
     const next = [...materials.value]
     next[index] = material
     materials.value = next
+  }
+
+  /**
+   * 上传一份材料（契约 22.9 `POST /api/projects/{id}/materials`）。
+   *
+   * 语义边界：
+   * - 成功 = 服务端已存下这份材料（`materials` 行 + 原文），**不代表**理解草稿已生成；
+   *   新材料的理解条目需要另行生成，`buildConfirmedMaterialsContext()` 在读到条目之前会返回
+   *   `MATERIALS_NOT_AVAILABLE`，不会拿空数组冒充「没有可引用材料」；
+   * - `parse_failed`（分段失败）同样是提交成功，状态从返回的 `material.status` 读；
+   * - `deduplicated=true` 表示同项目同 sha256 命中既有材料：不新建版本、`projectRevision` 不变。
+   */
+  async function uploadMaterial(
+    input: UploadMaterialActionInput,
+    options: CloudStoreOptions = {},
+  ): Promise<ActionResult<CloudMaterial>> {
+    const blocked = ensureWritable(input.projectId)
+    if (blocked !== null) return failure(blocked)
+    const projectId = activeProjectId!
+    const name = input.name.trim()
+    if (name === '') {
+      const error = validationError('INVALID_INPUT', '文件名不能为空')
+      materialUpload.value = { status: 'error', error: { code: error.code, message: error.message }, lastUpload: null }
+      return failure(error)
+    }
+    if (typeof input.contentBase64 !== 'string' || input.contentBase64.trim() === '') {
+      const error = validationError('EMPTY_MATERIAL', '请选择要上传的文件')
+      materialUpload.value = { status: 'error', error: { code: error.code, message: error.message }, lastUpload: null }
+      return failure(error)
+    }
+    if (!startAction('uploadMaterial')) return failure(makeV3Error('DUPLICATE_REQUEST'))
+    const token = epoch
+    materialUpload.value = { status: 'submitting', error: null, lastUpload: materialUpload.value.lastUpload }
+    try {
+      const result = await uploadMaterialApi(
+        projectId,
+        { name, contentBase64: input.contentBase64, projectRevision: projectRevision.value },
+        { signal: abortController.signal, timeoutMs: options.timeoutMs },
+      )
+      if (isStale(token, projectId)) return failure(makeV3Error('STALE_RESPONSE'))
+      if (!result.ok) {
+        const error = mapAbort(result.error)
+        materialUpload.value = {
+          status: 'error',
+          error: { code: error.code, message: error.message },
+          lastUpload: materialUpload.value.lastUpload,
+        }
+        setFailure(error)
+        return failure(error)
+      }
+
+      const { material, segments, segmentCount, deduplicated } = result.data
+      upsertMaterial(material)
+      // 列表还没完整读过：补一次全量刷新，避免页面把「只有这一份」当成全部
+      if (!materialsHydrated.value) await refreshMaterials({ silent: true })
+      // 服务端最多回前 20 条片段：只有「返回条数 == 真实总数」时才能整段写进版本缓存，
+      // 否则留给 loadMaterialSegments() 分页读取，绝不拿截断结果冒充完整片段。
+      if (segmentCount > 0 && segments.length === segmentCount) {
+        materialSegments.value = {
+          ...materialSegments.value,
+          [materialKey(material.materialId, material.materialVersion)]: segments,
+        }
+      }
+      applyRevision(result.projectRevision)
+      materialUpload.value = {
+        status: 'done',
+        error: null,
+        lastUpload: {
+          materialId: material.materialId,
+          materialVersion: material.materialVersion,
+          materialStatus: material.status,
+          deduplicated,
+          segmentCount,
+        },
+      }
+      clearFailure()
+      return { ok: true, data: material }
+    } finally {
+      finishAction('uploadMaterial')
+    }
   }
 
   /** POST .../materials/{materialId}/archive（契约 22.9） */
@@ -2844,6 +2954,8 @@ export const useCloudStore = defineStore('cloud', () => {
     refreshMilestones,
     refreshTasks,
     refreshMaterials,
+    uploadMaterial,
+    materialUpload,
     loadMaterialDetail,
     loadMaterialSegments,
     loadMaterialUnderstanding,
