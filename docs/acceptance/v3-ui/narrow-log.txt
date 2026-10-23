@@ -1,0 +1,4 @@
+项目资料页 390px：scrollWidth=390 viewport=390
+进展更正表单 390px：scrollWidth=390
+聊天 390px：scrollWidth=390
+最大 scrollWidth=390（应等于 390，无横向溢出）
