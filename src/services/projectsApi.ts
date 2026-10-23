@@ -1833,6 +1833,121 @@ export async function reparseMaterial(
   )
 }
 
+/* ------------------------------------------------------------ 材料上传 */
+/**
+ * 契约 22.9 `POST /api/projects/{projectId}/materials`。
+ *
+ * 真实接口形态（**不是** multipart，也不接受任意文件）：
+ * - body 只接受 `name` + `contentBase64`（标准 base64，不带 data URL 前缀）；
+ * - `materialId` / `materialVersion` 由服务端生成，上传固定为新 `materialId` + `version=1`；
+ * - 只支持 `md` / `txt` 扩展名（`UNSUPPORTED_MATERIAL_TYPE`）；
+ * - 服务端按**解码后字节**判 1 MB（`MATERIAL_TOO_LARGE`），请求体上限 2 MB；
+ * - 同项目同 `sha256` 命中未归档的当前版本 → 返回既有材料且 `deduplicated=true`，不新建版本、不递增 `projectRevision`；
+ * - 分段成功 `status='parsed'`，失败仍 200 + `status='parse_failed'` + `failureReason`。
+ */
+
+/** 解码后原始字节上限（服务端口径，不看 base64 长度） */
+const MATERIAL_MAX_BYTES = 1_048_576
+/** 服务端请求体上限 2 MB：先本地拦下来，避免白传 1.4 MB 再被 413 */
+const MATERIAL_MAX_BODY_CHARS = 2 * 1024 * 1024
+
+export interface MaterialUploadInput {
+  /** 文件名，扩展名决定类型（白名单 md/txt），≤ 200 字符 */
+  name: string
+  /** 标准 base64（不带 data URL 前缀）；可用 `bytesToBase64()`（`@/services/materialsApi`）转换 */
+  contentBase64: string
+  projectRevision: number
+}
+
+export interface MaterialUploadResult {
+  material: CloudMaterial
+  /** 服务端最多返回前 20 条片段；真实总数看 `segmentCount` */
+  segments: CloudMaterialSegment[]
+  segmentCount: number
+  /** true = 命中同项目同 sha256 的既有材料（没有新建材料/版本） */
+  deduplicated: boolean
+}
+
+/** base64 字符串解码后的字节数（按长度推算，不做真正的解码） */
+function base64ByteLength(value: string): number {
+  const trimmed = value.trim()
+  if (trimmed === '') return 0
+  const padding = trimmed.endsWith('==') ? 2 : trimmed.endsWith('=') ? 1 : 0
+  return Math.floor((trimmed.length * 3) / 4) - padding
+}
+
+export function uploadMaterial(
+  projectId: string,
+  input: MaterialUploadInput,
+  options: WriteOptions = {},
+): Promise<V3Result<MaterialUploadResult>> {
+  const name = input.name.trim()
+  if (name === '') {
+    return Promise.resolve({
+      ok: false,
+      error: makeV3Error('INVALID_INPUT', { message: '文件名不能为空', cause: 'validation' }),
+    })
+  }
+  if (typeof input.contentBase64 !== 'string') {
+    return Promise.resolve({
+      ok: false,
+      error: makeV3Error('INVALID_INPUT', { message: '文件内容必须是 base64 字符串', cause: 'validation' }),
+    })
+  }
+  const contentBase64 = input.contentBase64.trim()
+  if (contentBase64 === '') {
+    return Promise.resolve({ ok: false, error: makeV3Error('EMPTY_MATERIAL', { cause: 'validation' }) })
+  }
+  if (contentBase64.length > MATERIAL_MAX_BODY_CHARS || base64ByteLength(contentBase64) > MATERIAL_MAX_BYTES) {
+    return Promise.resolve({ ok: false, error: makeV3Error('MATERIAL_TOO_LARGE', { cause: 'validation' }) })
+  }
+
+  // 上传不做 stableIdempotencyKey：base64 正文会被当作缓存 key 常驻内存，
+  // 且同一份文件重传由服务端 sha256 去重兜底（返回 deduplicated=true）。
+  const requestId = options.requestId ?? newRequestId()
+  const idempotencyKey = options.idempotencyKey ?? `scp_material_upload_${newRequestId()}`
+
+  return requestV3Envelope(`/api/projects/${encodeURIComponent(projectId)}/materials`, {
+    method: 'POST',
+    requestId,
+    idempotencyKey,
+    expectedProjectId: projectId,
+    expectedMinRevision: input.projectRevision,
+    body: {
+      ...envelope({
+        requestId,
+        idempotencyKey,
+        projectId,
+        projectRevision: input.projectRevision,
+      }),
+      name,
+      contentBase64,
+    },
+    // 1 MB 文件的 base64 约 1.37 MB，默认超时对慢网络偏紧
+    timeoutMs: options.timeoutMs ?? 60_000,
+    parseData: (data) => {
+      const record = asRecord(data)
+      const material = record === null ? null : parseCloudMaterial(record['material'])
+      const list = record === null ? null : asArray(record['segments'])
+      const segmentCount = record === null ? null : asNumber(record['segmentCount'])
+      const deduplicated = record === null ? null : record['deduplicated']
+      if (material === null || list === null || segmentCount === null) return null
+      if (typeof deduplicated !== 'boolean') return null
+      if (segmentCount < 0) return null
+      const segments = list.map(parseCloudMaterialSegment)
+      if (segments.some((segment) => segment === null)) return null
+      const typed = segments as CloudMaterialSegment[]
+      // 串版本/串材料的片段一律判非法：只接受本次返回的那份材料与版本
+      if (typed.some((segment) => segment.materialId !== material.materialId)) return null
+      if (typed.some((segment) => segment.materialVersion !== material.materialVersion)) return null
+      if (typed.length > segmentCount) return null
+      return { material, segments: typed, segmentCount, deduplicated }
+    },
+    signal: options.signal,
+    fetchImpl: options.fetchImpl,
+  })
+}
+
 /* ------------------------------------------------------------------ 证据 */
 
 export interface AttachEvidenceToTaskInput {

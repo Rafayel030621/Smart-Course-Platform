@@ -906,4 +906,27 @@ export interface CloudChatMessage {
   createdAt: string
 }
 
+/* ---- 材料上传（契约 22.9；提交是同步解析，但「解析成功」不等于「理解草稿已生成」） ---- */
+
+export type CloudMaterialUploadStatus = 'idle' | 'submitting' | 'done' | 'error'
+
+export interface CloudMaterialUploadOutcome {
+  materialId: string
+  materialVersion: number
+  /** 服务端解析结果：`parsed` 才有片段；`parse_failed` 仍算提交成功 */
+  materialStatus: CloudMaterialStatus
+  /** true = 同项目同 sha256 命中既有材料，没有新建版本 */
+  deduplicated: boolean
+  /** 后端真实片段总数（响应里的 segments 最多只有前 20 条） */
+  segmentCount: number
+}
+
+export interface CloudMaterialUploadState {
+  status: CloudMaterialUploadStatus
+  /** 提交失败原因；成功后为 null */
+  error: { code: string; message: string } | null
+  /** 最近一次提交结果（含去重命中）；刷新页面后不清空，但切项目会清空 */
+  lastUpload: CloudMaterialUploadOutcome | null
+}
+
 export type CloudAiStatus = 'idle' | 'loading' | 'ready' | 'error'
