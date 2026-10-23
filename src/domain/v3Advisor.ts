@@ -12,6 +12,7 @@ import {
   MAX_CONFIRMED_MATERIALS,
   MAX_CONFIRMED_SEGMENTS,
   MAX_CONFIRMED_TOTAL_LENGTH,
+  MATERIAL_TYPES,
 } from '@/domain/materials'
 import type {
   ConfirmedMaterial,
@@ -19,6 +20,7 @@ import type {
   MilestoneContext,
   MilestoneTaskSnapshot,
   ProgressSnapshot,
+  TaskSnapshot,
   UnderstandingSegmentInput,
 } from '@/domain/recommendation'
 import type {
@@ -144,12 +146,14 @@ export function buildMilestoneContext(source: MilestoneContextSource): Milestone
 /**
  * 契约 23.3：只把已确认的理解条目转成请求材料。
  *
- * 额外门槛：
- * - 条目 status 必须是 confirmed；
- * - 材料必须存在且处于 parsed 状态；
- * - 条目版本必须是材料当前版本；
- * - 来源片段必须属于同一 materialId + version；
+ * 额外门槛（任何一条不满足就不进上下文）：
+ * - 条目 status 必须是 confirmed（pending / modified / archived 一律不发）；
+ * - 条目引用的材料必须存在且处于 parsed 状态，且是**当前版本**（`isCurrent`）；
+ * - 条目来源的 `materialVersion` 必须等于材料当前版本，片段必须属于同一 materialId + version；
+ * - 只发 md/txt（上传白名单）；迁移来的 csv/xlsx/pdf/docx 材料不进 AI 上下文；
  * - 最多 3 份材料、20 条片段、8,000 字。
+ *
+ * 服务端目前**不做**二次复核（contract 23.3 的 v3 门禁未实现），所以这段过滤是唯一的护栏。
  */
 export function selectConfirmedMaterials(
   items: CloudUnderstandingItem[],
@@ -165,17 +169,19 @@ export function selectConfirmedMaterials(
   const referencedByMaterial = new Map<string, Set<string>>()
   for (const item of items) {
     if (item.status !== 'confirmed') continue
-    const material = materialById.get(item.materialId)
-    if (material === undefined || material.status !== 'parsed') continue
-    if (material.version !== item.materialVersion) continue
-    const key = `${item.materialId}@${item.materialVersion}`
-    const set = referencedByMaterial.get(key) ?? new Set<string>()
-    for (const segmentId of item.sourceSegmentIds) {
-      const segment = segmentMap.get(`${key}:${segmentId}`)
+    for (const source of item.sources) {
+      const material = materialById.get(source.materialId)
+      if (material === undefined) continue
+      if (material.status !== 'parsed' || !material.isCurrent) continue
+      if (material.materialVersion !== source.materialVersion) continue
+      if (!isConfirmedMaterialType(material.type)) continue
+      const key = `${source.materialId}@${source.materialVersion}`
+      const segment = segmentMap.get(`${key}:${source.segmentId}`)
       if (segment === undefined) continue
-      set.add(segmentId)
+      const set = referencedByMaterial.get(key) ?? new Set<string>()
+      set.add(source.segmentId)
+      referencedByMaterial.set(key, set)
     }
-    referencedByMaterial.set(key, set)
   }
 
   const result: ConfirmedMaterial[] = []
@@ -183,19 +189,24 @@ export function selectConfirmedMaterials(
   let totalChars = 0
 
   const orderedMaterials = [...materials]
-    .filter((material) => material.status === 'parsed' && material.type !== null)
+    .filter((material) => material.status === 'parsed' && material.isCurrent && isConfirmedMaterialType(material.type))
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
 
   for (const material of orderedMaterials) {
     if (result.length >= MAX_CONFIRMED_MATERIALS) break
-    const referenced = referencedByMaterial.get(`${material.materialId}@${material.version}`)
+    const referenced = referencedByMaterial.get(`${material.materialId}@${material.materialVersion}`)
     if (referenced === undefined || referenced.size === 0) continue
 
     const materialSegments: UnderstandingSegmentInput[] = []
-    for (const segment of segments) {
-      if (segment.materialId !== material.materialId) continue
-      if (segment.materialVersion !== material.version) continue
-      if (!referenced.has(segment.segmentId)) continue
+    const ordered = segments
+      .filter(
+        (segment) =>
+          segment.materialId === material.materialId &&
+          segment.materialVersion === material.materialVersion &&
+          referenced.has(segment.segmentId),
+      )
+      .sort((a, b) => a.index - b.index)
+    for (const segment of ordered) {
       if (totalSegments >= MAX_CONFIRMED_SEGMENTS) break
       if (totalChars + segment.text.length > MAX_CONFIRMED_TOTAL_LENGTH) break
       totalSegments += 1
@@ -212,11 +223,59 @@ export function selectConfirmedMaterials(
     result.push({
       materialId: material.materialId,
       name: material.name,
-      type: material.type,
-      version: material.version,
+      type: material.type as ConfirmedMaterial['type'],
+      version: material.materialVersion,
       segments: materialSegments,
     })
   }
 
   return result
+}
+
+function isConfirmedMaterialType(type: string): boolean {
+  return (MATERIAL_TYPES as readonly string[]).includes(type)
+}
+
+/* ------------------------------------------------ 建议 / 聊天请求快照 */
+
+/** 契约 4.1：顶层 `tasks` 与阶段上下文一致，包含已完成任务，排除归档任务 */
+export function buildTaskSnapshots(tasks: CloudTask[], projectId: string): TaskSnapshot[] {
+  return tasks
+    .filter((task) => task.projectId === projectId && task.archivedAt === null)
+    .slice()
+    .sort((a, b) => a.orderIndex - b.orderIndex || a.createdAt.localeCompare(b.createdAt))
+    .slice(0, MAX_MILESTONE_CONTEXT_TASKS)
+    .map((task) => ({
+      taskId: task.taskId,
+      title: clampText(task.title, 60) ?? '',
+      status: task.status,
+      doneCriteria: clampText(task.doneCriteria, 200),
+      owner: null,
+      milestone: clampText(task.milestoneName, 60),
+      updatedAt: task.updatedAt,
+    }))
+}
+
+/** 契约 4.1：顶层 `evidence` 只发 active 记录，按 createdAt 倒序 */
+export function buildEvidenceSnapshots(evidence: CloudEvidence[], projectId: string): EvidenceSnapshot[] {
+  return evidence
+    .filter((item) => item.projectId === projectId && item.status === 'active')
+    .slice()
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    .slice(0, MAX_MILESTONE_CONTEXT_EVIDENCE)
+    .map((item) => ({
+      evidenceId: item.evidenceId,
+      submissionId: item.submissionId ?? '',
+      taskId: item.taskId,
+      didWhat: clampText(item.didWhat, 300) ?? '',
+      foundWhat: clampText(item.foundWhat, 500),
+      stillUnsure: clampText(item.stillUnsure, 500),
+      author: null,
+      createdAt: item.createdAt,
+    }))
+}
+
+/** 契约 23.2：`milestoneContext` 与顶层 `currentMilestone` 必须一致（两者都非空时） */
+export function milestoneContextTitle(context: MilestoneContext): string | null {
+  return context.currentMilestone
 }

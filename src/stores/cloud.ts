@@ -1,7 +1,7 @@
-/**
+﻿/**
  * V3 云端项目 store（契约 22 / 23）。
  *
- * 单一来源：`milestones` / `tasks` / `evidence` / `progress` 是领域状态的唯一副本；
+ * 单一来源：`milestones` / `tasks` / `evidence` / `progress` / `materials` 是领域状态的唯一副本；
  * `project` 是只读投影（项目元信息 + 当前阶段列表 + 聚合统计），不单独维护第二份。
  *
  * 所有写操作遵循：
@@ -10,55 +10,98 @@
  *   3. 响应回来时再次校验 epoch/projectId，项目切换后的过期响应一律丢弃；
  *   4. 同一操作的并发重复调用直接拒绝，不发送第二次请求。
  *
- * 契约缺口（不伪造）：
- *   - 任务列表按契约 22.3 读取（`refreshTasks`）；读取失败时保留现有任务且不置 `tasksHydrated`；
- *   - 没有读取 timeline 的端点，`loadTimeline()` 返回 TIMELINE_NOT_AVAILABLE；
- *   - 没有读取材料理解条目的端点，v3 AI 的已确认材料需由调用方显式传入。
+ * 契约现状（2026-10-22 核对 origin/main 后端，含 D13 `f83291d` / 契约 v3.10）：
+ *   - 任务列表（22.3）与材料/片段/理解草稿读取（22.8）已实现：`refreshTasks` / `refreshMaterials`；
+ *   - 进展更正（22.4 supersede）已实现：`supersedeProgress`；
+ *   - 时间线（22.11）没有路由：`loadTimeline()` 恒返回 TIMELINE_NOT_AVAILABLE；
+ *   - 建议/聊天已支持 v3（`mvp-prompt-v3` / `advisor-chat-v3` + `milestoneContext`），服务端按
+ *     projectId 做归属校验：云端项目**始终**发 v3，来源判定见 `supportsMilestoneContext()`；
+ *   - 聊天仍是无状态接口（`POST /api/advisor/chat`，不落库）：`sendChat` 只维持本次会话内存消息，
+ *     没有会话/消息读取端点，因此不做「云端历史会话」，也不把内存消息标成已持久化。
  */
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import {
+  archiveMaterial as archiveMaterialApi,
   attachEvidenceToTask as attachEvidenceToTaskApi,
   completeMilestone as completeMilestoneApi,
   createEvidence as createEvidenceApi,
   createMilestone as createMilestoneApi,
   createProject as createProjectApi,
   createTask as createTaskApi,
+  getMaterial,
   getProject,
   linkTaskToMilestone as linkTaskToMilestoneApi,
   listEvidence,
+  listMaterialSegments,
+  listMaterials,
+  listMaterialUnderstanding,
   listMilestones,
   listProgress,
   listTasks,
   milestoneAction as milestoneActionApi,
   projectAction as projectActionApi,
   reorderMilestones as reorderMilestonesApi,
+  reparseMaterial as reparseMaterialApi,
+  restoreMaterial as restoreMaterialApi,
   submitProgress as submitProgressApi,
+  uploadMaterial as uploadMaterialApi,
+  supersedeProgress as supersedeProgressApi,
   taskAction as taskActionApi,
   updateMilestone as updateMilestoneApi,
   updateProject as updateProjectApi,
   updateTask as updateTaskApi,
+  type MaterialPageQuery,
   type MilestoneAction,
   type ProjectAction,
   type ProjectApiOptions,
   type TaskAction,
 } from '@/services/projectsApi'
 import {
+  buildAdvisorChatRequest,
+  buildAdvisorRequest,
+  fetchAdvisorChat,
+  fetchRecommendations,
+  toRecommendations,
+} from '@/services/advisorApi'
+import {
   makeV3Error,
+  newRequestId,
   validationError,
   v3Failure,
   type V3ApiError,
 } from '@/services/v3Http'
-import type { ActionResult } from '@/domain/recommendation'
-import type { MilestoneContext } from '@/domain/recommendation'
-import { buildMilestoneContext } from '@/domain/v3Advisor'
 import type {
+  ActionResult,
+  AdvisorFallbackReason,
+  AdvisorOutcome,
+  ConfirmedMaterial,
+  MilestoneContext,
+  Recommendation,
+  RecommendationSource,
+} from '@/domain/recommendation'
+import { MAX_ADVISOR_CHAT_QUESTION_LENGTH, supportsMilestoneContext } from '@/domain/recommendation'
+import {
+  buildEvidenceSnapshots,
+  buildMilestoneContext,
+  buildTaskSnapshots,
+  milestoneContextTitle,
+  selectConfirmedMaterials,
+} from '@/domain/v3Advisor'
+import { MATERIAL_TYPES } from '@/domain/materials'
+import type {
+  CloudAiStatus,
+  CloudChatMessage,
   CloudDoubt,
   CloudEvidence,
+  CloudMaterial,
+  CloudMaterialSegment,
+  CloudMaterialUploadState,
   CloudMilestone,
   CloudProject,
   CloudProjectSyncState,
   CloudTask,
+  CloudUnderstandingItem,
   MilestoneTaskStats,
   ProgressRecord,
   ProjectProfile,
@@ -206,6 +249,77 @@ export interface CreateEvidenceActionResult {
   task: CloudTask | null
 }
 
+/* ------------------------------------------------------------ 材料读取 */
+
+export interface MaterialReadActionInput {
+  /** 传入时必须等于当前项目；用于 UI 防止串项目 */
+  projectId?: string
+  /** 不传读当前版本；读历史版本时服务端返回 readOnly=true */
+  version?: number
+  includeArchived?: boolean
+}
+
+export interface RefreshMaterialsActionInput {
+  projectId?: string
+  includeArchived?: boolean
+  limit?: number
+}
+
+export interface UploadMaterialActionInput {
+  projectId?: string
+  /** 文件名，扩展名必须是 md/txt（服务端白名单） */
+  name: string
+  /** 标准 base64（不带 data URL 前缀） */
+  contentBase64: string
+}
+
+export interface SupersedeProgressActionInput {
+  projectId?: string
+  /** 被更正的进展 */
+  progressId: string
+  /** 被更正进展的当前 revision */
+  expectedRevision: number
+  summary?: string
+  taskId?: string | null
+  milestoneId?: string | null
+  evidenceIds?: string[]
+  occurredAt?: string
+}
+
+/* ------------------------------------------------------------- AI 状态 */
+
+export interface CloudAdvisorState {
+  status: CloudAiStatus
+  suggestions: Recommendation[]
+  source: RecommendationSource | null
+  cached: boolean
+  fallbackReason: AdvisorFallbackReason | null
+  requestId: string | null
+  error: { code: string; message: string } | null
+  /** 本次请求是否真的带上了 milestoneContext（false = 后端能力不足，降级为 v2） */
+  contextAttached: boolean
+  generatedAt: string | null
+}
+
+export interface CloudChatState {
+  status: CloudAiStatus
+  messages: CloudChatMessage[]
+  error: { code: string; message: string } | null
+  /** 在途或最近一次失败的问题；失败后 UI 可原样重试，不用重新输入 */
+  pendingQuestion: string | null
+  contextAttached: boolean
+}
+
+export interface RefreshAdvisorActionInput {
+  projectId?: string
+  forceRefresh?: boolean
+}
+
+export interface SendChatActionInput {
+  projectId?: string
+  question: string
+}
+
 export interface ProjectStats {
   total: number
   done: number
@@ -216,6 +330,39 @@ export interface ProjectStats {
 
 function failure<T = never>(error: V3ApiError): ActionResult<T> {
   return v3Failure(error)
+}
+
+function emptyAdvisorState(): CloudAdvisorState {
+  return {
+    status: 'idle',
+    suggestions: [],
+    source: null,
+    cached: false,
+    fallbackReason: null,
+    requestId: null,
+    error: null,
+    contextAttached: false,
+    generatedAt: null,
+  }
+}
+
+function emptyChatState(): CloudChatState {
+  return {
+    status: 'idle',
+    messages: [],
+    error: null,
+    pendingQuestion: null,
+    contextAttached: false,
+  }
+}
+
+/** 片段与理解条目按「材料 + 版本」缓存，换版本不会串用旧条目 */
+function materialKey(materialId: string, version: number): string {
+  return `${materialId}@${version}`
+}
+
+function chatMessageId(): string {
+  return `chat_${newRequestId()}`
 }
 
 function codepointLength(value: string): number {
@@ -246,9 +393,37 @@ export const useCloudStore = defineStore('cloud', () => {
   /** 已成功读取过的任务只可能来自本次会话；刷新后为空 */
   const tasksHydrated = ref(false)
 
+  /* -------- 材料（契约 22.8）：列表 + 按 materialId@version 缓存的片段/理解条目 -------- */
+  const materials = ref<CloudMaterial[]>([])
+  const materialsStatus = ref<'idle' | 'loading' | 'ready' | 'error'>('idle')
+  const materialsError = ref<{ code: string; message: string } | null>(null)
+  /** 是否成功读过材料列表；false 时页面不能说「没有材料」 */
+  const materialsHydrated = ref(false)
+  const materialSegments = ref<Record<string, CloudMaterialSegment[]>>({})
+  const materialUnderstanding = ref<Record<string, CloudUnderstandingItem[]>>({})
+  const materialReadLoading = ref<Record<string, boolean>>({})
+  const materialReadError = ref<{ key: string; code: string; message: string } | null>(null)
+  /** 材料上传（契约 22.9）：提交生命周期与列表读取分开，失败可重试 */
+  const materialUpload = ref<CloudMaterialUploadState>({
+    status: 'idle',
+    error: null,
+    lastUpload: null,
+  })
+
+  /* -------- AI（契约 23）：建议与聊天都是单项目状态，切项目即清空 -------- */
+  const advisor = ref<CloudAdvisorState>(emptyAdvisorState())
+  const chat = ref<CloudChatState>(emptyChatState())
+
   let epoch = 0
   let activeProjectId: string | null = null
   let abortController = new AbortController()
+  let advisorAbort: AbortController | null = null
+  let chatAbort: AbortController | null = null
+  let advisorToken = 0
+  let chatToken = 0
+  /** 在途标记：必须在第一个 await 之前置位，否则并发点击会重复发请求 */
+  let advisorInFlight = false
+  let chatInFlight = false
   /** 会话内保留 ID→项目 的归属索引，用于识别跨项目实体 */
   const entityOwners = new Map<string, string>()
 
@@ -309,11 +484,12 @@ export const useCloudStore = defineStore('cloud', () => {
   })
 
   const contractBlockers = computed(() => [
-    '缺少读取任务列表的契约端点：刷新或重新进入项目后，任务列表无法恢复（阶段统计仍可读）',
     '契约 22.11 的时间线端点在当前已合并后端中未实现：timeline 暂不可用',
     '契约 23.7 的阶段候选接口（POST .../milestones/candidates）在已合并后端没有路由：未实现客户端调用',
-    '契约 22.4 只说明 supersede 的语义，没有请求字段表：未实现客户端调用',
-    '缺少读取材料理解条目的契约端点：v3 建议/聊天的 confirmedMaterials 需由调用方显式提供',
+    '契约 22.4 正文没有 supersede 的请求字段表：客户端按 server/src/v3/progress.ts 实现，需补文档',
+    '聊天没有会话/消息读写端点（只有无状态 POST /api/advisor/chat）：云端聊天历史只存在于本次会话内存，刷新即丢失',
+    '聊天响应的 citations 已按契约解析，但服务端 D15 之前恒返回空数组：回答里暂时不会出现材料引用',
+    'V3 没有疑问读取端点：建议/聊天的 doubts 只能发空数组，未解决疑问不进 AI 上下文',
   ])
 
   function isActionLoading(name: string): boolean {
@@ -346,6 +522,14 @@ export const useCloudStore = defineStore('cloud', () => {
   function reset(): void {
     abortController.abort()
     abortController = new AbortController()
+    advisorAbort?.abort()
+    advisorAbort = null
+    chatAbort?.abort()
+    chatAbort = null
+    advisorToken += 1
+    chatToken += 1
+    advisorInFlight = false
+    chatInFlight = false
     epoch += 1
     activeProjectId = null
     projectMeta.value = null
@@ -359,7 +543,23 @@ export const useCloudStore = defineStore('cloud', () => {
     lastError.value = null
     pendingActions.value = {}
     tasksHydrated.value = false
+    clearMaterialsState()
+    advisor.value = emptyAdvisorState()
+    chat.value = emptyChatState()
     entityOwners.clear()
+  }
+
+  /** 材料状态只在「当前项目」内有效：切项目、退出登录、重新打开项目都必须清空 */
+  function clearMaterialsState(): void {
+    materials.value = []
+    materialsStatus.value = 'idle'
+    materialsError.value = null
+    materialsHydrated.value = false
+    materialSegments.value = {}
+    materialUnderstanding.value = {}
+    materialReadLoading.value = {}
+    materialReadError.value = null
+    materialUpload.value = { status: 'idle', error: null, lastUpload: null }
   }
 
   function isStale(token: number, projectId: string): boolean {
@@ -530,6 +730,18 @@ export const useCloudStore = defineStore('cloud', () => {
     timeline.value = []
     currentMilestoneId.value = null
     tasksHydrated.value = false
+    clearMaterialsState()
+    // 上一个项目的建议/聊天必须丢弃：AI 上下文属于单个项目
+    advisorAbort?.abort()
+    advisorAbort = null
+    chatAbort?.abort()
+    chatAbort = null
+    advisorToken += 1
+    chatToken += 1
+    advisorInFlight = false
+    chatInFlight = false
+    advisor.value = emptyAdvisorState()
+    chat.value = emptyChatState()
 
     const requestOptions: ProjectApiOptions = {
       signal: options.signal ?? signal,
@@ -590,6 +802,8 @@ export const useCloudStore = defineStore('cloud', () => {
       for (const item of evidence.value) indexEntity(item.evidenceId, projectId)
       // 任务列表（契约 22.3）：读取失败不阻断打开项目，只保持未恢复状态
       await refreshTasks({ ...requestOptions, silent: true })
+      // 材料列表（契约 22.8）：同上，失败只体现在 materialsStatus/materialsError
+      await refreshMaterials({ ...requestOptions, silent: true })
       loadingProject.value = false
       clearFailure()
       return { ok: true, data: project.value! }
@@ -884,6 +1098,9 @@ export const useCloudStore = defineStore('cloud', () => {
         return failure(mapAbort(result.error))
       }
       applyMilestone(result.data.milestone)
+      // 契约 22.2：新建 active 阶段会把它设为当前阶段（服务端已写 current_milestone_id），
+      // 创建响应只回 data.milestone，所以本地按同一规则重算，避免 AI 上下文拿不到当前阶段
+      recomputeCurrentMilestoneId()
       applyRevision(result.projectRevision)
       clearFailure()
       return { ok: true, data: result.data.milestone }
@@ -1460,6 +1677,533 @@ export const useCloudStore = defineStore('cloud', () => {
     return { ok: true, data: tasks.value }
   }
 
+  /* ------------------------------------------------------------ 材料读取 */
+  /* 契约 22.8：列表只返回当前版本；片段与理解条目按「材料 + 版本」分页读取并缓存。 */
+
+  function findMaterial(materialId: string): CloudMaterial | null {
+    return materials.value.find((item) => item.materialId === materialId) ?? null
+  }
+
+  /** 已缓存的片段（同一 materialId + materialVersion），未读过返回 null 而不是空数组 */
+  function cachedSegments(materialId: string, version: number): CloudMaterialSegment[] | null {
+    return materialSegments.value[materialKey(materialId, version)] ?? null
+  }
+
+  function cachedUnderstanding(materialId: string, version: number): CloudUnderstandingItem[] | null {
+    return materialUnderstanding.value[materialKey(materialId, version)] ?? null
+  }
+
+  function isMaterialReadLoading(materialId: string, version: number): boolean {
+    return materialReadLoading.value[materialKey(materialId, version)] === true
+  }
+
+  function setMaterialReadLoading(key: string, value: boolean): void {
+    const next = { ...materialReadLoading.value }
+    if (value) next[key] = true
+    else delete next[key]
+    materialReadLoading.value = next
+  }
+
+  /**
+   * 读取材料列表（契约 22.8，分页拉全）。
+   *
+   * - 成功：整体替换列表并置 `materialsHydrated = true`；
+   * - 失败：保留现有列表，状态置 error（不把「没读到」说成「没有材料」）；
+   * - `silent` 用于 openProject 的自动加载，不覆盖项目级 lastError。
+   */
+  async function refreshMaterials(
+    options: RefreshMaterialsActionInput & CloudStoreOptions & { silent?: boolean } = {},
+  ): Promise<ActionResult<CloudMaterial[]>> {
+    const projectId = activeProjectId
+    if (projectId === null) return failure(makeV3Error('NOT_LOADED'))
+    if (options.projectId !== undefined && options.projectId !== projectId) {
+      return failure(makeV3Error('PROJECT_MISMATCH'))
+    }
+    const token = epoch
+    const limit = options.limit ?? 100
+    const collected = new Map<string, CloudMaterial>()
+    let cursor: string | undefined
+    let complete = false
+
+    materialsStatus.value = 'loading'
+    for (let page = 0; page < 100; page += 1) {
+      const result = await listMaterials(
+        projectId,
+        {
+          limit,
+          ...(options.includeArchived === true ? { includeArchived: true } : {}),
+          ...(cursor === undefined ? {} : { cursor }),
+        },
+        {
+          signal: options.signal ?? abortController.signal,
+          timeoutMs: options.timeoutMs,
+          fetchImpl: options.fetchImpl,
+        },
+      )
+      // 项目已切换/重置：状态归新的一次加载所有，这里不能改动 materialsStatus
+      if (isStale(token, projectId)) return failure(makeV3Error('STALE_RESPONSE'))
+      if (!result.ok) {
+        const error = mapAbort(result.error)
+        materialsStatus.value = 'error'
+        materialsError.value = { code: error.code, message: error.message }
+        if (options.silent !== true) setFailure(error)
+        return failure(error)
+      }
+      for (const material of result.data.materials) collected.set(material.materialId, material)
+      if (result.data.nextCursor === null) {
+        complete = true
+        break
+      }
+      cursor = result.data.nextCursor
+    }
+    if (!complete) {
+      const error = makeV3Error('INVALID_RESPONSE')
+      materialsStatus.value = 'error'
+      materialsError.value = { code: error.code, message: error.message }
+      if (options.silent !== true) setFailure(error)
+      return failure(error)
+    }
+
+    materials.value = [...collected.values()]
+    materialsHydrated.value = true
+    materialsStatus.value = 'ready'
+    materialsError.value = null
+    return { ok: true, data: materials.value }
+  }
+
+  /** 读取单份材料（契约 22.8），历史版本会返回 readOnly=true */
+  async function loadMaterialDetail(
+    materialId: string,
+    input: MaterialReadActionInput & CloudStoreOptions = {},
+  ): Promise<ActionResult<CloudMaterial>> {
+    const projectId = activeProjectId
+    if (projectId === null) return failure(makeV3Error('NOT_LOADED'))
+    if (input.projectId !== undefined && input.projectId !== projectId) {
+      return failure(makeV3Error('PROJECT_MISMATCH'))
+    }
+    const token = epoch
+    const result = await getMaterial(
+      projectId,
+      materialId,
+      {
+        version: input.version,
+        includeArchived: input.includeArchived === true,
+      },
+      {
+        signal: input.signal ?? abortController.signal,
+        timeoutMs: input.timeoutMs,
+        fetchImpl: input.fetchImpl,
+      },
+    )
+    if (isStale(token, projectId)) return failure(makeV3Error('STALE_RESPONSE'))
+    if (!result.ok) {
+      const error = mapAbort(result.error)
+      setFailure(error)
+      return failure(error)
+    }
+    if (result.data.material.isCurrent) {
+      const index = materials.value.findIndex((item) => item.materialId === materialId)
+      if (index >= 0) {
+        const next = [...materials.value]
+        next[index] = result.data.material
+        materials.value = next
+      }
+    }
+    return { ok: true, data: result.data.material }
+  }
+
+  async function loadMaterialSegments(
+    materialId: string,
+    input: MaterialReadActionInput & { limit?: number; forceRefresh?: boolean } & CloudStoreOptions = {},
+  ): Promise<ActionResult<CloudMaterialSegment[]>> {
+    const projectId = activeProjectId
+    if (projectId === null) return failure(makeV3Error('NOT_LOADED'))
+    if (input.projectId !== undefined && input.projectId !== projectId) {
+      return failure(makeV3Error('PROJECT_MISMATCH'))
+    }
+    const material = findMaterial(materialId)
+    const version = input.version ?? material?.materialVersion
+    if (version === undefined) return failure(makeV3Error('RESOURCE_NOT_FOUND'))
+    const key = materialKey(materialId, version)
+    const token = epoch
+    const limit = input.limit ?? 200
+    const collected: CloudMaterialSegment[] = []
+    let cursor: string | undefined
+    let complete = false
+
+    // 缓存命中直接返回（includeArchived=true 的语义不同，不读也不写这份缓存）
+    const cacheable = input.includeArchived !== true
+    const cached = cacheable ? cachedSegments(materialId, version) : null
+    if (cached !== null && input.forceRefresh !== true) return { ok: true, data: cached }
+
+    setMaterialReadLoading(key, true)
+    try {
+      for (let page = 0; page < 100; page += 1) {
+        const query: MaterialPageQuery = {
+          version,
+          includeArchived: input.includeArchived === true,
+          limit,
+          ...(cursor === undefined ? {} : { cursor }),
+        }
+        const result = await listMaterialSegments(projectId, materialId, query, {
+          signal: input.signal ?? abortController.signal,
+          timeoutMs: input.timeoutMs,
+          fetchImpl: input.fetchImpl,
+        })
+        if (isStale(token, projectId)) return failure(makeV3Error('STALE_RESPONSE'))
+        if (!result.ok) {
+          const error = mapAbort(result.error)
+          materialReadError.value = { key, code: error.code, message: error.message }
+          return failure(error)
+        }
+        collected.push(...result.data.segments)
+        if (result.data.nextCursor === null) {
+          complete = true
+          break
+        }
+        cursor = result.data.nextCursor
+      }
+      if (!complete) {
+        const error = makeV3Error('INVALID_RESPONSE')
+        materialReadError.value = { key, code: error.code, message: error.message }
+        return failure(error)
+      }
+      materialSegments.value = { ...materialSegments.value, [key]: collected }
+      materialReadError.value = null
+      return { ok: true, data: collected }
+    } finally {
+      setMaterialReadLoading(key, false)
+    }
+  }
+
+  async function loadMaterialUnderstanding(
+    materialId: string,
+    input: MaterialReadActionInput & { limit?: number; forceRefresh?: boolean } & CloudStoreOptions = {},
+  ): Promise<ActionResult<CloudUnderstandingItem[]>> {
+    const projectId = activeProjectId
+    if (projectId === null) return failure(makeV3Error('NOT_LOADED'))
+    if (input.projectId !== undefined && input.projectId !== projectId) {
+      return failure(makeV3Error('PROJECT_MISMATCH'))
+    }
+    const material = findMaterial(materialId)
+    const version = input.version ?? material?.materialVersion
+    if (version === undefined) return failure(makeV3Error('RESOURCE_NOT_FOUND'))
+    const key = materialKey(materialId, version)
+    const token = epoch
+    const limit = input.limit ?? 200
+    const collected: CloudUnderstandingItem[] = []
+    let cursor: string | undefined
+    let complete = false
+
+    const cacheable = input.includeArchived !== true
+    const cached = cacheable ? cachedUnderstanding(materialId, version) : null
+    if (cached !== null && input.forceRefresh !== true) return { ok: true, data: cached }
+
+    setMaterialReadLoading(key, true)
+    try {
+      for (let page = 0; page < 100; page += 1) {
+        const query: MaterialPageQuery = {
+          version,
+          includeArchived: input.includeArchived === true,
+          limit,
+          ...(cursor === undefined ? {} : { cursor }),
+        }
+        const result = await listMaterialUnderstanding(projectId, materialId, query, {
+          signal: input.signal ?? abortController.signal,
+          timeoutMs: input.timeoutMs,
+          fetchImpl: input.fetchImpl,
+        })
+        if (isStale(token, projectId)) return failure(makeV3Error('STALE_RESPONSE'))
+        if (!result.ok) {
+          const error = mapAbort(result.error)
+          materialReadError.value = { key, code: error.code, message: error.message }
+          return failure(error)
+        }
+        collected.push(...result.data.items)
+        if (result.data.nextCursor === null) {
+          complete = true
+          break
+        }
+        cursor = result.data.nextCursor
+      }
+      if (!complete) {
+        const error = makeV3Error('INVALID_RESPONSE')
+        materialReadError.value = { key, code: error.code, message: error.message }
+        return failure(error)
+      }
+      materialUnderstanding.value = { ...materialUnderstanding.value, [key]: collected }
+      materialReadError.value = null
+      return { ok: true, data: collected }
+    } finally {
+      setMaterialReadLoading(key, false)
+    }
+  }
+
+  /** 新上传的材料插到列表最前；已存在（去重命中/刷新）则原位替换 */
+  function upsertMaterial(material: CloudMaterial): void {
+    const index = materials.value.findIndex((item) => item.materialId === material.materialId)
+    if (index < 0) {
+      materials.value = [material, ...materials.value]
+      indexEntity(material.materialId, activeProjectId ?? '')
+      return
+    }
+    const next = [...materials.value]
+    next[index] = material
+    materials.value = next
+  }
+
+  function replaceMaterial(material: CloudMaterial): void {
+    const index = materials.value.findIndex((item) => item.materialId === material.materialId)
+    if (index < 0) return
+    const next = [...materials.value]
+    next[index] = material
+    materials.value = next
+  }
+
+  /**
+   * 上传一份材料（契约 22.9 `POST /api/projects/{id}/materials`）。
+   *
+   * 语义边界：
+   * - 成功 = 服务端已存下这份材料（`materials` 行 + 原文），**不代表**理解草稿已生成；
+   *   新材料的理解条目需要另行生成，`buildConfirmedMaterialsContext()` 在读到条目之前会返回
+   *   `MATERIALS_NOT_AVAILABLE`，不会拿空数组冒充「没有可引用材料」；
+   * - `parse_failed`（分段失败）同样是提交成功，状态从返回的 `material.status` 读；
+   * - `deduplicated=true` 表示同项目同 sha256 命中既有材料：不新建版本、`projectRevision` 不变。
+   */
+  async function uploadMaterial(
+    input: UploadMaterialActionInput,
+    options: CloudStoreOptions = {},
+  ): Promise<ActionResult<CloudMaterial>> {
+    const blocked = ensureWritable(input.projectId)
+    if (blocked !== null) return failure(blocked)
+    const projectId = activeProjectId!
+    const name = input.name.trim()
+    if (name === '') {
+      const error = validationError('INVALID_INPUT', '文件名不能为空')
+      materialUpload.value = { status: 'error', error: { code: error.code, message: error.message }, lastUpload: null }
+      return failure(error)
+    }
+    if (typeof input.contentBase64 !== 'string' || input.contentBase64.trim() === '') {
+      const error = validationError('EMPTY_MATERIAL', '请选择要上传的文件')
+      materialUpload.value = { status: 'error', error: { code: error.code, message: error.message }, lastUpload: null }
+      return failure(error)
+    }
+    if (!startAction('uploadMaterial')) return failure(makeV3Error('DUPLICATE_REQUEST'))
+    const token = epoch
+    materialUpload.value = { status: 'submitting', error: null, lastUpload: materialUpload.value.lastUpload }
+    try {
+      const result = await uploadMaterialApi(
+        projectId,
+        { name, contentBase64: input.contentBase64, projectRevision: projectRevision.value },
+        { signal: abortController.signal, timeoutMs: options.timeoutMs },
+      )
+      if (isStale(token, projectId)) return failure(makeV3Error('STALE_RESPONSE'))
+      if (!result.ok) {
+        const error = mapAbort(result.error)
+        materialUpload.value = {
+          status: 'error',
+          error: { code: error.code, message: error.message },
+          lastUpload: materialUpload.value.lastUpload,
+        }
+        setFailure(error)
+        return failure(error)
+      }
+
+      const { material, segments, segmentCount, deduplicated } = result.data
+      upsertMaterial(material)
+      // 列表还没完整读过：补一次全量刷新，避免页面把「只有这一份」当成全部
+      if (!materialsHydrated.value) await refreshMaterials({ silent: true })
+      // 服务端最多回前 20 条片段：只有「返回条数 == 真实总数」时才能整段写进版本缓存，
+      // 否则留给 loadMaterialSegments() 分页读取，绝不拿截断结果冒充完整片段。
+      if (segmentCount > 0 && segments.length === segmentCount) {
+        materialSegments.value = {
+          ...materialSegments.value,
+          [materialKey(material.materialId, material.materialVersion)]: segments,
+        }
+      }
+      applyRevision(result.projectRevision)
+      materialUpload.value = {
+        status: 'done',
+        error: null,
+        lastUpload: {
+          materialId: material.materialId,
+          materialVersion: material.materialVersion,
+          materialStatus: material.status,
+          deduplicated,
+          segmentCount,
+        },
+      }
+      clearFailure()
+      return { ok: true, data: material }
+    } finally {
+      finishAction('uploadMaterial')
+    }
+  }
+
+  /** POST .../materials/{materialId}/archive（契约 22.9） */
+  async function archiveMaterial(
+    materialId: string,
+    options: CloudStoreOptions & { projectId?: string } = {},
+  ): Promise<ActionResult<CloudMaterial>> {
+    const blocked = ensureWritable(options.projectId)
+    if (blocked !== null) return failure(blocked)
+    const material = findMaterial(materialId)
+    if (material === null) return failure(makeV3Error('RESOURCE_NOT_FOUND'))
+    if (material.status === 'archived') {
+      return failure(validationError('INVALID_STATE_TRANSITION', '这份材料已经归档'))
+    }
+    const projectId = activeProjectId!
+    const token = epoch
+    if (!startAction('archiveMaterial')) return failure(makeV3Error('DUPLICATE_REQUEST'))
+    try {
+      const result = await archiveMaterialApi(projectId, materialId, projectRevision.value, {
+        signal: abortController.signal,
+      })
+      if (isStale(token, projectId)) return failure(makeV3Error('STALE_RESPONSE'))
+      if (!result.ok) {
+        setFailure(mapAbort(result.error))
+        return failure(mapAbort(result.error))
+      }
+      // 本地保留这一行（status=archived、readOnly=true），页面能显示「已归档」；
+      // 不带 includeArchived 的 refreshMaterials() 之后会把它从列表里去掉。
+      replaceMaterial(result.data.material)
+      applyRevision(result.projectRevision)
+      clearFailure()
+      return { ok: true, data: result.data.material }
+    } finally {
+      finishAction('archiveMaterial')
+    }
+  }
+
+  /** POST .../materials/{materialId}/restore（契约 22.9） */
+  async function restoreMaterial(
+    materialId: string,
+    options: CloudStoreOptions & { projectId?: string } = {},
+  ): Promise<ActionResult<CloudMaterial>> {
+    const blocked = ensureWritable(options.projectId)
+    if (blocked !== null) return failure(blocked)
+    const material = findMaterial(materialId)
+    if (material === null) return failure(makeV3Error('RESOURCE_NOT_FOUND'))
+    if (material.status !== 'archived') {
+      return failure(validationError('INVALID_STATE_TRANSITION', '这份材料没有被归档'))
+    }
+    const projectId = activeProjectId!
+    const token = epoch
+    if (!startAction('restoreMaterial')) return failure(makeV3Error('DUPLICATE_REQUEST'))
+    try {
+      const result = await restoreMaterialApi(projectId, materialId, projectRevision.value, {
+        signal: abortController.signal,
+      })
+      if (isStale(token, projectId)) return failure(makeV3Error('STALE_RESPONSE'))
+      if (!result.ok) {
+        setFailure(mapAbort(result.error))
+        return failure(mapAbort(result.error))
+      }
+      replaceMaterial(result.data.material)
+      applyRevision(result.projectRevision)
+      clearFailure()
+      return { ok: true, data: result.data.material }
+    } finally {
+      finishAction('restoreMaterial')
+    }
+  }
+
+  /**
+   * POST .../materials/{materialId}/reparse（契约 22.9）。
+   *
+   * 服务端会生成新的 materialVersion 并置为当前版本；新版本的片段直接来自响应，
+   * 但理解条目需要重新生成 → 新版本的条目缓存不存在，`buildConfirmedMaterialsContext()`
+   * 会返回 `MATERIALS_NOT_AVAILABLE` 直到条目被重新读取，不会沿用旧版本的已确认内容。
+   */
+  async function reparseMaterial(
+    materialId: string,
+    options: CloudStoreOptions & { projectId?: string } = {},
+  ): Promise<ActionResult<CloudMaterial>> {
+    const blocked = ensureWritable(options.projectId)
+    if (blocked !== null) return failure(blocked)
+    const material = findMaterial(materialId)
+    if (material === null) return failure(makeV3Error('RESOURCE_NOT_FOUND'))
+    if (material.status === 'archived') {
+      return failure(validationError('INVALID_STATE_TRANSITION', '归档材料不能重新解析'))
+    }
+    const projectId = activeProjectId!
+    const token = epoch
+    if (!startAction('reparseMaterial')) return failure(makeV3Error('DUPLICATE_REQUEST'))
+    try {
+      const result = await reparseMaterialApi(projectId, materialId, projectRevision.value, {
+        signal: abortController.signal,
+      })
+      if (isStale(token, projectId)) return failure(makeV3Error('STALE_RESPONSE'))
+      if (!result.ok) {
+        setFailure(mapAbort(result.error))
+        return failure(mapAbort(result.error))
+      }
+      replaceMaterial(result.data.material)
+      const key = materialKey(result.data.material.materialId, result.data.material.materialVersion)
+      materialSegments.value = { ...materialSegments.value, [key]: result.data.segments }
+      applyRevision(result.projectRevision)
+      clearFailure()
+      return { ok: true, data: result.data.material }
+    } finally {
+      finishAction('reparseMaterial')
+    }
+  }
+
+  /**
+   * 契约 23.3：组装 `confirmedMaterials`。
+   *
+   * 只用**已经读过**的理解条目与片段；有任何一份可入 AI 的材料还没读，就返回
+   * `MATERIALS_NOT_AVAILABLE`，绝不用空数组冒充「没有已确认材料」。
+   */
+  function buildConfirmedMaterialsContext(): ActionResult<ConfirmedMaterial[]> {
+    if (activeProjectId === null || projectMeta.value === null) {
+      return failure(makeV3Error('NOT_LOADED'))
+    }
+    if (!materialsHydrated.value) return failure(makeV3Error('MATERIALS_NOT_AVAILABLE'))
+
+    const items: CloudUnderstandingItem[] = []
+    const segments: CloudMaterialSegment[] = []
+    for (const material of materials.value) {
+      if (!material.isCurrent || material.status !== 'parsed') continue
+      if (!(MATERIAL_TYPES as readonly string[]).includes(material.type)) continue
+      const version = material.materialVersion
+      const cachedItems = cachedUnderstanding(material.materialId, version)
+      const cachedSegmentList = cachedSegments(material.materialId, version)
+      if (cachedItems === null || cachedSegmentList === null) {
+        return failure(makeV3Error('MATERIALS_NOT_AVAILABLE'))
+      }
+      items.push(...cachedItems)
+      segments.push(...cachedSegmentList)
+    }
+
+    return { ok: true, data: selectConfirmedMaterials(items, segments, materials.value) }
+  }
+
+  /** 确保所有可入 AI 的材料都读过片段与理解条目，再组装上下文 */
+  async function ensureConfirmedMaterialsContext(
+    options: CloudStoreOptions = {},
+  ): Promise<ActionResult<ConfirmedMaterial[]>> {
+    if (activeProjectId === null) return failure(makeV3Error('NOT_LOADED'))
+    if (!materialsHydrated.value) {
+      const loaded = await refreshMaterials({ ...options, silent: true })
+      if (!loaded.ok) return failure(makeV3Error('MATERIALS_NOT_AVAILABLE'))
+    }
+    for (const material of materials.value) {
+      if (!material.isCurrent || material.status !== 'parsed') continue
+      if (!(MATERIAL_TYPES as readonly string[]).includes(material.type)) continue
+      const version = material.materialVersion
+      if (cachedUnderstanding(material.materialId, version) === null) {
+        const result = await loadMaterialUnderstanding(material.materialId, { ...options, version })
+        if (!result.ok) return failure(makeV3Error('MATERIALS_NOT_AVAILABLE'))
+      }
+      if (cachedSegments(material.materialId, version) === null) {
+        const result = await loadMaterialSegments(material.materialId, { ...options, version })
+        if (!result.ok) return failure(makeV3Error('MATERIALS_NOT_AVAILABLE'))
+      }
+    }
+    return buildConfirmedMaterialsContext()
+  }
+
   /* ---------------------------------------------------------------- 进展 */
 
   async function submitProgress(
@@ -1520,6 +2264,95 @@ export const useCloudStore = defineStore('cloud', () => {
       return { ok: true, data: result.data.progress }
     } finally {
       finishAction('submitProgress')
+    }
+  }
+
+  /**
+   * 契约 22.4：更正一条已提交的进展。
+   *
+   * 服务端行为：旧记录置 `superseded`（正文保留、revision+1），新建一条 `active` 记录，
+   * 响应只返回新记录 + `supersededProgressId`，**不返回旧记录**；因此本地对旧记录只做
+   * `status = 'superseded'`（+revision/updatedAt）的最小同步。
+   *
+   * 更正后 `progress` 里只剩一条 active，`buildMilestoneContext` 只取 active 记录，
+   * 顾问/聊天拿到的必然是更正后的正文。
+   */
+  async function supersedeProgress(
+    input: SupersedeProgressActionInput,
+  ): Promise<ActionResult<ProgressRecord>> {
+    const blocked = ensureWritable(input.projectId)
+    if (blocked !== null) return failure(blocked)
+    if (input.summary !== undefined) {
+      const summary = input.summary.trim()
+      if (summary === '' || codepointLength(summary) > 1000) {
+        return failure(validationError('INVALID_INPUT', '进展说明需为 1～1000 字'))
+      }
+    }
+    const previous = progress.value.find((item) => item.progressId === input.progressId)
+    if (previous === undefined) return failure(makeV3Error('RESOURCE_NOT_FOUND'))
+    if (previous.status !== 'active') {
+      return failure(validationError('INVALID_STATE_TRANSITION', '这条进展已被更正，不能重复更正'))
+    }
+    if (previous.revision !== input.expectedRevision) {
+      return failure(makeV3Error('STALE_REVISION', { currentEntityRevision: previous.revision }))
+    }
+    const milestoneError = validateTaskMilestone(input.milestoneId ?? null)
+    if (milestoneError !== null) return failure(milestoneError)
+    if (input.taskId !== undefined && input.taskId !== null) {
+      const taskOwner = checkEntityOwner(input.taskId)
+      if (taskOwner !== null) return failure(taskOwner)
+      if (findTask(input.taskId) === null) return failure(makeV3Error('TASKS_NOT_AVAILABLE'))
+    }
+    for (const evidenceId of input.evidenceIds ?? []) {
+      const owner = checkEntityOwner(evidenceId)
+      if (owner !== null) return failure(owner)
+      if (findEvidence(evidenceId) === null) return failure(makeV3Error('EVIDENCE_NOT_FOUND'))
+    }
+
+    const projectId = activeProjectId!
+    const token = epoch
+    if (!startAction('supersedeProgress')) return failure(makeV3Error('DUPLICATE_REQUEST'))
+    try {
+      const result = await supersedeProgressApi(
+        {
+          projectId,
+          projectRevision: projectRevision.value,
+          progressId: input.progressId,
+          expectedRevision: input.expectedRevision,
+          ...(input.summary === undefined ? {} : { summary: input.summary.trim() }),
+          ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
+          ...(input.milestoneId === undefined ? {} : { milestoneId: input.milestoneId }),
+          ...(input.evidenceIds === undefined ? {} : { evidenceIds: input.evidenceIds }),
+          ...(input.occurredAt === undefined ? {} : { occurredAt: input.occurredAt }),
+        },
+        { signal: abortController.signal },
+      )
+      if (isStale(token, projectId)) return failure(makeV3Error('STALE_RESPONSE'))
+      if (!result.ok) {
+        setFailure(mapAbort(result.error))
+        return failure(mapAbort(result.error))
+      }
+
+      // 旧记录：服务端已把它置 superseded；本地只更新状态与版本，保留正文
+      const superseded = progress.value.find((item) => item.progressId === result.data.supersededProgressId)
+      if (superseded !== undefined) {
+        applyProgress({
+          ...superseded,
+          status: 'superseded',
+          revision: superseded.revision + 1,
+          updatedAt: result.data.progress.createdAt,
+        })
+      }
+      applyProgress(result.data.progress)
+      applyMilestoneStats(
+        result.data.progress.milestoneId ?? input.milestoneId ?? null,
+        result.data.milestoneStats,
+      )
+      applyRevision(result.projectRevision)
+      clearFailure()
+      return { ok: true, data: result.data.progress }
+    } finally {
+      finishAction('supersedeProgress')
     }
   }
 
@@ -1682,10 +2515,359 @@ export const useCloudStore = defineStore('cloud', () => {
     }
   }
 
+  /* ------------------------------------------------------- AI：建议 / 聊天 */
+
+  /**
+   * 组装建议/聊天共用的请求输入。
+   *
+   * - 本 store 只服务**云端项目**，因此按 `supportsMilestoneContext('cloud')` 固定发 v3：
+   *   `milestoneContext` 一定是 `buildAdvisorContext()` 的真实产物（空白项目是全 null 的空上下文，
+   *   契约 23.2 规则 2 允许）；本地工作台走 `workbench` store，不经过这里，仍然发 v2；
+   * - `confirmedMaterials`：只用已确认条目，且必须先读过；读不到就整次请求拒绝，
+   *   不用空数组冒充「没有已确认材料」；
+   * - `doubts`：V3 没有疑问读取端点（接口清单 ⬜），只能发空数组，这一项是已知的信息缺口。
+   */
+  async function buildAiRequestBase(
+    options: CloudStoreOptions,
+  ): Promise<
+    | {
+        ok: true
+        attach: boolean
+        context: MilestoneContext
+        confirmedMaterials: ConfirmedMaterial[]
+        tasks: ReturnType<typeof buildTaskSnapshots>
+        evidence: ReturnType<typeof buildEvidenceSnapshots>
+        projectId: string
+        projectRevision: number
+        projectName: string
+        currentMilestone: string | null
+      }
+    | { ok: false; error: V3ApiError }
+  > {
+    const projectId = activeProjectId
+    const meta = projectMeta.value
+    if (projectId === null || meta === null) return { ok: false, error: makeV3Error('NOT_LOADED') }
+    if (!tasksHydrated.value) return { ok: false, error: makeV3Error('TASKS_NOT_AVAILABLE') }
+
+    const context = buildAdvisorContext()
+    if (!context.ok) return { ok: false, error: makeV3Error(context.code) }
+
+    const confirmed = await ensureConfirmedMaterialsContext(options)
+    if (!confirmed.ok) return { ok: false, error: makeV3Error(confirmed.code) }
+
+    const attach = supportsMilestoneContext('cloud')
+    return {
+      ok: true,
+      attach,
+      context: context.data,
+      confirmedMaterials: confirmed.data,
+      tasks: buildTaskSnapshots(tasks.value, projectId),
+      evidence: buildEvidenceSnapshots(evidence.value, projectId),
+      projectId,
+      projectRevision: projectRevision.value,
+      projectName: meta.name,
+      // 契约 23.2 规则 5：两者都非空时必须一致；发送阶段上下文时以上下文为准
+      // （当前阶段已完成/归档时上下文全 null，这里也随之变成 null，不会出现「半空」组合）
+      currentMilestone: attach ? milestoneContextTitle(context.data) : meta.currentMilestone,
+    }
+  }
+
+  /** 契约 23.5：刷新云端项目的顾问建议 */
+  async function refreshAdvisor(
+    options: RefreshAdvisorActionInput & CloudStoreOptions = {},
+  ): Promise<ActionResult<AdvisorOutcome>> {
+    const projectId = activeProjectId
+    if (projectId === null || projectMeta.value === null) return failure(makeV3Error('NOT_LOADED'))
+    if (options.projectId !== undefined && options.projectId !== projectId) {
+      return failure(makeV3Error('PROJECT_MISMATCH'))
+    }
+    // 抢占标记必须在第一个 await 之前：并发的第二次点击不能等到上下文组装完才被拒
+    if (advisorInFlight || advisor.value.status === 'loading') {
+      return failure(makeV3Error('DUPLICATE_REQUEST'))
+    }
+    const entryEpoch = epoch
+    advisorInFlight = true
+    try {
+      const base = await buildAiRequestBase(options)
+      // 组装上下文期间切换了项目/退出登录：这份请求已不属于当前项目
+      if (isStale(entryEpoch, projectId)) return failure(makeV3Error('STALE_RESPONSE'))
+      if (!base.ok) {
+        advisor.value = {
+          ...advisor.value,
+          status: 'error',
+          error: { code: base.error.code, message: base.error.message },
+          contextAttached: false,
+        }
+        return failure(base.error)
+      }
+      return await requestAdvisor(base, options)
+    } finally {
+      advisorInFlight = false
+    }
+  }
+
+  /** 真正发请求的部分（与上下文组装分开，便于保证并发标记的清理） */
+  async function requestAdvisor(
+    base: Extract<Awaited<ReturnType<typeof buildAiRequestBase>>, { ok: true }>,
+    options: RefreshAdvisorActionInput & CloudStoreOptions,
+  ): Promise<ActionResult<AdvisorOutcome>> {
+    const projectId = base.projectId
+    const meta = projectMeta.value
+    if (meta === null) return failure(makeV3Error('NOT_LOADED'))
+
+    const request = buildAdvisorRequest({
+      projectId: base.projectId,
+      projectRevision: base.projectRevision,
+      projectName: base.projectName,
+      currentMilestone: base.currentMilestone,
+      tasks: base.tasks,
+      evidence: base.evidence,
+      doubts: [],
+      projectProfile: meta.profile,
+      confirmedMaterials: base.confirmedMaterials,
+      milestoneContext: base.attach ? base.context : null,
+      forceRefresh: options.forceRefresh === true,
+    })
+
+    advisorAbort?.abort()
+    const controller = new AbortController()
+    advisorAbort = controller
+    advisorToken += 1
+    const token = advisorToken
+    const projectToken = epoch
+    advisor.value = {
+      ...emptyAdvisorState(),
+      status: 'loading',
+      requestId: request.requestId,
+      contextAttached: base.attach,
+    }
+
+    try {
+      const result = await fetchRecommendations(request, {
+        signal: options.signal ?? controller.signal,
+        timeoutMs: options.timeoutMs,
+        fetchImpl: options.fetchImpl,
+      })
+      // 过期判断：新请求接管 / 项目切换 / 退出登录，任何一个成立都丢弃
+      if (token !== advisorToken || isStale(projectToken, projectId)) {
+        return failure(makeV3Error('STALE_RESPONSE'))
+      }
+      if (!result.ok) {
+        const error = result.error
+        if (error.code === 'STALE_RESPONSE') {
+          return failure(makeV3Error('STALE_RESPONSE'))
+        }
+        advisor.value = {
+          ...emptyAdvisorState(),
+          status: 'error',
+          error: { code: error.code, message: error.message },
+          contextAttached: base.attach,
+        }
+        return { ok: false, code: error.code, message: error.message }
+      }
+
+      const suggestions = toRecommendations(result.data)
+      advisor.value = {
+        status: 'ready',
+        suggestions,
+        source: result.data.source,
+        cached: result.data.cached,
+        fallbackReason: result.data.fallbackReason,
+        requestId: result.data.requestId,
+        error: null,
+        contextAttached: base.attach,
+        generatedAt: new Date().toISOString(),
+      }
+      clearFailure()
+      return {
+        ok: true,
+        data: {
+          source: result.data.source,
+          suggestions,
+          cached: result.data.cached,
+          fallbackReason: result.data.fallbackReason,
+          requestId: result.data.requestId,
+        },
+      }
+    } finally {
+      if (advisorAbort === controller) advisorAbort = null
+    }
+  }
+
+  /**
+   * 契约 6.4 / 23.7：向顾问提问一次。
+   *
+   * 后端只有无状态聊天接口：历史由客户端每次回传（`chatHistory`），消息只存在本次会话内存里。
+   * 因此：
+   * - 没有「会话列表 / 历史消息」读取端点，刷新或换设备后聊天不可恢复（阻塞项，不伪造）；
+   * - 用户消息只在请求成功后与回答一起入列，失败时用 `pendingQuestion` 保留原文供重试，避免重复入列；
+   * - 同一时刻只允许一个在途提问，重复点击返回 `DUPLICATE_REQUEST`。
+   */
+  async function sendChat(
+    input: SendChatActionInput & CloudStoreOptions,
+  ): Promise<ActionResult<CloudChatMessage>> {
+    const projectId = activeProjectId
+    if (projectId === null || projectMeta.value === null) return failure(makeV3Error('NOT_LOADED'))
+    if (input.projectId !== undefined && input.projectId !== projectId) {
+      return failure(makeV3Error('PROJECT_MISMATCH'))
+    }
+    const question = input.question.trim()
+    if (question === '') return failure(validationError('INVALID_INPUT', '请先写下要问的问题'))
+    if (codepointLength(question) > MAX_ADVISOR_CHAT_QUESTION_LENGTH) {
+      return failure(
+        validationError('INVALID_INPUT', `问题不能超过 ${MAX_ADVISOR_CHAT_QUESTION_LENGTH} 字，请精简后再问`),
+      )
+    }
+    // 同 refreshAdvisor：并发标记必须在 await 之前，否则连点会发出两次请求
+    if (chatInFlight || chat.value.status === 'loading') return failure(makeV3Error('DUPLICATE_REQUEST'))
+    const entryEpoch = epoch
+    chatInFlight = true
+    try {
+      const base = await buildAiRequestBase(input)
+      if (isStale(entryEpoch, projectId)) return failure(makeV3Error('STALE_RESPONSE'))
+      if (!base.ok) {
+        chat.value = {
+          ...chat.value,
+          status: 'error',
+          error: { code: base.error.code, message: base.error.message },
+          pendingQuestion: question,
+          contextAttached: false,
+        }
+        return failure(base.error)
+      }
+      return await requestChat(base, question, input)
+    } finally {
+      chatInFlight = false
+    }
+  }
+
+  /** 真正发聊天请求的部分；历史在发出瞬间快照，成功后与回答一起入列 */
+  async function requestChat(
+    base: Extract<Awaited<ReturnType<typeof buildAiRequestBase>>, { ok: true }>,
+    question: string,
+    input: SendChatActionInput & CloudStoreOptions,
+  ): Promise<ActionResult<CloudChatMessage>> {
+    const projectId = base.projectId
+    const meta = projectMeta.value
+    if (meta === null) return failure(makeV3Error('NOT_LOADED'))
+    const request = buildAdvisorChatRequest({
+      projectId: base.projectId,
+      projectRevision: base.projectRevision,
+      projectName: base.projectName,
+      currentMilestone: base.currentMilestone,
+      tasks: base.tasks,
+      evidence: base.evidence,
+      doubts: [],
+      question,
+      chatHistory: chat.value.messages.map((message) => ({ role: message.role, text: message.text })),
+      projectProfile: meta.profile,
+      confirmedMaterials: base.confirmedMaterials,
+      milestoneContext: base.attach ? base.context : null,
+    })
+
+    chatAbort?.abort()
+    const controller = new AbortController()
+    chatAbort = controller
+    chatToken += 1
+    const token = chatToken
+    const projectToken = epoch
+    chat.value = {
+      ...chat.value,
+      status: 'loading',
+      error: null,
+      pendingQuestion: question,
+      contextAttached: base.attach,
+    }
+
+    try {
+      const result = await fetchAdvisorChat(request, {
+        signal: input.signal ?? controller.signal,
+        timeoutMs: input.timeoutMs,
+        fetchImpl: input.fetchImpl,
+      })
+      if (token !== chatToken || isStale(projectToken, projectId)) {
+        return failure(makeV3Error('STALE_RESPONSE'))
+      }
+      if (!result.ok) {
+        const error = result.error
+        if (error.code === 'STALE_RESPONSE') {
+          return failure(makeV3Error('STALE_RESPONSE'))
+        }
+        chat.value = {
+          ...chat.value,
+          status: 'error',
+          error: { code: error.code, message: error.message },
+          pendingQuestion: question,
+        }
+        return { ok: false, code: error.code, message: error.message }
+      }
+
+      const createdAt = new Date().toISOString()
+      const userMessage: CloudChatMessage = {
+        clientId: chatMessageId(),
+        role: 'user',
+        text: question,
+        source: 'model',
+        fallbackReason: null,
+        citations: [],
+        createdAt,
+      }
+      const assistantMessage: CloudChatMessage = {
+        clientId: chatMessageId(),
+        role: 'assistant',
+        text: result.data.answer,
+        source: result.data.source,
+        fallbackReason: result.data.fallbackReason,
+        citations: (result.data.citations ?? []).map((citation) => ({
+          materialId: citation.materialId,
+          materialName: citation.materialName,
+          materialVersion: citation.materialVersion,
+          segmentId: citation.segmentId,
+          startLine: citation.startLine,
+          endLine: citation.endLine,
+          itemId: citation.itemId,
+        })),
+        createdAt: new Date().toISOString(),
+      }
+      chat.value = {
+        ...chat.value,
+        status: 'ready',
+        messages: [...chat.value.messages, userMessage, assistantMessage],
+        error: null,
+        pendingQuestion: null,
+      }
+      clearFailure()
+      return { ok: true, data: assistantMessage }
+    } finally {
+      if (chatAbort === controller) chatAbort = null
+    }
+  }
+
+  /** 重发上一次失败的问题；问题文本不会被清掉，用户也不用重新输入 */
+  function retryChat(options: CloudStoreOptions = {}): Promise<ActionResult<CloudChatMessage>> {
+    const question = chat.value.pendingQuestion
+    if (question === null) return Promise.resolve(failure(makeV3Error('INVALID_INPUT')))
+    return sendChat({ ...options, question })
+  }
+
+  /** 只清空本次会话的聊天（后端不落库，没有云端历史可以删） */
+  function clearChat(): void {
+    chatAbort?.abort()
+    chatAbort = null
+    chatToken += 1
+    chatInFlight = false
+    chat.value = emptyChatState()
+  }
+
   /**
    * 契约 23.2：构造当前阶段的 AI 上下文。
-   * 任务列表读取端点缺失时，只有“服务端统计为 0 个任务”或“本次会话已知任务数 == 统计数”才认为完整；
-   * 否则返回 TASKS_NOT_AVAILABLE，绝不拿部分任务冒充“该阶段全部任务”。
+   *
+   * 职责分工（避免两处重复组装）：
+   * - 本函数只负责「从 store 取当前状态 + 校验完整性」，然后交给 domain；
+   * - 字段裁剪、排序、上限、空上下文形状全部由 `buildMilestoneContext()`（domain/v3Advisor）决定。
+   *
+   * 完整性：只有「服务端统计为 0 个任务」或「本次会话已知任务数 == 统计数」才认为任务齐了；
+   * 否则返回 TASKS_NOT_AVAILABLE，绝不拿部分任务冒充「该阶段全部任务」。
    */
   function buildAdvisorContext(): ActionResult<MilestoneContext> {
     if (projectMeta.value === null || activeProjectId === null) {
@@ -1747,6 +2929,23 @@ export const useCloudStore = defineStore('cloud', () => {
     contractBlockers,
     isActionLoading,
 
+    /* 材料（契约 22.8） */
+    materials,
+    materialsStatus,
+    materialsError,
+    materialsHydrated,
+    materialSegments,
+    materialUnderstanding,
+    materialReadError,
+    isMaterialReadLoading,
+    findMaterial,
+    cachedSegments,
+    cachedUnderstanding,
+
+    /* AI（契约 23.1 / 6.4） */
+    advisor,
+    chat,
+
     /* 生命周期 */
     openProject,
     reset,
@@ -1754,6 +2953,16 @@ export const useCloudStore = defineStore('cloud', () => {
     refreshProgress,
     refreshMilestones,
     refreshTasks,
+    refreshMaterials,
+    uploadMaterial,
+    materialUpload,
+    loadMaterialDetail,
+    loadMaterialSegments,
+    loadMaterialUnderstanding,
+    buildConfirmedMaterialsContext,
+    archiveMaterial,
+    restoreMaterial,
+    reparseMaterial,
     loadTimeline,
     createProject,
 
@@ -1786,10 +2995,15 @@ export const useCloudStore = defineStore('cloud', () => {
 
     /* 进展 / 证据写动作（契约 22.4 / 22.5） */
     submitProgress,
+    supersedeProgress,
     createEvidence,
     attachEvidenceToTask,
 
-    /* AI 阶段上下文（契约 23.2；任务不完整时显式拒绝） */
+    /* AI（契约 23.2 / 23.5 / 6.4） */
     buildAdvisorContext,
+    refreshAdvisor,
+    sendChat,
+    retryChat,
+    clearChat,
   }
 })

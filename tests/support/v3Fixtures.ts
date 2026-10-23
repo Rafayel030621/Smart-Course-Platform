@@ -1,10 +1,13 @@
 import { vi } from 'vitest'
 import type {
   CloudEvidence,
+  CloudMaterial,
+  CloudMaterialSegment,
   CloudMilestone,
   CloudProject,
   CloudProjectSummary,
   CloudTask,
+  CloudUnderstandingItem,
   ProgressRecord,
   V3User,
 } from '@/types/platform'
@@ -104,6 +107,70 @@ export function makeProgress(overrides: Partial<ProgressRecord> = {}): ProgressR
     revision: 1,
     createdAt: FIXED_ISO,
     updatedAt: FIXED_ISO,
+    ...overrides,
+  }
+}
+
+/* ------------------------------------------------ 材料（契约 22.8 DTO） */
+
+export function makeCloudMaterial(overrides: Partial<CloudMaterial> = {}): CloudMaterial {
+  return {
+    materialId: 'mat_1',
+    materialVersion: 1,
+    name: '实验手册.md',
+    type: 'md',
+    size: 2048,
+    encoding: 'utf-8',
+    status: 'parsed',
+    revision: 1,
+    sha256: null,
+    failureReason: null,
+    createdAt: FIXED_ISO,
+    updatedAt: FIXED_ISO,
+    archivedAt: null,
+    isCurrent: true,
+    readOnly: false,
+    ...overrides,
+  }
+}
+
+export function makeMaterialSegment(overrides: Partial<CloudMaterialSegment> = {}): CloudMaterialSegment {
+  return {
+    segmentId: 'seg_0',
+    materialId: 'mat_1',
+    materialVersion: 1,
+    index: 0,
+    startLine: 1,
+    endLine: 3,
+    text: '确认过的正文',
+    charCount: 6,
+    status: 'active',
+    createdAt: FIXED_ISO,
+    ...overrides,
+  }
+}
+
+export function makeUnderstandingItem(overrides: Partial<CloudUnderstandingItem> = {}): CloudUnderstandingItem {
+  return {
+    itemId: 'it_1',
+    kind: 'goalCandidates',
+    text: '目标',
+    originalText: null,
+    sources: [
+      {
+        materialId: 'mat_1',
+        materialName: '实验手册.md',
+        materialVersion: 1,
+        segmentId: 'seg_0',
+        startLine: 1,
+        endLine: 3,
+      },
+    ],
+    status: 'pending',
+    revision: 1,
+    confirmedAt: null,
+    confirmedByUserId: null,
+    removedAt: null,
     ...overrides,
   }
 }
@@ -216,6 +283,86 @@ export function readEnvelope(
   projectRevision: number | null,
 ): Record<string, unknown> {
   return { contractVersion: '3.0', projectId, projectRevision, data }
+}
+
+export interface CloudRouteFixture {
+  project: CloudProject
+  evidence?: CloudEvidence[]
+  progress?: ProgressRecord[]
+  tasks?: CloudTask[]
+  materials?: CloudMaterial[]
+  materialSegments?: Record<string, CloudMaterialSegment[]>
+  materialItems?: Record<string, CloudUnderstandingItem[]>
+}
+
+/** 云端项目读取路由：项目 / 证据 / 进展 / 任务 / 材料 + 按 materialId@version 的片段与条目 */
+export function cloudRoutes(
+  fixture: CloudRouteFixture,
+): (url: string, init: RequestInit) => Response | undefined {
+  const projectId = fixture.project.projectId
+  const revision = fixture.project.projectRevision
+  const base = `/api/projects/${projectId}`
+  return (url, init) => {
+    if ((init.method ?? 'GET') !== 'GET') return undefined
+    const path = url.split('?')[0] ?? url
+    if (path.endsWith(base)) {
+      return jsonResponse(readEnvelope({ project: fixture.project }, projectId, revision))
+    }
+    if (path.endsWith(`${base}/evidence`)) {
+      return jsonResponse(readEnvelope({ evidence: fixture.evidence ?? [], nextCursor: null }, projectId, revision))
+    }
+    if (path.endsWith(`${base}/progress`)) {
+      return jsonResponse(readEnvelope({ progress: fixture.progress ?? [], nextCursor: null }, projectId, revision))
+    }
+    if (path.endsWith(`${base}/tasks`)) {
+      return jsonResponse(readEnvelope({ tasks: fixture.tasks ?? [], nextCursor: null }, projectId, revision))
+    }
+    if (path.endsWith(`${base}/materials`)) {
+      return jsonResponse(readEnvelope({ materials: fixture.materials ?? [], nextCursor: null }, projectId, revision))
+    }
+    const detail = /\/materials\/([^/]+)(?:\/(segments|understanding))?$/.exec(path)
+    if (detail !== null && path.includes(base)) {
+      const materialId = decodeURIComponent(detail[1] as string)
+      const kind = detail[2]
+      const material = (fixture.materials ?? []).find((item) => item.materialId === materialId)
+      if (material === undefined) return undefined
+      const key = `${materialId}@${material.materialVersion}`
+      if (kind === undefined) {
+        return jsonResponse(readEnvelope({ material }, projectId, revision))
+      }
+      if (kind === 'segments') {
+        return jsonResponse(
+          readEnvelope(
+            {
+              materialId,
+              materialVersion: material.materialVersion,
+              isCurrent: material.isCurrent,
+              readOnly: material.readOnly,
+              segments: fixture.materialSegments?.[key] ?? [],
+              nextCursor: null,
+            },
+            projectId,
+            revision,
+          ),
+        )
+      }
+      return jsonResponse(
+        readEnvelope(
+          {
+            materialId,
+            materialVersion: material.materialVersion,
+            isCurrent: material.isCurrent,
+            readOnly: material.readOnly,
+            items: fixture.materialItems?.[key] ?? [],
+            nextCursor: null,
+          },
+          projectId,
+          revision,
+        ),
+      )
+    }
+    return undefined
+  }
 }
 
 /** 按请求体里的 requestId / projectId 回显包络，模拟真实后端 */
