@@ -2,6 +2,7 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import AiStatus from '@/components/AiStatus.vue'
+import CloudProjectWorkbench from '@/components/CloudProjectWorkbench.vue'
 import EvidenceForm from '@/components/EvidenceForm.vue'
 import MaterialUploader from '@/components/MaterialUploader.vue'
 import ProjectCreate from '@/components/ProjectCreate.vue'
@@ -17,6 +18,7 @@ import {
   type UnderstandingDraftView,
 } from '@/components/materialTypes'
 import { CHINESE_NUM, WEEK_LABELS, useWorkbenchStore } from '@/stores/workbench'
+import { usePlatformStore } from '@/stores/platform'
 import { deriveDoubtSnapshots, deriveEvidenceSnapshots, toDisplayTime } from '@/domain/activity'
 import { deriveTaskSnapshots, findClaimedTaskFor, taskStatusText } from '@/domain/progress'
 import {
@@ -48,6 +50,7 @@ import type { ChatMessage, Material, Milestone, SuggestedStep } from '@/types/pl
  */
 
 const store = useWorkbenchStore()
+const platform = usePlatformStore()
 const router = useRouter()
 
 const project = computed(() => store.current)
@@ -1081,6 +1084,9 @@ watch(
 </script>
 
 <template>
+  <CloudProjectWorkbench v-if="platform.isCloudSource" />
+
+  <template v-else>
   <!-- 空状态：创建项目 -->
   <ProjectCreate v-if="store.creating || !project" />
 
@@ -1578,6 +1584,7 @@ watch(
       </div>
     </section>
   </div>
+  </template>
 </template>
 
 <style scoped>

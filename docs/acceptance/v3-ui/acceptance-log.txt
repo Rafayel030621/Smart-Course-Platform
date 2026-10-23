@@ -1,0 +1,31 @@
+截图：01-login-desktop.png
+截图：02-register-desktop.png
+通过：注册后自动登录，右上角出现退出登录
+通过：页面出现「还没有里程碑」
+截图：03-empty-milestone-desktop.png
+通过：页面出现「阶段一：数据准备」
+通过：页面出现「整理实验数据」
+通过：页面出现「进行中」
+通过：页面出现「完成字段核对，缺失值已标记」
+通过：页面出现「整理了 12 个字段并标注缺失率」
+通过：页面出现「下一步做什么」
+通过：页面出现「不是 AI 建议」
+截图：04-workbench-progress-desktop.png
+通过：页面出现「云端材料列表还没有接入本页」
+截图：05-workbench-data-desktop.png
+截图：06-map-desktop.png
+通过：页面出现「阶段一：数据准备」
+通过：页面出现「整理实验数据」
+通过：刷新后项目、阶段和任务仍然存在
+390px 横向检查：scrollWidth=390, innerWidth=390, 越界元素=无
+截图：07-workbench-390.png
+截图：08-workbench-data-390.png
+键盘切换标签：ArrowRight 后 data 标签 aria-selected=true
+截图：09-tab-keyboard-390.png
+截图：10-logout-login-390.png
+通过：页面出现「用户名或密码不正确」
+截图：11-login-failed-390.png
+通过：页面出现「阶段一：数据准备」
+通过：退出后重新登录可以恢复云端项目
+截图：12-relogin-390.png
+控制台错误：Failed to load resource: the server responded with a status of 401 (Unauthorized) | Failed to load resource: the server responded with a status of 401 (Unauthorized)

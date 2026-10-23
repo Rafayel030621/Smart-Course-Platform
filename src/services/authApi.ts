@@ -13,6 +13,7 @@ import {
   makeV3Error,
   newRequestId,
   requestV3Raw,
+  stableIdempotencyKey,
   type V3ApiError,
   type V3Result,
 } from './v3Http'
@@ -27,6 +28,13 @@ export interface AuthApiOptions {
   signal?: AbortSignal
   timeoutMs?: number
   fetchImpl?: typeof fetch
+}
+
+export interface RegisterInput {
+  account: string
+  displayName: string
+  password: string
+  inviteCode: string
 }
 
 function parseUser(value: unknown): V3User | null {
@@ -116,6 +124,59 @@ export async function loginAccount(
       requestId,
       account,
       password,
+    },
+    signal: options.signal,
+    timeoutMs: options.timeoutMs,
+    fetchImpl: options.fetchImpl,
+  })
+  if (!raw.ok) return authFailure(raw.error)
+
+  const record = asRecord(raw.body)
+  if (record === null || record['requestId'] !== requestId) {
+    return {
+      ok: false,
+      error: makeV3Error('INVALID_RESPONSE', { status: raw.status, retryable: false }),
+    }
+  }
+  const session = parseAuthSession(record)
+  if (session === null) {
+    return {
+      ok: false,
+      error: makeV3Error('INVALID_RESPONSE', { status: raw.status, retryable: false }),
+    }
+  }
+
+  return {
+    ok: true,
+    data: session,
+    requestId,
+    projectId: null,
+    projectRevision: null,
+    replayed: record['replayed'] === true,
+    changed: null,
+  }
+}
+
+/** POST /api/auth/register（注册成功后服务端同时建立 Cookie 会话） */
+export async function registerAccount(
+  input: RegisterInput,
+  options: AuthApiOptions = {},
+): Promise<V3Result<AuthSession>> {
+  const requestId = newRequestId()
+  const idempotencyKey = stableIdempotencyKey('auth.register', {
+    account: input.account.trim().toLowerCase(),
+    displayName: input.displayName.trim(),
+  })
+  const raw = await requestV3Raw('/api/auth/register', {
+    method: 'POST',
+    body: {
+      contractVersion: '3.0',
+      requestId,
+      idempotencyKey,
+      account: input.account,
+      displayName: input.displayName,
+      password: input.password,
+      inviteCode: input.inviteCode,
     },
     signal: options.signal,
     timeoutMs: options.timeoutMs,

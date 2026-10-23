@@ -13,6 +13,7 @@ import {
   isUnauthorized,
   loginAccount,
   logoutAccount,
+  registerAccount,
   type AuthSession,
 } from '@/services/authApi'
 import { listProjects } from '@/services/projectsApi'
@@ -199,6 +200,29 @@ export const useSessionStore = defineStore('session', () => {
     return { ok: true, data: { ...auth.value } }
   }
 
+  async function register(
+    input: { account: string; displayName: string; password: string; inviteCode: string },
+    options: SessionApiOptions = {},
+  ): Promise<ActionResult<AuthSnapshot>> {
+    const token = epoch + 1
+    epoch = token
+    auth.value = { ...auth.value, status: 'loading' }
+
+    const result = await registerAccount(input, options)
+    if (token !== epoch) return failure(makeV3Error('STALE_RESPONSE'))
+    if (!result.ok) {
+      auth.value = { ...auth.value, status: 'unauthenticated' }
+      return failure(result.error)
+    }
+
+    applySession(result.data)
+    await loadProjects(options)
+    if (token !== epoch || activeUserId !== result.data.user.userId) {
+      return failure(makeV3Error('STALE_RESPONSE'))
+    }
+    return { ok: true, data: { ...auth.value } }
+  }
+
   /**
    * 退出：即使服务端失败，也清理内存会话；但绝不删除本地项目。
    * 网络失败照实返回，UI 可提示“已退出本机登录，但服务器会话可能仍有效”。
@@ -248,6 +272,7 @@ export const useSessionStore = defineStore('session', () => {
     restoreSession,
     loadProjects,
     login,
+    register,
     logout,
     noteUnauthorized,
     resetInMemory,

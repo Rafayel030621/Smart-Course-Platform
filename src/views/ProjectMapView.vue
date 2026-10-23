@@ -2,8 +2,10 @@
 import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import ProjectMindMap from '@/components/ProjectMindMap.vue'
+import CloudProjectMapView from '@/components/CloudProjectMapView.vue'
 import { milestoneStatusText, taskStatusText } from '@/domain/progress'
 import { useWorkbenchStore } from '@/stores/workbench'
+import { usePlatformStore } from '@/stores/platform'
 import type { Milestone, TaskStatus } from '@/types/platform'
 
 /**
@@ -16,6 +18,7 @@ import type { Milestone, TaskStatus } from '@/types/platform'
  * 所以切换项目后地图、里程碑、任务会一起更新。
  */
 const store = useWorkbenchStore()
+const platform = usePlatformStore()
 const router = useRouter()
 
 const project = computed(() => store.current)
@@ -58,6 +61,9 @@ function switchProject(event: Event) {
 </script>
 
 <template>
+  <CloudProjectMapView v-if="platform.isCloudSource" />
+
+  <template v-else>
   <div class="mode-banner">
     <b>项目地图</b>把当前项目的里程碑和任务状态摊在一张图上：左侧是阶段，右侧是正在推进的任务。
   </div>
@@ -160,6 +166,7 @@ function switchProject(event: Event) {
         </div>
       </div>
     </div>
+  </template>
   </template>
 </template>
 
