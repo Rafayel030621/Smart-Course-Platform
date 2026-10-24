@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import type { IncomingMessage } from 'node:http'
 import type { V3Database } from './db.js'
+import type { AdvisorProvider } from '../advisor/types.js'
 import { defaultDatabasePath, openV3Database } from './db.js'
 import { DEFAULT_ALLOWED_ORIGINS } from './http.js'
 import { createV3ConsoleLogger, silentV3Logger, type V3Logger } from './logger.js'
@@ -37,6 +38,8 @@ export interface V3RuntimeOptions {
   trustProxyHops?: number
   logger?: V3Logger
   now?: () => Date
+  /** 阶段候选使用的模型 provider；为空时候选走规则兜底 */
+  candidateProvider?: AdvisorProvider
 }
 
 export interface V3Runtime {
@@ -48,6 +51,7 @@ export interface V3Runtime {
   readonly authLimiter: AuthRateLimiter
   readonly logger: V3Logger
   readonly now: () => Date
+  readonly candidateProvider?: AdvisorProvider
   clientIp(req: IncomingMessage): string
   getDb(): V3Database
   close(): void
@@ -109,6 +113,7 @@ export function createV3Runtime(options: V3RuntimeOptions = {}): V3Runtime {
     authLimiter,
     logger,
     now,
+    candidateProvider: options.candidateProvider,
     clientIp(req: IncomingMessage) {
       return resolveClientIp(req, trustProxyHops)
     },

@@ -204,6 +204,8 @@ export type AdvisorSource = 'model' | 'fallback'
 export type AdvisorErrorCode =
   | 'INVALID_INPUT'
   | 'CONTRACT_VERSION_MISMATCH'
+  | 'UNCONFIRMED_MATERIAL'
+  | 'MATERIAL_VERSION_OUTDATED'
   | 'RATE_LIMITED'
   | 'MODEL_TIMEOUT'
   | 'INVALID_MODEL_OUTPUT'
@@ -214,13 +216,20 @@ export type AdvisorErrorCode =
 /** 兜底原因：能进入 fallback 的原因集合（INVALID_INPUT 在进入服务前就被拒了） */
 export type AdvisorFallbackReason = Exclude<
   AdvisorErrorCode,
-  'INVALID_INPUT' | 'CONTRACT_VERSION_MISMATCH' | 'INTERNAL'
+  | 'INVALID_INPUT'
+  | 'CONTRACT_VERSION_MISMATCH'
+  | 'UNCONFIRMED_MATERIAL'
+  | 'MATERIAL_VERSION_OUTDATED'
+  | 'INTERNAL'
 >
 
 /** 运行期错误码：服务层可能返回给路由层、并映射成 HTTP 状态码的集合 */
 export type AdvisorRuntimeErrorCode = Exclude<
   AdvisorErrorCode,
-  'INVALID_INPUT' | 'CONTRACT_VERSION_MISMATCH'
+  | 'INVALID_INPUT'
+  | 'CONTRACT_VERSION_MISMATCH'
+  | 'UNCONFIRMED_MATERIAL'
+  | 'MATERIAL_VERSION_OUTDATED'
 >
 
 /** 成功响应体（契约 4.3 / 4.4） */
@@ -297,6 +306,24 @@ export interface UnderstandingProviderInput {
   segments: UnderstandingProviderSegment[]
 }
 
+export interface CandidateProviderMaterial {
+  materialName: string
+  materialVersion: number
+  segments: Array<{
+    ref: string
+    startLine: number
+    endLine: number
+    text: string
+  }>
+}
+
+export interface CandidateProviderInput {
+  projectName: string
+  focus: string | null
+  maxCandidates: number
+  confirmedMaterials: CandidateProviderMaterial[]
+}
+
 /**
  * 建议生成器。mock provider 与将来的真实模型 provider 实现同一个接口。
  * 允许抛错与耗时过长，由服务层负责超时与兜底。
@@ -307,6 +334,8 @@ export interface AdvisorProvider {
   generateChat?(request: AdvisorChatRequest): Promise<{ answer: unknown }>
   /** v2（M2-A）：材料理解；未实现的 provider 视为 MODEL_UNAVAILABLE */
   generateUnderstanding?(request: UnderstandingProviderInput): Promise<{ draft: unknown }>
+  /** v3：阶段候选；未实现的 provider 走规则兜底 */
+  generateCandidates?(request: CandidateProviderInput): Promise<{ candidates: unknown }>
 }
 
 /**

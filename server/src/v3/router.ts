@@ -24,6 +24,7 @@ import {
   handleMilestonePatch,
   handleMilestoneReorder,
 } from './milestones.js'
+import { createMilestoneCandidatesHandler } from './milestoneCandidates.js'
 import { handleProgressCreate, handleProgressList, handleProgressSupersede } from './progress.js'
 import {
   handleProjectAction,
@@ -201,6 +202,22 @@ export async function handleV3Request(
         if (method === 'GET') await handleMilestoneList(res, runtime, auth, projectId, url)
         else if (method === 'POST') await handleMilestoneCreate(req, res, runtime, auth, projectId)
         else throw new V3Error('RESOURCE_NOT_FOUND')
+        return true
+      }
+      if (rest.length === 2 && rest[1] === 'candidates') {
+        assertMethod(method, 'POST')
+        await createMilestoneCandidatesHandler({
+          runtime,
+          provider: runtime.candidateProvider,
+          logger: {
+            warn(message, detail) {
+              runtime.logger.warn(
+                message,
+                (detail ?? {}) as Record<string, string | number | boolean | null>,
+              )
+            },
+          },
+        })(req, res, auth, projectId)
         return true
       }
       if (rest.length === 2 && rest[1] === 'reorder') {

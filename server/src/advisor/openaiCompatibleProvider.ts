@@ -1,4 +1,9 @@
-import { PROMPT_TEMPERATURE, buildChatMessages, buildMessages } from './prompt.js'
+import {
+  PROMPT_TEMPERATURE,
+  buildChatMessages,
+  buildMessages,
+  buildMilestoneCandidateMessages,
+} from './prompt.js'
 import { buildUnderstandingMessages } from '../materials/prompt.js'
 import {
   AdvisorProviderError,
@@ -7,6 +12,7 @@ import {
   type AdvisorChatRequest,
   type AdvisorProvider,
   type AdvisorRequest,
+  type CandidateProviderInput,
   type FetchLike,
   type ModelEndpoint,
   type ProviderOutput,
@@ -216,7 +222,60 @@ export function createOpenAiCompatibleProvider(options: OpenAiCompatibleProvider
     }
   }
 
-  return { name, generate, generateChat, generateUnderstanding }
+  /** v3 阶段候选：与其它路径相同的请求/超时/错误分类，输出校验交给候选层。 */
+  async function generateCandidates(
+    request: CandidateProviderInput,
+  ): Promise<{ candidates: unknown }> {
+    if (endpoint === null) {
+      throw new AdvisorProviderError(
+        `模型配置缺失，请设置：${missingEnvNames.length > 0 ? missingEnvNames.join(' / ') : DEFAULT_MISSING_HINT}`,
+        'MODEL_NOT_CONFIGURED',
+      )
+    }
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), endpoint.timeoutMs)
+    try {
+      const response = await fetchImpl(endpoint.url, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${endpoint.apiKey}`,
+        },
+        body: JSON.stringify({
+          model: endpoint.model,
+          messages: buildMilestoneCandidateMessages(request),
+          temperature: PROMPT_TEMPERATURE,
+        }),
+        signal: controller.signal,
+      })
+      if (!response.ok) {
+        logger.warn('模型服务返回非 2xx', { provider: name, status: response.status })
+        throw new AdvisorProviderError(`模型服务返回 ${response.status}`, 'MODEL_UNAVAILABLE')
+      }
+      const payload = await readJsonSafely(response)
+      const content = readAssistantContent(payload)
+      if (content === null) {
+        throw new AdvisorProviderError('模型响应结构不完整', 'INVALID_MODEL_OUTPUT')
+      }
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(stripCodeFence(content))
+      } catch {
+        throw new AdvisorProviderError('模型返回的 content 不是合法 JSON', 'INVALID_MODEL_OUTPUT')
+      }
+      return { candidates: extractCandidates(parsed) }
+    } catch (error) {
+      if (controller.signal.aborted) {
+        throw new AdvisorProviderError(`模型调用超过 ${endpoint.timeoutMs} 毫秒未返回`, 'MODEL_TIMEOUT')
+      }
+      if (error instanceof AdvisorProviderError) throw error
+      throw new AdvisorProviderError('模型请求失败', 'MODEL_UNAVAILABLE')
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  return { name, generate, generateChat, generateUnderstanding, generateCandidates }
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -264,6 +323,12 @@ function stripCodeFence(content: string): string {
  * 从模型返回的 JSON 里取出建议列表，形状不做判断——交给输出校验层。
  * 模型直接给数组时也接受（同样不在这里判断元素是否合法）。
  */
+function extractCandidates(parsed: unknown): unknown {
+  if (Array.isArray(parsed)) return parsed
+  if (isPlainObject(parsed)) return parsed.candidates
+  return undefined
+}
+
 function extractSuggestions(parsed: unknown): unknown {
   if (Array.isArray(parsed)) return parsed
   if (isPlainObject(parsed)) return parsed.suggestions

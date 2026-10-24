@@ -13,6 +13,7 @@ import {
   type MilestoneContext,
 } from './advisor/types.js'
 import { invalidInput, type V3Error } from './v3/errors.js'
+import { gateConfirmedMaterials, toConfirmedMaterials } from './v3/materialGate.js'
 import { createAdvisorHandler } from './routes/advisor.js'
 import { createAdvisorChatHandler } from './routes/advisorChat.js'
 import { handleHealth, sendJson } from './routes/health.js'
@@ -200,18 +201,34 @@ export function createApp(serverConfig: ServerConfig = config, deps: AppDependen
       logger,
     })
 
-  const v3Runtime = deps.v3Runtime ?? createV3Runtime(deps.v3 ?? {})
+  const v3Runtime =
+    deps.v3Runtime ??
+    createV3Runtime({
+      ...(deps.v3 ?? {}),
+      candidateProvider: provider,
+    })
   const validateMilestoneContext = createMilestoneContextValidator(v3Runtime)
+
+  const resolveConfirmedMaterials = (
+    projectId: string,
+    materials: Parameters<typeof gateConfirmedMaterials>[2],
+    segmentIds: string[],
+  ): ReturnType<typeof toConfirmedMaterials> =>
+    toConfirmedMaterials(
+      gateConfirmedMaterials(v3Runtime.getDb(), projectId, materials, segmentIds),
+    )
 
   const handleAdvisor = createAdvisorHandler({
     service: advisorService,
     logger,
     validateMilestoneContext,
+    resolveConfirmedMaterials,
   })
   const handleAdvisorChat = createAdvisorChatHandler({
     service: advisorService,
     logger,
     validateMilestoneContext,
+    resolveConfirmedMaterials,
   })
   const handleMaterials = createMaterialsHandler({ service: materialsService, logger })
   const handleMaterialsUnderstanding = createMaterialsUnderstandingHandler({

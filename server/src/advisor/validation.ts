@@ -9,6 +9,7 @@ import {
   type ConfirmedMaterialSegment,
   type DoubtSnapshot,
   type DoubtStatus,
+  type BasisMaterialRef,
   type EvidenceSnapshot,
   type MilestoneContext,
   type ProgressSnapshot,
@@ -1107,6 +1108,50 @@ function normalizeIdList(value: unknown, allowed: Set<string>, label: string, no
  * 校验并清理 provider（或兜底层）返回的建议。
  * 规则见契约 4.6：能修就修，不能修就丢弃该条；清理后 0 条即整份非法。
  */
+function materialRefMap(request: AdvisorRequest): Map<string, BasisMaterialRef> {
+  const map = new Map<string, BasisMaterialRef>()
+  ;(request.confirmedMaterials ?? []).forEach((material, materialIndex) => {
+    for (const segment of material.segments) {
+      const ref: BasisMaterialRef = {
+        materialId: material.materialId,
+        materialName: material.name,
+        materialVersion: material.version,
+        segmentId: segment.segmentId,
+        startLine: segment.startLine,
+        endLine: segment.endLine,
+        itemId: null,
+      }
+      map.set(segment.segmentId, ref)
+      map.set(`m${materialIndex + 1}:${segment.segmentId}`, ref)
+    }
+  })
+  return map
+}
+
+function normalizeMaterialRefs(
+  value: unknown,
+  refs: Map<string, BasisMaterialRef>,
+  label: string,
+  notes: string[],
+): BasisMaterialRef[] {
+  if (!Array.isArray(value)) return []
+  const result: BasisMaterialRef[] = []
+  const seen = new Set<string>()
+  for (const item of value) {
+    if (typeof item !== 'string' || item.trim() === '') continue
+    const ref = refs.get(item.trim())
+    if (ref === undefined) {
+      notes.push(`${label} 含未知材料引用 ${item.trim()}，已剔除`)
+      continue
+    }
+    if (seen.has(ref.segmentId)) continue
+    seen.add(ref.segmentId)
+    result.push(ref)
+    if (result.length >= 3) break
+  }
+  return result
+}
+
 export function normalizeSuggestions(raw: unknown, request: AdvisorRequest): NormalizeResult {
   const notes: string[] = []
   const list = isPlainObject(raw) ? raw.suggestions : undefined
@@ -1123,6 +1168,7 @@ export function normalizeSuggestions(raw: unknown, request: AdvisorRequest): Nor
   const taskById = new Map(request.tasks.map((task) => [task.taskId, task]))
   const evidenceIds = new Set(request.evidence.map((item) => item.evidenceId))
   const doubtIds = new Set(request.doubts.map((item) => item.doubtId))
+  const refs = materialRefMap(request)
 
   const suggestions: Suggestion[] = []
 
@@ -1157,6 +1203,12 @@ export function normalizeSuggestions(raw: unknown, request: AdvisorRequest): Nor
       notes.push(`${label} 的 existingTaskId 类型不合法，已降级为新任务候选`)
     }
 
+    const basisMaterialRefs = normalizeMaterialRefs(
+      item.segmentIds,
+      refs,
+      `${label} segmentIds`,
+      notes,
+    )
     suggestions.push({
       title,
       whyNow,
@@ -1169,6 +1221,7 @@ export function normalizeSuggestions(raw: unknown, request: AdvisorRequest): Nor
         notes,
       ),
       basisDoubtIds: normalizeIdList(item.basisDoubtIds, doubtIds, `${label} basisDoubtIds`, notes),
+      ...(basisMaterialRefs.length > 0 ? { basisMaterialRefs } : {}),
     })
   })
 

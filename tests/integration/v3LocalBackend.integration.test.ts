@@ -517,7 +517,7 @@ describe.skipIf(!RUN)('本地 V3 后端集成（真实 HTTP，仅 loopback）', 
     expect(cloud.project?.status).toBe('active')
   })
 
-  it('任务读取已实现；时间线与阶段候选仍为 404，不伪造替代实现', async () => {
+  it('任务读取与阶段候选已实现；时间线仍为 404，不伪造替代实现', async () => {
     const tasksGet = await localRequest(`/api/projects/${projectId}/tasks`)
     expect(tasksGet.status).toBe(200)
     const tasksBody = (await tasksGet.json()) as { data?: { tasks?: unknown } }
@@ -526,12 +526,29 @@ describe.skipIf(!RUN)('本地 V3 后端集成（真实 HTTP，仅 loopback）', 
     const timelineGet = await localRequest(`/api/projects/${projectId}/timeline`)
     expect(timelineGet.status).toBe(404)
 
+    // D12 已实现：合法请求返回 200，且候选形状符合契约 23.7（未配模型时走 fallback）
+    // 上一条用例改过项目状态，先刷新拿到最新 projectRevision，否则会被 409 STALE_REVISION 拒绝
+    must(await cloud.openProject(projectId), '生成候选前刷新项目')
     const candidatesPost = await localRequest(`/api/projects/${projectId}/milestones/candidates`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ contractVersion: '3.0', requestId: newRequestId() }),
+      body: JSON.stringify({
+        contractVersion: '3.0',
+        requestId: newRequestId(),
+        projectId,
+        idempotencyKey: newRequestId(),
+        projectRevision: cloud.projectRevision,
+        promptVersion: 'milestone-candidate-v1',
+        maxCandidates: 1,
+      }),
     })
-    expect(candidatesPost.status).toBe(404)
+    expect(candidatesPost.status).toBe(200)
+    const candidatesBody = (await candidatesPost.json()) as {
+      source?: string
+      candidates?: Array<{ candidateId?: string; expiresAt?: string }>
+    }
+    expect(['model', 'fallback']).toContain(candidatesBody.source)
+    expect(Array.isArray(candidatesBody.candidates)).toBe(true)
 
     // 客户端对未提供的时间线接口给出明确错误码，而不是静默成功
     const timeline = cloud.loadTimeline()

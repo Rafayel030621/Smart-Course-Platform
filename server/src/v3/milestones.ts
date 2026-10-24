@@ -165,6 +165,10 @@ export async function handleMilestoneCreate(
   const response = transaction(db, () => {
     assertProjectRevision(loadProject(db, userId, projectId), envelope.projectRevision)
     assertNameFree(db, projectId, nameKey, null)
+    // 在事务内再次确认候选，避免两个并发确认都通过事务外的检查
+    if (source === 'ai-candidate') {
+      assertCandidate(db, projectId, userId, body.candidateId, nowText)
+    }
 
     const orderRow = db
       .prepare(
@@ -198,6 +202,16 @@ export async function handleMilestoneCreate(
     } catch (error) {
       if (isSqliteUniqueError(error)) throw new V3Error('MILESTONE_NAME_CONFLICT')
       throw error
+    }
+
+    if (source === 'ai-candidate') {
+      const deleted = db
+        .prepare(
+          `DELETE FROM milestone_candidates
+            WHERE candidate_id = ? AND project_id = ? AND user_id = ?`,
+        )
+        .run(body.candidateId, projectId, userId)
+      if (deleted.changes !== 1) throw new V3Error('CANDIDATE_EXPIRED')
     }
 
     if (status === 'active') recalcCurrentMilestone(db, projectId)

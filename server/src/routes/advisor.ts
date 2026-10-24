@@ -8,7 +8,7 @@ import {
   type AdvisorSuccessResponse,
 } from '../advisor/types.js'
 import type { AdvisorService } from '../advisor/service.js'
-import type { MilestoneContext } from '../advisor/types.js'
+import type { ConfirmedMaterial, MilestoneContext } from '../advisor/types.js'
 import { LIMITS, parseAdvisorRequest } from '../advisor/validation.js'
 import type { V3Error } from '../v3/errors.js'
 import { sendJson } from './health.js'
@@ -51,6 +51,12 @@ export interface AdvisorRouteOptions {
   maxBodyBytes?: number
   /** 契约 23.2 规则 1/4：项目级实体归属校验；返回错误时不调用模型 */
   validateMilestoneContext?: (projectId: string, context: MilestoneContext) => V3Error | null
+  /** 契约 23.3：v3 材料门禁；用服务端权威材料替换客户端自报内容 */
+  resolveConfirmedMaterials?: (
+    projectId: string,
+    materials: ConfirmedMaterial[],
+    segmentIds: string[],
+  ) => ConfirmedMaterial[]
 }
 
 class BodyTooLargeError extends Error {
@@ -104,7 +110,12 @@ export function createAdvisorHandler(
   function sendFailure(
     res: ServerResponse,
     statusCode: number,
-    code: AdvisorRuntimeErrorCode | 'INVALID_INPUT' | 'CONTRACT_VERSION_MISMATCH',
+    code:
+      | AdvisorRuntimeErrorCode
+      | 'INVALID_INPUT'
+      | 'CONTRACT_VERSION_MISMATCH'
+      | 'UNCONFIRMED_MATERIAL'
+      | 'MATERIAL_VERSION_OUTDATED',
     requestId: string | null,
     message: string,
     retryable: boolean,
@@ -205,6 +216,37 @@ export function createAdvisorHandler(
         }
       }
 
+      if (
+        parsed.value.promptVersion === 'mvp-prompt-v3' &&
+        options.resolveConfirmedMaterials &&
+        (parsed.value.confirmedMaterials ?? []).length > 0
+      ) {
+        try {
+          const segmentIds = (parsed.value.confirmedMaterials ?? []).flatMap((material) =>
+            material.segments.map((segment) => segment.segmentId),
+          )
+          parsed.value.confirmedMaterials = options.resolveConfirmedMaterials(
+            parsed.value.projectId,
+            parsed.value.confirmedMaterials ?? [],
+            segmentIds,
+          )
+        } catch (error) {
+          if (error instanceof Error && 'status' in error && 'code' in error) {
+            const v3Error = error as V3Error
+            sendFailure(
+              res,
+              v3Error.status,
+              v3Error.code as 'UNCONFIRMED_MATERIAL' | 'MATERIAL_VERSION_OUTDATED',
+              parsed.value.requestId,
+              v3Error.publicMessage,
+              false,
+            )
+            return true
+          }
+          throw error
+        }
+      }
+
       const result = await service.recommend(parsed.value)
 
       if (result.ok) {
@@ -212,7 +254,7 @@ export function createAdvisorHandler(
           parsed.value.promptVersion === 'mvp-prompt-v3'
             ? result.suggestions.map((suggestion) => ({
                 ...suggestion,
-                basisMaterialRefs: [],
+                basisMaterialRefs: suggestion.basisMaterialRefs ?? [],
               }))
             : result.suggestions.map(({ basisMaterialRefs: _ignored, ...suggestion }) => suggestion)
         const successBody: AdvisorSuccessResponse = {
