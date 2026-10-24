@@ -56,7 +56,7 @@ export function buildUnderstandingUserPrompt(input: UnderstandingProviderInput):
   }
 
   return [
-    '以下是学生上传的一份材料及其分段，每段带行号。请提取理解草稿（四块候选 + 待确认问题）。',
+    '以下是学生上传的一份材料及其分段，每段带行号。请提取理解草稿（五块候选 + 待确认问题）。',
     input.projectName === null ? '' : `所属项目：${cleanForPrompt(input.projectName, 120)}`,
     JSON.stringify(payload),
     '',

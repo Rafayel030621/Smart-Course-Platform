@@ -163,7 +163,7 @@ export interface DraftItem {
   sources: MaterialSourceRef[]
 }
 
-/** 四块候选 + 待确认问题；行号与材料名一律由服务端按 segmentId 回填（契约 14.3） */
+/** 五块候选 + 待确认问题；行号与材料名一律由服务端按 segmentId 回填（契约 14.3） */
 export interface UnderstandingDraft {
   goalCandidates: DraftItem[]
   outcomeCandidates: DraftItem[]

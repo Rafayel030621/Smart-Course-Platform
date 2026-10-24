@@ -1,6 +1,6 @@
 # 智慧课程平台 · 前后端接口契约
 
-> 文档修订：v3.10（§23.3 虚拟引用标识 + §23.2 项目级校验说明；仅补充说明，不改已有字段名与接口语义）
+> 文档修订：v3.11（材料理解统一为五块：goalCandidates / outcomeCandidates / dataNotes / methodNotes / openQuestions；修正提示词与契约措辞，不改接口字段与响应结构）
 > 编制日期：2026-09-25（v2.0：2026-10-12；v3.0：2026-10-19，PR1 冻结 V3/V4 账号、阶段、进展、AI 上下文与迁移）
 > owner：负责人（后端）
 > 地位：**本文件是前后端唯一契约。** 四名成员不得自行新增字段或创建第二套 DTO。
@@ -776,7 +776,7 @@ Content-Type: application/json
 
 | 键名 | 计划用途 | 预计阶段 |
 | --- | --- | --- |
-| `materialUnderstanding` | 材料理解：从材料生成四块理解草稿及其来源 | 阶段 4 |
+| `materialUnderstanding` | 材料理解：从材料生成五块理解草稿及其来源 | 阶段 4 |
 | `qaTurn` | 项目问答：一轮提问与回答的上下文 | 阶段 5 |
 | `planDraft` | 计划建议：按阶段生成任务草稿 | 阶段 3 |
 | `suggestion.suggestedOwner` | 建议负责人（需要成员名单） | 阶段 6 |
@@ -786,7 +786,7 @@ Content-Type: application/json
 
 | 路径 | 用途 |
 | --- | --- |
-| `POST /api/materials/understanding` | 材料 → 四块理解草稿 |
+| `POST /api/materials/understanding` | 材料 → 五块理解草稿 |
 | `POST /api/advisor/qa` | 项目问答 |
 | `POST /api/plan/draft` | 计划草稿 |
 
@@ -1056,7 +1056,7 @@ MaterialSourceRef：
 
 ### 15.2 POST /api/materials/understanding（材料理解草稿）
 
-用途：把**客户端选定**的材料片段发送给服务端，生成四块理解草稿；模型失败时服务端规则兜底（`source: "fallback"`）。
+用途：把**客户端选定**的材料片段发送给服务端，生成五块理解草稿；模型失败时服务端规则兜底（`source: "fallback"`）。
 
 请求字段：
 
@@ -1099,7 +1099,7 @@ MaterialSourceRef：
 | `draft` | MaterialUnderstandingDraft | 见 14.3 |
 
 1. `source: "model"`：`draft` 五块合计至少 1 条候选；
-2. `source: "fallback"`：`notice` 必填（中文说明模型未参与、用户可以先做什么）；`draft` 允许四块为空数组；**兜底不得编造材料中不存在的事实**，也不得把猜测写成确定事实；
+2. `source: "fallback"`：`notice` 必填（中文说明模型未参与、用户可以先做什么）；`draft` 允许五块为空数组；**兜底不得编造材料中不存在的事实**，也不得把猜测写成确定事实；
 3. 未配置 / 超时 / 上游故障 / 输出非法**不返回 4xx / 5xx**，而是 200 + `fallback`（与 5.1 的分层一致）；`MODEL_*` 失败码只在兜底本身也失败时才返回（见第 16 节）。
 
 ### 15.3 模型输出校验与清理
@@ -4067,3 +4067,4 @@ git status / git diff --name-only 检查是否误改 server/src、src、部署�
 | v3.8 | 2026-10-20 | PR2 材料写链路：新增项目材料上传（同步解析、2 MB 请求体、1 MB 文件、服务端生成 ID/版本、sha256 去重）、归档/恢复、重新解析；去重只匹配未归档的当前版本，历史版本与归档材料均不参与，归档后同内容重传生成新 materialId；项目校验先于内容校验；reparse 先判归档再判原文缺失；迁移 v2 新增 `materials.content_text` 与项目 sha256 索引；新增 `MATERIAL_CONTENT_UNAVAILABLE` | 姜厚禄（后端） |
 | v3.9 | 2026-10-20 | 只改文档、不改接口：新增 `docs/v3-v4-interface-status.md`（按接口逐条列实现状态与已知限制，供前端接入判断）；20.1 冻结表与第 0 节改为指向该清单；27.3 标题改为“契约冻结完成定义（PR1 已达成）” | 姜厚禄（后端） |
 | v3.10 | 2026-10-22 | 补充 §23.3 材料虚拟引用标识与 §23.2 项目级实体归属校验说明 | 姜厚禄（后端） |
+| v3.11 | 2026-10-24 | 材料理解统一为五块：`goalCandidates` / `outcomeCandidates` / `dataNotes` / `methodNotes` / `openQuestions`；修正提示词与契约中的旧计数措辞，不改接口字段与响应结构 | 姜厚禄（后端 + 契约） |
