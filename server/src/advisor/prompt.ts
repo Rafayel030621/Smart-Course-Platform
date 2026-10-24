@@ -222,7 +222,10 @@ function buildMilestoneContextSection(
 }
 
 /** v3 材料摘要：用带材料前缀的虚拟引用标识，不把 materialId / segmentId 作为字段名发送。 */
-function buildMaterialSectionV3(materials: ConfirmedMaterial[]): Array<Record<string, unknown>> {
+function buildMaterialSectionV3(
+  materials: ConfirmedMaterial[],
+  includeLineNumbers = true,
+): Array<Record<string, unknown>> {
   return materials.map((material, materialIndex) => ({
     材料名: cleanText(material.name, TEXT_LIMITS.projectName) ?? material.name,
     类型: material.type,
@@ -230,16 +233,22 @@ function buildMaterialSectionV3(materials: ConfirmedMaterial[]): Array<Record<st
     片段: material.segments
       .map((segment) => ({
         引用标识: `m${materialIndex + 1}:${segment.segmentId}`,
-        行号: `${segment.startLine}-${segment.endLine}`,
+        ...(includeLineNumbers ? { 行号: `${segment.startLine}-${segment.endLine}` } : {}),
         内容: cleanText(segment.text, TEXT_LIMITS.materialSegmentText),
       }))
       .filter((segment) => segment['内容'] !== null),
   }))
 }
 
-function buildV3UserPayload(request: AdvisorRequest | AdvisorChatRequest): Record<string, unknown> {
+function buildV3UserPayload(
+  request: AdvisorRequest | AdvisorChatRequest,
+  options: { includeLineNumbers?: boolean } = {},
+): Record<string, unknown> {
   const profileSection = buildProfileSection(request.projectProfile ?? null)
-  const materialSection = buildMaterialSectionV3(request.confirmedMaterials ?? [])
+  const materialSection = buildMaterialSectionV3(
+    request.confirmedMaterials ?? [],
+    options.includeLineNumbers !== false,
+  )
   const confirmedContext =
     'confirmedContext' in request && Array.isArray(request.confirmedContext)
       ? request.confirmedContext
@@ -354,6 +363,8 @@ const CHAT_SYSTEM_PROMPT_V3 = [
   '阶段任务列表中状态为“已完成”的任务已经完成，不要再说成还需要做的事；也不要建议修改其他阶段的任务或直接把当前阶段标记完成。',
   '只能依据本次给出的阶段上下文、已确认材料和聊天记录回答；没有依据时明确说明“当前资料中未找到依据”。',
   '不要输出字段名、内部标识或状态名，只使用自然中文；不要输出密钥、环境变量、服务器路径或上游错误。',
+  '回答正文使用纯文本。最后另起一段，只追加一个引用 JSON，格式为 {"segmentIds":["m1:seg_1"]}，最多 5 个；数组中的引用标识必须来自本次给出的已确认材料摘要，没有引用时输出 {"segmentIds":[]}。不要在该 JSON 前后输出解释、Markdown 或代码块。',
+  '引用 JSON 只用于服务端回填材料依据；回答正文不要输出内部标识、字段名、材料版本或位置数字。',
 ].join('\n')
 
 export function buildChatMessages(
@@ -364,7 +375,7 @@ export function buildChatMessages(
       { role: 'system', content: CHAT_SYSTEM_PROMPT_V3 },
       {
         role: 'user',
-        content: `当前项目阶段化状态（仅作事实依据）：${JSON.stringify(buildV3UserPayload(request))}`,
+        content: `当前项目阶段化状态（仅作事实依据）：${JSON.stringify(buildV3UserPayload(request, { includeLineNumbers: false }))}`,
       },
       ...request.chatHistory.map((message) => ({
         role: message.role,

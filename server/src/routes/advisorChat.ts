@@ -9,6 +9,7 @@ import {
   type MilestoneContext,
 } from '../advisor/types.js'
 import type { AdvisorService } from '../advisor/service.js'
+import { buildChatCitations } from '../advisor/chatCitations.js'
 import { LIMITS, parseAdvisorChatRequest } from '../advisor/validation.js'
 import type { V3Error } from '../v3/errors.js'
 import { sendJson } from './health.js'
@@ -115,7 +116,12 @@ export function createAdvisorChatHandler(options: AdvisorChatRouteOptions): (req
       }
       if (parsed.value.promptVersion === 'advisor-chat-v3') {
         successBody.milestoneRevision = parsed.value.milestoneContext?.milestoneRevision ?? null
-        successBody.citations = []
+        successBody.citations = buildChatCitations(
+          parsed.value.confirmedMaterials ?? [],
+          result.segmentIds ?? [],
+          logger,
+          parsed.value.requestId,
+        )
       }
       sendJson(res, 200, successBody)
       return true

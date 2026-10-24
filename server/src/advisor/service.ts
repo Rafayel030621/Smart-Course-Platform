@@ -1,3 +1,4 @@
+import { parseChatAnswer } from './chatCitations.js'
 import { isHumanizedUserText, LIMITS, normalizeSuggestions } from './validation.js'
 import type { FallbackGenerator } from './fallback.js'
 import {
@@ -60,7 +61,14 @@ export interface AdvisorService {
   chat(request: AdvisorChatRequest): Promise<AdvisorChatServiceResult>
 }
 
-export interface AdvisorChatServiceSuccess { ok: true; source: 'model' | 'fallback'; fallbackReason: AdvisorFallbackReason | null; answer: string }
+export interface AdvisorChatServiceSuccess {
+  ok: true
+  source: 'model' | 'fallback'
+  fallbackReason: AdvisorFallbackReason | null
+  answer: string
+  /** 仅 v3 模型回答携带：从末尾引用 JSON 解析出的虚拟引用标识 */
+  segmentIds?: string[]
+}
 export interface AdvisorChatServiceFailure { ok: false; code: AdvisorRuntimeErrorCode; retryable: boolean; retryAfterSeconds: number | null }
 export type AdvisorChatServiceResult = AdvisorChatServiceSuccess | AdvisorChatServiceFailure
 
@@ -176,9 +184,18 @@ export function createAdvisorService(options: AdvisorServiceOptions): AdvisorSer
         ? { ok: false as const, reason: 'MODEL_UNAVAILABLE' as const }
         : await callChatProvider(providerWithChat.bind(provider), request, timeoutMs)
       if (outcome.ok && typeof outcome.output.answer === 'string') {
-        const answer = outcome.output.answer.replace(/[\u0000-\u001f\u007f]/g, ' ').trim()
+        const parsed = request.promptVersion === 'advisor-chat-v3'
+          ? parseChatAnswer(outcome.output.answer)
+          : { answer: outcome.output.answer, segmentIds: [] }
+        const answer = parsed.answer.replace(/[\u0000-\u001f\u007f]/g, ' ').trim()
         if (answer.length > 0 && answer.length <= LIMITS.answerLength && isHumanizedUserText(answer)) {
-          return { ok: true, source: 'model', fallbackReason: null, answer }
+          return {
+            ok: true,
+            source: 'model',
+            fallbackReason: null,
+            answer,
+            ...(request.promptVersion === 'advisor-chat-v3' ? { segmentIds: parsed.segmentIds } : {}),
+          }
         }
       }
       const reason = outcome.ok ? 'INVALID_MODEL_OUTPUT' : outcome.reason
