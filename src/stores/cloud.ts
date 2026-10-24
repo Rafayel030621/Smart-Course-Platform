@@ -29,6 +29,7 @@ import {
   createMilestone as createMilestoneApi,
   createProject as createProjectApi,
   createTask as createTaskApi,
+  generateMilestoneCandidates,
   getMaterial,
   getProject,
   linkTaskToMilestone as linkTaskToMilestoneApi,
@@ -80,7 +81,11 @@ import type {
   Recommendation,
   RecommendationSource,
 } from '@/domain/recommendation'
-import { MAX_ADVISOR_CHAT_QUESTION_LENGTH, supportsMilestoneContext } from '@/domain/recommendation'
+import {
+  MAX_ADVISOR_CHAT_QUESTION_LENGTH,
+  MILESTONE_CANDIDATE_PROMPT_VERSION,
+  supportsMilestoneContext,
+} from '@/domain/recommendation'
 import {
   buildEvidenceSnapshots,
   buildMilestoneContext,
@@ -98,6 +103,7 @@ import type {
   CloudMaterialSegment,
   CloudMaterialUploadState,
   CloudMilestone,
+  CloudMilestoneCandidate,
   CloudProject,
   CloudProjectSyncState,
   CloudTask,
@@ -141,6 +147,12 @@ export interface CreateMilestoneActionInput {
   source?: 'manual' | 'ai-candidate'
   candidateId?: string
   confirmedByUser?: boolean
+}
+
+export interface GenerateCandidatesActionInput {
+  projectId?: string
+  maxCandidates?: 1 | 2 | 3
+  focus?: string
 }
 
 export interface UpdateMilestoneActionInput {
@@ -414,6 +426,12 @@ export const useCloudStore = defineStore('cloud', () => {
   const advisor = ref<CloudAdvisorState>(emptyAdvisorState())
   const chat = ref<CloudChatState>(emptyChatState())
 
+  /* -------- 阶段候选（契约 23.7）：只读候选，不自动写入项目 -------- */
+  const candidates = ref<CloudMilestoneCandidate[]>([])
+  const candidatesStatus = ref<'idle' | 'loading' | 'ready' | 'error'>('idle')
+  const candidatesError = ref<{ code: string; message: string } | null>(null)
+  const candidatesNotice = ref<string | null>(null)
+
   let epoch = 0
   let activeProjectId: string | null = null
   let abortController = new AbortController()
@@ -544,9 +562,17 @@ export const useCloudStore = defineStore('cloud', () => {
     pendingActions.value = {}
     tasksHydrated.value = false
     clearMaterialsState()
+    clearCandidatesState()
     advisor.value = emptyAdvisorState()
     chat.value = emptyChatState()
     entityOwners.clear()
+  }
+
+  function clearCandidatesState(): void {
+    candidates.value = []
+    candidatesStatus.value = 'idle'
+    candidatesError.value = null
+    candidatesNotice.value = null
   }
 
   /** 材料状态只在「当前项目」内有效：切项目、退出登录、重新打开项目都必须清空 */
@@ -731,6 +757,7 @@ export const useCloudStore = defineStore('cloud', () => {
     currentMilestoneId.value = null
     tasksHydrated.value = false
     clearMaterialsState()
+    clearCandidatesState()
     // 上一个项目的建议/聊天必须丢弃：AI 上下文属于单个项目
     advisorAbort?.abort()
     advisorAbort = null
@@ -1043,6 +1070,72 @@ export const useCloudStore = defineStore('cloud', () => {
   }
 
   /* ---------------------------------------------------------------- 阶段 */
+
+  function failCandidates(error: V3ApiError): ActionResult<CloudMilestoneCandidate[]> {
+    candidates.value = []
+    candidatesStatus.value = 'error'
+    candidatesError.value = { code: error.code, message: error.message }
+    candidatesNotice.value = null
+    setFailure(error)
+    return failure(error)
+  }
+
+  /**
+   * 契约 23.7：生成阶段候选。候选只读，不写入项目；确认创建走 createMilestone。
+   */
+  async function generateCandidates(
+    input: GenerateCandidatesActionInput = {},
+  ): Promise<ActionResult<CloudMilestoneCandidate[]>> {
+    const blocked = ensureWritable(input.projectId)
+    if (blocked !== null) return failCandidates(blocked)
+    const maxCandidates = input.maxCandidates ?? 2
+    const focus = input.focus === undefined ? null : input.focus.trim()
+    if (!Number.isInteger(maxCandidates) || maxCandidates < 1 || maxCandidates > 3) {
+      return failCandidates(validationError('INVALID_INPUT', '候选数量需为 1～3 个'))
+    }
+    if (focus !== null && codepointLength(focus) > 200) {
+      return failCandidates(validationError('INVALID_INPUT', '生成重点不能超过 200 字'))
+    }
+
+    const projectId = activeProjectId!
+    const token = epoch
+    if (!startAction('generateCandidates')) return failure(makeV3Error('DUPLICATE_REQUEST'))
+    candidatesStatus.value = 'loading'
+    candidates.value = []
+    candidatesError.value = null
+    candidatesNotice.value = null
+    try {
+      const result = await generateMilestoneCandidates(
+        projectId,
+        {
+          projectRevision: projectRevision.value,
+          promptVersion: MILESTONE_CANDIDATE_PROMPT_VERSION,
+          maxCandidates,
+          ...(focus === null || focus === '' ? {} : { focus }),
+        },
+        { signal: abortController.signal },
+      )
+      if (isStale(token, projectId)) return failure(makeV3Error('STALE_RESPONSE'))
+      if (!result.ok) {
+        const mapped = mapAbort(result.error)
+        const error = mapped.code === 'STALE_REVISION'
+          ? { ...mapped, message: '项目已更新，请刷新后重试' }
+          : mapped
+        return failCandidates(error)
+      }
+      candidates.value = result.data.candidates
+      candidatesStatus.value = 'ready'
+      candidatesNotice.value = result.data.notice
+        ?? (result.data.source === 'fallback'
+          ? '模型未参与，以下为按项目资料生成的规则候选，请确认后再创建阶段。'
+          : null)
+      candidatesError.value = null
+      clearFailure()
+      return { ok: true, data: candidates.value }
+    } finally {
+      finishAction('generateCandidates')
+    }
+  }
 
   async function createMilestone(
     input: CreateMilestoneActionInput,
@@ -2942,9 +3035,13 @@ export const useCloudStore = defineStore('cloud', () => {
     cachedSegments,
     cachedUnderstanding,
 
-    /* AI（契约 23.1 / 6.4） */
+    /* AI（契约 23.1 / 6.4 / 23.7） */
     advisor,
     chat,
+    candidates,
+    candidatesStatus,
+    candidatesError,
+    candidatesNotice,
 
     /* 生命周期 */
     openProject,
@@ -2973,7 +3070,8 @@ export const useCloudStore = defineStore('cloud', () => {
     deleteProject,
     restoreDeletedProject,
 
-    /* 阶段写动作（契约 22.2） */
+    /* 阶段写动作（契约 22.2 / 23.7） */
+    generateCandidates,
     createMilestone,
     updateMilestone,
     reorderMilestones,

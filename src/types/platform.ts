@@ -491,6 +491,34 @@ export interface CloudMilestone {
   taskStats: MilestoneTaskStats
 }
 
+/** 契约 23.7：阶段候选引用的已确认材料片段 */
+export interface CloudMilestoneCandidateSource {
+  materialId: string
+  materialName: string
+  materialVersion: number
+  segmentId: string
+  startLine: number
+  endLine: number
+  itemId: string | null
+}
+
+export interface CloudMilestoneCandidateTask {
+  title: string
+  doneCriteria: string
+}
+
+/** 契约 23.7：阶段候选只读快照，不自动写入项目 */
+export interface CloudMilestoneCandidate {
+  candidateId: string
+  name: string
+  goal: string
+  doneCriteria: string
+  suggestedTasks: CloudMilestoneCandidateTask[]
+  risks: string[]
+  sources: CloudMilestoneCandidateSource[]
+  expiresAt: string
+}
+
 export interface CloudTask {
   taskId: string
   projectId: string

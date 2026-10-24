@@ -57,8 +57,7 @@ export const ADVISOR_CHAT_PROMPT_VERSION_V3 = 'advisor-chat-v3'
  * 契约 23.4 / 23.7：**阶段候选接口**（`POST /api/projects/{projectId}/milestones/candidates`）
  * 的提示词版本。
  *
- * 契约已定义取值与请求体，但 `server/src/v3/router.ts` 仍没有该路径，因此这里**只定义常量**：
- * 不要拿建议接口的 `mvp-prompt-v3` 顶替，也不要提前发请求。
+ * 不要拿建议接口的 `mvp-prompt-v3` 顶替；候选请求必须使用本常量。
  */
 export const MILESTONE_CANDIDATE_PROMPT_VERSION = 'milestone-candidate-v1'
 
