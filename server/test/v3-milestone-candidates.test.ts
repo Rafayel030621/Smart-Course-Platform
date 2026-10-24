@@ -83,6 +83,47 @@ test('正常生成候选：返回形状、30 分钟过期时间与空来源', as
   assert.ok(Date.parse(candidate.expiresAt as string) > Date.now())
 })
 
+test('模型正常生成候选：source=model，候选字段与来源合法', async () => {
+  const runtime = client.runtime as unknown as {
+    candidateProvider?: {
+      name: string
+      generate: () => Promise<never>
+      generateCandidates: () => Promise<{ candidates: unknown }>
+    }
+  }
+  const original = runtime.candidateProvider
+  runtime.candidateProvider = {
+    name: 'candidate-test-provider',
+    generate: async () => {
+      throw new Error('not used')
+    },
+    generateCandidates: async () => ({
+      candidates: [
+        {
+          name: '模型阶段',
+          goal: '模型目标',
+          doneCriteria: '模型完成标准',
+          suggestedTasks: [{ title: '模型任务', doneCriteria: '任务完成标准' }],
+          risks: ['模型风险'],
+          segmentIds: [],
+        },
+      ],
+    }),
+  }
+  try {
+    const { body, response } = await generate(projectId, projectRevision, { maxCandidates: 1 })
+    assert.equal(response.status, 200)
+    assert.equal(body.source, 'model')
+    assert.equal(body.fallbackReason, null)
+    assert.equal(body.notice, null)
+    const candidate = (body.candidates as Array<Record<string, unknown>>)[0]!
+    assert.equal(candidate.name, '模型阶段')
+    assert.deepEqual(candidate.sources, [])
+  } finally {
+    runtime.candidateProvider = original
+  }
+})
+
 test('fallback：模型不可用时 200 + fallback + 中文 notice', async () => {
   const { body } = await generate(projectId, projectRevision, { focus: '整理材料' })
   assert.equal(body.source, 'fallback')
