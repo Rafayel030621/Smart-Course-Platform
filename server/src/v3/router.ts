@@ -209,6 +209,14 @@ export async function handleV3Request(
         await createMilestoneCandidatesHandler({
           runtime,
           provider: runtime.candidateProvider,
+          logger: {
+            warn(message, detail) {
+              runtime.logger.warn(
+                message,
+                (detail ?? {}) as Record<string, string | number | boolean | null>,
+              )
+            },
+          },
         })(req, res, auth, projectId)
         return true
       }
