@@ -3,6 +3,7 @@ import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useCloudStore } from '@/stores/cloud'
 import { usePlatformStore } from '@/stores/platform'
+import CloudAdvisorPanel from '@/components/CloudAdvisorPanel.vue'
 import CloudChatPanel from '@/components/CloudChatPanel.vue'
 import CloudMaterialsPanel from '@/components/CloudMaterialsPanel.vue'
 import type { CloudMilestone, CloudTask, ProgressRecord } from '@/types/platform'
@@ -228,8 +229,8 @@ interface NextStepHint {
 /**
  * 「下一步做什么」入口。
  *
- * 这里只按**当前阶段已有数据**推导行动顺序，不调用模型、不伪造 AI 结论：
- * 阶段化 AI 建议需要数据层提供云端建议 action（李焰彬）与已确认材料回读，当前尚未接入。
+ * 这里只按**当前阶段已有数据**推导行动顺序，不调用模型、不伪造 AI 结论；
+ * 真正的云端 AI 建议由当前阶段卡下方的 CloudAdvisorPanel 处理。
  */
 const nextSteps = computed<NextStepHint[]>(() => {
   const milestone = currentMilestone.value
@@ -708,6 +709,8 @@ function dueText(value: string | null): string {
         </div>
       </section>
 
+      <CloudAdvisorPanel />
+
       <section class="card next-step">
         <div class="card-h">下一步做什么 <span class="tag">按当前阶段数据整理</span></div>
         <div class="card-b">
@@ -721,7 +724,7 @@ function dueText(value: string | null): string {
             </li>
           </ol>
           <p v-else class="empty">当前阶段没有待办提示，可以先记录一次进展，或去「阶段任务」补充新任务。</p>
-          <p class="next-step-note">这里的顺序由当前阶段的任务、证据和进展推导，不是 AI 建议。云端阶段化 AI 建议需要数据层接入后才会出现在这里，接入前不会用本地结果冒充。</p>
+          <p class="next-step-note">这里的顺序由当前阶段的任务、证据和进展推导，不是 AI 建议；云端 AI 建议在当前阶段卡下方单独生成。</p>
         </div>
       </section>
 
@@ -864,7 +867,7 @@ function dueText(value: string | null): string {
 
       <section class="card unsupported-card">
         <div class="card-h">能力状态</div>
-        <div class="card-b"><p>时间线读取接口和阶段候选接口仍未接入；AI 顾问聊天已接通，但记录不落库。「AI 建议卡片」本页暂未提供入口，页面不会用前端拼接结果或本地结果冒充服务端能力。</p></div>
+        <div class="card-b"><p>时间线读取接口和阶段候选接口仍未接入；材料、AI 建议与聊天已接入</p></div>
       </section>
       </div>
 
