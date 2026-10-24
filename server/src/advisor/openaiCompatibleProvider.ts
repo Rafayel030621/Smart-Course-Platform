@@ -4,6 +4,7 @@ import {
   buildMessages,
   buildMilestoneCandidateMessages,
 } from './prompt.js'
+import { extractModelJson } from './jsonExtract.js'
 import { buildUnderstandingMessages } from '../materials/prompt.js'
 import {
   AdvisorProviderError,
@@ -53,6 +54,19 @@ export function createOpenAiCompatibleProvider(options: OpenAiCompatibleProvider
   const { endpoint } = options
   const missingEnvNames = options.missingEnvNames ?? []
 
+  /** 统一解析模型 JSON 输出；失败时只记长度与前 120 字符，不记整段原文 */
+  function parseModelJson(content: string): unknown {
+    const result = extractModelJson(content)
+    if (result.ok) return result.parsed
+
+    logger.warn('模型返回的 content 不是合法 JSON', {
+      provider: name,
+      contentLength: result.contentLength,
+      contentPreview: result.contentPreview,
+    })
+    throw new AdvisorProviderError('模型返回的 content 不是合法 JSON', 'INVALID_MODEL_OUTPUT')
+  }
+
   async function generate(request: AdvisorRequest): Promise<ProviderOutput> {
     if (endpoint === null) {
       // 配置缺失是确定性失败：重试不会变好，交给 service 走兜底并带上 MODEL_NOT_CONFIGURED
@@ -94,14 +108,7 @@ export function createOpenAiCompatibleProvider(options: OpenAiCompatibleProvider
         throw new AdvisorProviderError('模型响应结构不完整', 'INVALID_MODEL_OUTPUT')
       }
 
-      let parsed: unknown
-      try {
-        parsed = JSON.parse(stripCodeFence(content))
-      } catch {
-        logger.warn('模型返回的 content 不是合法 JSON', { provider: name })
-        throw new AdvisorProviderError('模型返回的 content 不是合法 JSON', 'INVALID_MODEL_OUTPUT')
-      }
-
+      const parsed = parseModelJson(content)
       return { suggestions: extractSuggestions(parsed) }
     } catch (error) {
       if (controller.signal.aborted) {
@@ -196,14 +203,7 @@ export function createOpenAiCompatibleProvider(options: OpenAiCompatibleProvider
         throw new AdvisorProviderError('模型响应结构不完整', 'INVALID_MODEL_OUTPUT')
       }
 
-      let parsed: unknown
-      try {
-        parsed = JSON.parse(stripCodeFence(content))
-      } catch {
-        logger.warn('模型返回的 content 不是合法 JSON', { provider: name })
-        throw new AdvisorProviderError('模型返回的 content 不是合法 JSON', 'INVALID_MODEL_OUTPUT')
-      }
-
+      const parsed = parseModelJson(content)
       return { draft: parsed }
     } catch (error) {
       if (controller.signal.aborted) {
@@ -257,12 +257,7 @@ export function createOpenAiCompatibleProvider(options: OpenAiCompatibleProvider
       if (content === null) {
         throw new AdvisorProviderError('模型响应结构不完整', 'INVALID_MODEL_OUTPUT')
       }
-      let parsed: unknown
-      try {
-        parsed = JSON.parse(stripCodeFence(content))
-      } catch {
-        throw new AdvisorProviderError('模型返回的 content 不是合法 JSON', 'INVALID_MODEL_OUTPUT')
-      }
+      const parsed = parseModelJson(content)
       return { candidates: extractCandidates(parsed) }
     } catch (error) {
       if (controller.signal.aborted) {
@@ -306,17 +301,6 @@ function readAssistantContent(payload: unknown): string | null {
 
   const content = message.content
   return typeof content === 'string' ? content : null
-}
-
-/**
- * 有些模型会把 JSON 包在 ```json 代码块里。系统提示词已经禁止了这种输出，
- * 这里做一次最小宽容：优先按原样解析，只有明显带围栏时才剥掉围栏。
- */
-function stripCodeFence(content: string): string {
-  const trimmed = content.trim()
-  if (!trimmed.startsWith('```')) return trimmed
-  const withoutOpening = trimmed.replace(/^```[a-zA-Z]*\s*/, '')
-  return withoutOpening.replace(/```\s*$/, '').trim()
 }
 
 /**
