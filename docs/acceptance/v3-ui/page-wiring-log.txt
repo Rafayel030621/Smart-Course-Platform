@@ -1,0 +1,22 @@
+注册成功
+云端项目已创建
+项目资料页：空状态正确
+上传成功并解析
+片段 1 段，理解条目 0 条
+截图：16-materials-panel-desktop.png
+重新解析成功，版本已推进
+归档后未勾选「显示已归档」时列表行数：0
+截图：17-materials-archived-desktop.png
+恢复成功
+进展已保存
+更正后当前进展：2026/10/23 15:38:39
+
+更正后的进展正文
+
+更正
+截图：18-progress-superseded-desktop.png
+AI 回答（截断）：基于当前项目状态，建议先围绕“当前阶段下一步该做什么”检查已有证据，再把可验证的下一步记录下来。
+截图：19-chat-desktop.png
+切换项目后：材料、进展、聊天均已隔离
+截图：20-project-isolation-desktop.png
+页面异常：无

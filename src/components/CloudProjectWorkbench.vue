@@ -3,7 +3,9 @@ import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useCloudStore } from '@/stores/cloud'
 import { usePlatformStore } from '@/stores/platform'
-import type { CloudMilestone, CloudTask } from '@/types/platform'
+import CloudChatPanel from '@/components/CloudChatPanel.vue'
+import CloudMaterialsPanel from '@/components/CloudMaterialsPanel.vue'
+import type { CloudMilestone, CloudTask, ProgressRecord } from '@/types/platform'
 
 const platform = usePlatformStore()
 const cloud = useCloudStore()
@@ -27,19 +29,41 @@ const currentTasks = computed(() =>
 )
 /** 没有挂阶段的任务：不主动显示就会“建完就消失” */
 const unassignedTasks = computed(() => tasks.value.filter((task) => task.milestoneId === null))
+const currentMilestoneKey = computed(() => currentMilestone.value?.milestoneId ?? null)
+/** 没有阶段时（空白项目）进展/证据挂在 null 上，仍要显示，否则「记完就消失」 */
+const matchesCurrentStage = (milestoneId: string | null): boolean =>
+  currentMilestoneKey.value === null
+    ? milestoneId === null
+    : milestoneId === currentMilestoneKey.value
+
 const currentEvidence = computed(() =>
   cloud.evidence.filter(
     (item) => item.status === 'active' && (
-      item.milestoneId === currentMilestone.value?.milestoneId ||
+      matchesCurrentStage(item.milestoneId) ||
       currentTasks.value.some((task) => task.taskId === item.taskId)
     ),
   ),
 )
 const currentProgress = computed(() =>
   cloud.progress
-    .filter((item) => item.status === 'active' && item.milestoneId === currentMilestone.value?.milestoneId)
+    .filter((item) => item.status === 'active' && matchesCurrentStage(item.milestoneId))
     .slice()
     .sort((a, b) => b.occurredAt.localeCompare(a.occurredAt)),
+)
+/** 被更正的旧进展：正文保留，只在历史区展示，不再算作当前进展（契约 22.4） */
+const correctedProgress = computed(() =>
+  cloud.progress
+    .filter((item) => item.status === 'superseded' && matchesCurrentStage(item.milestoneId))
+    .slice()
+    .sort((a, b) => b.occurredAt.localeCompare(a.occurredAt)),
+)
+
+/* 进展更正：只改正文，成功后列表与阶段统计由 store 按响应更新 */
+const supersedeTargetId = ref<string | null>(null)
+const supersedeDraft = ref('')
+const supersedeError = ref('')
+const supersedeTarget = computed<ProgressRecord | null>(
+  () => currentProgress.value.find((item) => item.progressId === supersedeTargetId.value) ?? null,
 )
 
 const actionError = ref('')
@@ -353,6 +377,9 @@ async function createProject(): Promise<void> {
   projectForm.scope = ''
   projectForm.outOfScope = ''
   showCreate.value = false
+  // 新建项目后 store 里没有任何服务端数据：补齐任务与材料，否则「下一步做什么」与 AI 聊天
+  // 会把「还没读过」当成缺数据（聊天会直接报「任务列表尚未加载完整」）。
+  await Promise.all([cloud.refreshTasks({ silent: true }), cloud.refreshMaterials({ silent: true })])
 }
 
 async function selectProject(event: Event): Promise<void> {
@@ -485,6 +512,52 @@ async function submitProgress(): Promise<void> {
     progressForm.summary = ''
     progressForm.taskId = ''
   }
+}
+
+function startSupersede(item: ProgressRecord): void {
+  supersedeTargetId.value = item.progressId
+  supersedeDraft.value = item.summary
+  supersedeError.value = ''
+}
+
+function cancelSupersede(): void {
+  supersedeTargetId.value = null
+  supersedeDraft.value = ''
+  supersedeError.value = ''
+}
+
+async function saveSupersede(item: ProgressRecord): Promise<void> {
+  const summary = supersedeDraft.value.trim()
+  if (summary === '') {
+    supersedeError.value = '更正后的进展内容不能为空'
+    return
+  }
+  supersedeError.value = ''
+  const result = await cloud.supersedeProgress({
+    progressId: item.progressId,
+    expectedRevision: item.revision,
+    summary,
+  })
+  if (result.ok) {
+    cancelSupersede()
+    return
+  }
+  if (result.code === 'STALE_REVISION') {
+    supersedeError.value = '这条进展刚被更新过，已刷新为最新内容，请确认后再提交'
+    await cloud.refreshProgress()
+    return
+  }
+  supersedeError.value = result.message
+}
+
+/** 被更正的进展可能已经不在这条列表里（别人先改了），此时直接收起表单 */
+async function saveSupersedeCurrent(): Promise<void> {
+  const target = supersedeTarget.value
+  if (target === null) {
+    cancelSupersede()
+    return
+  }
+  await saveSupersede(target)
 }
 
 async function submitEvidence(): Promise<void> {
@@ -721,8 +794,52 @@ function dueText(value: string | null): string {
               <textarea ref="progressSummaryInput" v-model="progressForm.summary" placeholder="记录这次推进了什么" aria-label="进展内容" maxlength="1000" required></textarea>
               <button class="btn primary" type="submit" :disabled="isBusy('submitProgress')">{{ isBusy('submitProgress') ? '保存中…' : '保存进展' }}</button>
             </form>
-            <div v-for="item in currentProgress" :key="item.progressId" class="activity-row"><small>{{ timeText(item.occurredAt) }}</small><p>{{ item.summary }}</p></div>
+            <div v-for="item in currentProgress" :key="item.progressId" class="activity-row progress-row">
+              <div class="progress-main">
+                <small>{{ timeText(item.occurredAt) }}</small>
+                <p>{{ item.summary }}</p>
+              </div>
+              <button
+                v-if="supersedeTargetId !== item.progressId"
+                class="btn"
+                type="button"
+                @click="startSupersede(item)"
+              >
+                更正
+              </button>
+            </div>
+
+            <form
+              v-if="supersedeTarget !== null"
+              class="supersede-form"
+              @submit.prevent="saveSupersedeCurrent"
+            >
+              <label :for="`supersede-${supersedeTargetId}`">更正这条进展的正文</label>
+              <textarea
+                :id="`supersede-${supersedeTargetId}`"
+                v-model="supersedeDraft"
+                maxlength="1000"
+                aria-label="更正后的进展内容"
+                required
+              ></textarea>
+              <p v-if="supersedeError" class="cloud-error">{{ supersedeError }}</p>
+              <div class="form-actions">
+                <button class="btn primary" type="submit" :disabled="isBusy('supersedeProgress')">
+                  {{ isBusy('supersedeProgress') ? '保存中…' : '保存更正' }}
+                </button>
+                <button class="btn" type="button" @click="cancelSupersede">取消</button>
+              </div>
+            </form>
+
             <p v-if="!currentProgress.length" class="empty">当前阶段还没有进展记录。</p>
+
+            <details v-if="correctedProgress.length" class="corrected-history">
+              <summary>已更正的进展（{{ correctedProgress.length }} 条，正文保留）</summary>
+              <div v-for="item in correctedProgress" :key="item.progressId" class="activity-row">
+                <small>{{ timeText(item.occurredAt) }} · 已更正</small>
+                <p>{{ item.summary }}</p>
+              </div>
+            </details>
           </div>
         </section>
 
@@ -743,20 +860,16 @@ function dueText(value: string | null): string {
         </section>
       </div>
 
+      <CloudChatPanel />
+
       <section class="card unsupported-card">
         <div class="card-h">能力状态</div>
-        <div class="card-b"><p>时间线读取接口、阶段候选接口和云端阶段化 AI 建议暂未接入，当前页面不会用前端拼接结果或本地结果冒充服务端能力。</p></div>
+        <div class="card-b"><p>时间线读取接口和阶段候选接口仍未接入；AI 顾问聊天已接通，但记录不落库。「AI 建议卡片」本页暂未提供入口，页面不会用前端拼接结果或本地结果冒充服务端能力。</p></div>
       </section>
       </div>
 
       <div v-show="activeTab === 'data'" id="cloud-panel-data" role="tabpanel" aria-labelledby="cloud-tab-data">
-        <section class="card cloud-material-state">
-          <div class="card-h">项目资料</div>
-          <div class="card-b">
-            <p class="not-supported">云端材料列表还没有接入本页：服务端已提供材料读取接口，但前端数据层尚未提供对应的云端材料状态，页面不会把本地材料当成云端材料显示。</p>
-            <p>接入前可以这样继续：在上方切到「本地项目」上传并确认 MD、TXT 材料；材料接入云端后，这一页会显示当前版本、片段和已确认的理解条目。</p>
-          </div>
-        </section>
+        <CloudMaterialsPanel />
       </div>
     </template>
   </div>
@@ -822,6 +935,16 @@ function dueText(value: string | null): string {
 .unassigned { margin-top:12px; padding:8px 10px; background:#FAEEDA; border:1px solid #FAC775; border-radius:8px; color:#633806; font-size:12px; line-height:1.6; }
 .unassigned-row { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:6px; }
 .unassigned-row .btn { padding:4px 8px; font-size:11.5px; }
+.progress-row { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; }
+.progress-main { flex:1; min-width:0; }
+.progress-row .btn { flex-shrink:0; padding:4px 8px; font-size:11.5px; }
+.supersede-form { margin-top:10px; padding:10px; background:#f4f3ec; border:1px solid #e4e2da; border-radius:8px; display:grid; gap:6px; }
+.supersede-form label { font-size:12px; font-weight:600; color:#2c2c2a; }
+.supersede-form textarea { width:100%; min-height:56px; resize:vertical; border:1px solid #d3d1c7; border-radius:8px; padding:8px 10px; font:inherit; font-size:12.5px; outline:none; }
+.supersede-form textarea:focus { border-color:#378ADD; }
+.corrected-history { margin-top:12px; font-size:12px; color:#5f5e5a; }
+.corrected-history summary { cursor:pointer; color:#185FA5; }
+.corrected-history .activity-row { opacity:.75; }
 @media (max-width:800px) { .cloud-grid { grid-template-columns:1fr; } }
 @media (max-width:520px) {
   .cloud-head-row { align-items:stretch; flex-direction:column; }

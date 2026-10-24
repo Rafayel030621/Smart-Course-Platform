@@ -41,7 +41,7 @@ const mocked = vi.hoisted(() => ({
       archivedAt: string | null
     }>,
     evidence: [] as Array<{ evidenceId: string; status: 'active' | 'redacted'; milestoneId: string | null; taskId: string | null; didWhat: string; foundWhat: string; createdAt: string }>,
-    progress: [] as Array<{ progressId: string; status: 'active' | 'superseded'; milestoneId: string | null; taskId: string | null; summary: string; occurredAt: string }>,
+    progress: [] as Array<{ progressId: string; status: 'active' | 'superseded'; milestoneId: string | null; taskId: string | null; summary: string; occurredAt: string; revision: number }>,
     currentMilestoneId: 'milestone-1' as string | null,
     tasksHydrated: true,
     busy: false,
@@ -59,8 +59,38 @@ const mocked = vi.hoisted(() => ({
     completeTask: vi.fn(),
     reopenTask: vi.fn(),
     submitProgress: vi.fn(),
+    supersedeProgress: vi.fn(),
+    refreshProgress: vi.fn(async () => ({ ok: true, data: [] })),
     createEvidence: vi.fn(),
     isActionLoading: vi.fn((_name: string): boolean => false),
+    /* 材料（契约 22.8）：页面把「没读到」与「没有材料」分开，默认给一份已加载的空列表 */
+    materials: [] as Array<Record<string, unknown>>,
+    materialsStatus: 'ready' as 'idle' | 'loading' | 'ready' | 'error',
+    materialsError: null as { code: string; message: string } | null,
+    materialsHydrated: true,
+    materialUpload: { status: 'idle', error: null, lastUpload: null },
+    refreshMaterials: vi.fn(async () => ({ ok: true, data: [] })),
+    refreshTasks: vi.fn(async () => ({ ok: true, data: [] })),
+    loadMaterialSegments: vi.fn(async () => ({ ok: true, data: [] })),
+    loadMaterialUnderstanding: vi.fn(async () => ({ ok: true, data: [] })),
+    cachedSegments: vi.fn((): unknown[] | null => null),
+    cachedUnderstanding: vi.fn((): unknown[] | null => null),
+    isMaterialReadLoading: vi.fn((): boolean => false),
+    uploadMaterial: vi.fn(),
+    archiveMaterial: vi.fn(),
+    restoreMaterial: vi.fn(),
+    reparseMaterial: vi.fn(),
+    /* 聊天（契约 6.4）：不落库，只有本次会话内存 */
+    chat: {
+      status: 'idle' as 'idle' | 'loading' | 'error',
+      messages: [] as Array<Record<string, unknown>>,
+      error: null as { code: string; message: string } | null,
+      pendingQuestion: null as string | null,
+      contextAttached: true,
+    },
+    sendChat: vi.fn(),
+    retryChat: vi.fn(),
+    clearChat: vi.fn(),
   },
   push: vi.fn(),
 }))
@@ -111,12 +141,16 @@ function resetState(): void {
     { taskId: 'task-2', milestoneId: 'milestone-2', title: '验证结论', doneCriteria: '', status: 'todo', archivedAt: null },
   ]
   mocked.cloud.currentMilestoneId = 'milestone-1'
+  mocked.cloud.progress = []
 }
 
 describe('CloudProjectWorkbench', () => {
   beforeEach(() => {
+    vi.clearAllMocks()
     resetState()
     mocked.cloud.isActionLoading = vi.fn(() => false)
+    mocked.cloud.supersedeProgress.mockResolvedValue({ ok: true, data: {} })
+    mocked.cloud.refreshProgress.mockResolvedValue({ ok: true, data: [] })
   })
 
   it('切换查看阶段后只展示所选阶段的任务', async () => {
@@ -188,7 +222,8 @@ describe('CloudProjectWorkbench', () => {
     await tabs[1]?.trigger('click')
 
     expect(wrapper.get('#cloud-panel-data').isVisible()).toBe(true)
-    expect(wrapper.get('#cloud-panel-data').text()).toContain('云端材料列表还没有接入本页')
+    expect(wrapper.get('#cloud-panel-data').text()).toContain('项目资料')
+    expect(wrapper.get('#cloud-panel-data').text()).toContain('上传 MD / TXT')
     expect((wrapper.get('input[aria-label="阶段名称"]').element as HTMLInputElement).value).toBe('未提交的阶段草稿')
 
     await tabs[0]?.trigger('click')
@@ -243,5 +278,123 @@ describe('CloudProjectWorkbench', () => {
       milestoneId: 'milestone-1',
       expectedRevision: undefined,
     })
+  })
+
+  it('进展可以更正：带上当前 revision 提交，成功后收起表单', async () => {
+    mocked.cloud.progress = [
+      {
+        progressId: 'progress-1',
+        status: 'active',
+        milestoneId: 'milestone-1',
+        taskId: null,
+        summary: '写错了的进展',
+        occurredAt: '2026-10-22T10:00:00.000Z',
+        revision: 3,
+      },
+    ]
+    mocked.cloud.supersedeProgress.mockResolvedValue({ ok: true, data: {} })
+    const wrapper = mount(CloudProjectWorkbench)
+
+    await wrapper.get('.progress-row button').trigger('click')
+    const textarea = wrapper.get('textarea[aria-label="更正后的进展内容"]')
+    expect((textarea.element as HTMLTextAreaElement).value).toBe('写错了的进展')
+
+    await textarea.setValue('更正后的进展')
+    await wrapper.get('.supersede-form').trigger('submit')
+
+    expect(mocked.cloud.supersedeProgress).toHaveBeenCalledWith({
+      progressId: 'progress-1',
+      expectedRevision: 3,
+      summary: '更正后的进展',
+    })
+    expect(wrapper.find('.supersede-form').exists()).toBe(false)
+  })
+
+  it('进展更正遇到版本冲突时给出中文提示并刷新列表', async () => {
+    mocked.cloud.progress = [
+      {
+        progressId: 'progress-1',
+        status: 'active',
+        milestoneId: 'milestone-1',
+        taskId: null,
+        summary: '旧内容',
+        occurredAt: '2026-10-22T10:00:00.000Z',
+        revision: 3,
+      },
+    ]
+    mocked.cloud.supersedeProgress.mockResolvedValue({
+      ok: false,
+      code: 'STALE_REVISION',
+      message: '这条进展已被更新',
+    })
+    const wrapper = mount(CloudProjectWorkbench)
+
+    await wrapper.get('.progress-row button').trigger('click')
+    await wrapper.get('.supersede-form').trigger('submit')
+
+    expect(mocked.cloud.refreshProgress).toHaveBeenCalled()
+    expect(wrapper.get('.supersede-form').text()).toContain('刚被更新过')
+  })
+
+  it('已更正的进展收进历史区，不再算作当前进展', () => {
+    mocked.cloud.progress = [
+      {
+        progressId: 'progress-1',
+        status: 'superseded',
+        milestoneId: 'milestone-1',
+        taskId: null,
+        summary: '被更正的旧正文',
+        occurredAt: '2026-10-22T09:00:00.000Z',
+        revision: 4,
+      },
+    ]
+
+    const wrapper = mount(CloudProjectWorkbench)
+
+    expect(wrapper.find('.progress-row').exists()).toBe(false)
+    expect(wrapper.get('.corrected-history').text()).toContain('已更正的进展（1 条')
+    expect(wrapper.get('.corrected-history').text()).toContain('被更正的旧正文')
+  })
+
+  it('空白项目（没有阶段）里记录的进展仍然显示，不会记完就消失', () => {
+    mocked.cloud.milestones = []
+    mocked.cloud.tasks = []
+    mocked.cloud.currentMilestoneId = null
+    mocked.cloud.progress = [
+      {
+        progressId: 'progress-1',
+        status: 'active',
+        milestoneId: null,
+        taskId: null,
+        summary: '空白项目里的第一条进展',
+        occurredAt: '2026-10-23T01:00:00.000Z',
+        revision: 1,
+      },
+    ]
+
+    const wrapper = mount(CloudProjectWorkbench)
+
+    expect(wrapper.get('.progress-row').text()).toContain('空白项目里的第一条进展')
+  })
+
+  it('未挂阶段的证据也显示在当前阶段，不会被阶段过滤掉', () => {
+    mocked.cloud.milestones = []
+    mocked.cloud.tasks = []
+    mocked.cloud.currentMilestoneId = null
+    mocked.cloud.evidence = [
+      {
+        evidenceId: 'evd_1',
+        status: 'active',
+        milestoneId: null,
+        taskId: null,
+        didWhat: '没挂阶段的证据',
+        foundWhat: '',
+        createdAt: '2026-10-23T01:00:00.000Z',
+      },
+    ]
+
+    const wrapper = mount(CloudProjectWorkbench)
+
+    expect(wrapper.text()).toContain('没挂阶段的证据')
   })
 })
