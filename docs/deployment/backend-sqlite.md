@@ -163,3 +163,80 @@ sqlite3 /var/lib/course-platform/course-platform.sqlite \
 - [ ] 已做数据库备份并验证恢复
 - [ ] 未修改 Nginx、Cloudflare 隧道、18080 或模型密钥
 - [ ] 首次 V3 请求后检查迁移日志，无 SQL/路径/正文进入日志
+
+## 8. 本次生产上线记录（2026-10-24，w-4090@sinnet）
+
+> 目标环境：`https://course.xinxian-music.xyz`（前端静态目录 `/home/w-4090/wzh-jhl/frontend`）
+> + `https://api.xinxian-music.xyz`（Cloudflare 隧道 → `127.0.0.1:8080`，systemd 单元
+> `course-wzh-jhl-backend.service`，Node v22.22.3 via nvm）。
+
+### 8.1 上线步骤（按序）
+
+```bash
+# 1) 环境准备（只追加，不动其他变量）
+sudo install -d -m 700 -o w-4090 -g w-4090 /var/lib/course-platform
+HASH=$(node -e "console.log(require('crypto').createHash('sha256').update('<邀请码>').digest('hex'))")
+sudo tee -a /etc/course-platform/backend.env >/dev/null <<CFG
+SCP_DB_PATH=/var/lib/course-platform/course-platform.sqlite
+INVITE_CODE_SHA256=$HASH
+CFG
+
+# 2) 依赖（服务器原本没有 server/node_modules；better-sqlite3 预编译下载超时，改源码编译）
+scp server/package.json server/package-lock.json w-4090@<host>:/home/w-4090/wzh-jhl/backend/
+mkdir -p /home/w-4090/.deploy-cache/node-gyp
+cd /home/w-4090/wzh-jhl/backend
+XDG_CACHE_HOME=/home/w-4090/.deploy-cache \
+npm_config_cache=/home/w-4090/.npm-deploy-cache \
+npm_config_devdir=/home/w-4090/.deploy-cache/node-gyp \
+NODEJS_ORG_MIRROR=https://npmmirror.com/mirrors/node \
+  /home/w-4090/.nvm/versions/node/v22.22.3/bin/npm ci --omit=dev --build-from-source
+node -e "import('better-sqlite3').then(()=>console.log('native ok'))"
+
+# 3) 本地构建前端（必须带 API 地址，否则默认指向 127.0.0.1:8080）
+$env:VITE_API_BASE_URL="https://api.xinxian-music.xyz"; npm run build; Remove-Item Env:VITE_API_BASE_URL
+
+# 4) 上传：先传 dist.new，验货，再切换
+scp -r server/dist  w-4090@<host>:/home/w-4090/wzh-jhl/backend/dist.new
+scp -r dist\.       w-4090@<host>:/home/w-4090/wzh-jhl/frontend/
+
+# 5) 切换（关键：先验货，失败要能中止）
+cd /home/w-4090/wzh-jhl/backend
+ls -l dist.new/src/index.js                      # 缺文件就不要继续
+test -d dist.new && mv dist dist.old-$(date +%F-%H%M) && mv dist.new dist && echo 切换完成
+
+# 6) 重启与迁移验证
+sudo systemctl restart course-wzh-jhl-backend.service
+curl -sS  http://127.0.0.1:8080/health                     # 200 {"status":"ok"}
+curl -isS  http://127.0.0.1:8080/api/auth/me | head -3     # 401 = 迁移成功
+sudo ls -lh /var/lib/course-platform/                      # 出现 .sqlite / -wal / -shm
+sudo chmod 600 /var/lib/course-platform/course-platform.sqlite*
+```
+
+### 8.2 本次踩到的三个坑
+
+1. **服务器原本没有 `server/node_modules`**：旧版后端只依赖 Node 内置模块，新版依赖
+   `better-sqlite3` + `bcryptjs`，必须先 `npm ci --omit=dev`，否则一启动就 `MODULE_NOT_FOUND`。
+2. **`~/.cache` 是指向已不存在磁盘的坏软链**（`/mnt/nvme0n1/cache`），node-gyp 建缓存时报
+   `ENOTDIR`。**不要改这个软链**（其他程序也在用），改用环境变量把本次构建的缓存指到别处：
+   `XDG_CACHE_HOME` / `npm_config_cache` / `npm_config_devdir`。
+3. **`better-sqlite3` 预编译二进制下载超时**：加 `--build-from-source` +
+   `NODEJS_ORG_MIRROR=https://npmmirror.com/mirrors/node` 后编译通过（服务器有 make/g++/python3）。
+
+### 8.3 一次生产中断与纠正
+
+切换构建时 `dist.new` 未上传成功，而命令写成
+`mv dist dist.old-X && mv dist.new dist`——第二个 `mv` 失败**不会回退**第一个，导致 `dist` 被移走、
+服务启动失败约 1 分钟。
+
+**规则（写进流程，别再犯）**：
+
+- 上传后先 `ls dist.new/src/index.js` 验货；
+- 切换一律写成 `test -d dist.new && … && echo 切换完成`，任一步失败即中止；
+- 只保留一个 `dist.old-*`，发布成功后再删上一个；
+- 回滚 = `sudo systemctl stop … && rm -rf dist && mv dist.old-* dist && sudo systemctl start …`。
+
+### 8.4 遗留事项
+
+- 数据库**尚无自动备份**（`/var/lib/course-platform` 单点，硬盘故障即全丢）；
+- 解析失败时 warn 日志记录模型原文前 120 字符（排错需要，暂无开关）；
+- 验收结论与截图见 `docs/v3-v4-acceptance.md`。
