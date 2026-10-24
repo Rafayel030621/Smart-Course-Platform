@@ -91,6 +91,21 @@ const mocked = vi.hoisted(() => ({
     sendChat: vi.fn(),
     retryChat: vi.fn(),
     clearChat: vi.fn(),
+    /* AI 建议（契约 23.5）：工作台内只挂载面板，具体交互由 CloudAdvisorPanel 测试覆盖 */
+    advisor: {
+      status: 'idle' as 'idle' | 'loading' | 'ready' | 'error',
+      source: null as 'model' | 'fallback' | 'local-rule' | null,
+      fallbackReason: null as string | null,
+      error: null as { code: string; message: string } | null,
+      suggestions: [] as Array<{
+        id: string
+        title: string
+        whyNow: string
+        doneCriteria: string
+      }>,
+    },
+    buildAdvisorContext: vi.fn(() => ({ ok: true, data: {} })),
+    refreshAdvisor: vi.fn(async () => ({ ok: true })),
   },
   push: vi.fn(),
 }))
