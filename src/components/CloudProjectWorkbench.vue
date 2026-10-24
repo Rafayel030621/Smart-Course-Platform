@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import { useCloudStore } from '@/stores/cloud'
 import { usePlatformStore } from '@/stores/platform'
 import CloudAdvisorPanel from '@/components/CloudAdvisorPanel.vue'
+import CloudCandidatePanel from '@/components/CloudCandidatePanel.vue'
 import CloudChatPanel from '@/components/CloudChatPanel.vue'
 import CloudMaterialsPanel from '@/components/CloudMaterialsPanel.vue'
 import type { CloudMilestone, CloudTask, ProgressRecord } from '@/types/platform'
@@ -70,6 +71,7 @@ const supersedeTarget = computed<ProgressRecord | null>(
 const actionError = ref('')
 /** 已有项目时也能新建：创建表单由本地开关控制，不依赖“当前没有项目” */
 const showCreate = ref(false)
+const candidatePanel = ref<{ generate: () => Promise<void> } | null>(null)
 
 /**
  * 标签页：保持「项目推进｜项目资料」布局（V3-V4 任务 2）。
@@ -205,7 +207,10 @@ function isBusy(action: string): boolean {
 }
 
 function requestMilestoneCandidates(): void {
-  actionError.value = '阶段候选接口暂未接入，当前只能手动新建阶段；平台不会用本地或假数据代替候选结果。'
+  activeTab.value = 'progress'
+  void nextTick(() => {
+    void candidatePanel.value?.generate()
+  })
 }
 
 type NextStepKind =
@@ -601,7 +606,7 @@ function dueText(value: string | null): string {
 <template>
   <div class="cloud-workbench">
     <div class="mode-banner">
-      <b>云端项目</b> 当前数据来自服务端。项目、阶段、任务、证据和进展会按账号保存；未实现的时间线和阶段候选不会用本地数据代替。
+      <b>云端项目</b> 当前数据来自服务端。项目、阶段、任务、证据和进展会按账号保存；未实现的时间线不会用本地数据代替。
     </div>
 
     <section v-if="!project || showCreate" class="card cloud-create">
@@ -709,6 +714,8 @@ function dueText(value: string | null): string {
         </div>
       </section>
 
+      <CloudCandidatePanel ref="candidatePanel" />
+
       <CloudAdvisorPanel />
 
       <section class="card next-step">
@@ -742,7 +749,7 @@ function dueText(value: string | null): string {
             </form>
             <div class="candidate-entry">
               <button class="btn" type="button" @click="requestMilestoneCandidates">根据项目资料生成候选</button>
-              <span>候选接口接入后，生成结果需由你确认才会写入项目。</span>
+              <span>生成结果需由你逐条确认后才会写入项目。</span>
             </div>
             <div v-for="milestone in allMilestones" :key="milestone.milestoneId" class="milestone-row" :class="{ archived: milestone.archivedAt !== null }">
               <div class="milestone-row-main"><strong>{{ milestone.name }}</strong><span class="tag">{{ statusText(milestone.status) }}</span><small>{{ milestone.taskStats.done }}/{{ milestone.taskStats.total }} · {{ milestone.taskStats.progress }}%</small><small>{{ dueText(milestone.dueAt) }}</small></div>
@@ -867,7 +874,7 @@ function dueText(value: string | null): string {
 
       <section class="card unsupported-card">
         <div class="card-h">能力状态</div>
-        <div class="card-b"><p>时间线读取接口和阶段候选接口仍未接入；材料、AI 建议与聊天已接入</p></div>
+        <div class="card-b"><p>时间线读取接口仍未接入；材料、阶段候选、AI 建议与聊天已接入</p></div>
       </section>
       </div>
 

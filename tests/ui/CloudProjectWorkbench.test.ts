@@ -106,6 +106,13 @@ const mocked = vi.hoisted(() => ({
     },
     buildAdvisorContext: vi.fn(() => ({ ok: true, data: {} })),
     refreshAdvisor: vi.fn(async () => ({ ok: true })),
+    /* 阶段候选（契约 23.7）：具体交互由 CloudCandidatePanel 测试覆盖 */
+    candidates: [] as Array<Record<string, unknown>>,
+    candidatesStatus: 'idle' as 'idle' | 'loading' | 'ready' | 'error',
+    candidatesError: null as { code: string; message: string } | null,
+    candidatesNotice: null as string | null,
+    generateCandidates: vi.fn(async () => ({ ok: true, data: [] })),
+    refreshMilestones: vi.fn(async () => undefined),
   },
   push: vi.fn(),
 }))
@@ -199,12 +206,14 @@ describe('CloudProjectWorkbench', () => {
     expect(rows[2]?.findAll('button')[1]?.attributes('disabled')).toBeDefined()
   })
 
-  it('点击阶段候选入口时明确提示接口尚未接入', async () => {
+  it('点击阶段候选入口会调用真实的候选生成 action', async () => {
     const wrapper = mount(CloudProjectWorkbench)
 
     await wrapper.get('.candidate-entry button').trigger('click')
 
-    expect(wrapper.text()).toContain('阶段候选接口暂未接入')
+    await vi.waitFor(() => {
+      expect(mocked.cloud.generateCandidates).toHaveBeenCalledWith({ maxCandidates: 2 })
+    })
   })
 
   it('无里程碑时显示新建与候选两个入口，新建会聚焦名称输入', async () => {

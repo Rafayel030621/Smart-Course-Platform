@@ -10,6 +10,7 @@
  *   仍缺实现的时间线端点（22.11）**不在这里伪造**。
  */
 import { normalizeProjectProfile } from '@/domain/materials'
+import { MILESTONE_CANDIDATE_PROMPT_VERSION } from '@/domain/recommendation'
 import { V3_CONTRACT_VERSION } from '@/types/platform'
 import type {
   CloudDoubt,
@@ -17,6 +18,9 @@ import type {
   CloudMaterial,
   CloudMaterialSegment,
   CloudMilestone,
+  CloudMilestoneCandidate,
+  CloudMilestoneCandidateSource,
+  CloudMilestoneCandidateTask,
   CloudProject,
   CloudProjectSummary,
   CloudTask,
@@ -128,6 +132,84 @@ export function parseMilestone(value: unknown): CloudMilestone | null {
     completedAt: nullableString(record, 'completedAt'),
     archivedAt: nullableString(record, 'archivedAt'),
     taskStats: parseTaskStats(record['taskStats']) ?? emptyTaskStats(),
+  }
+}
+
+function parseCandidateSource(value: unknown): CloudMilestoneCandidateSource | null {
+  const record = asRecord(value)
+  if (record === null) return null
+  const materialId = stringField(record, 'materialId')
+  const materialName = stringField(record, 'materialName')
+  const materialVersion = asNumber(record['materialVersion'])
+  const segmentId = stringField(record, 'segmentId')
+  const startLine = asNumber(record['startLine'])
+  const endLine = asNumber(record['endLine'])
+  const rawItemId = record['itemId']
+  const itemId = rawItemId === undefined || rawItemId === null ? null : asString(rawItemId)
+  if (
+    materialId === null ||
+    materialName === null ||
+    materialVersion === null ||
+    segmentId === null ||
+    startLine === null ||
+    endLine === null ||
+    (rawItemId !== undefined && rawItemId !== null && itemId === null)
+  ) {
+    return null
+  }
+  return { materialId, materialName, materialVersion, segmentId, startLine, endLine, itemId }
+}
+
+function parseCandidateTask(value: unknown): CloudMilestoneCandidateTask | null {
+  const record = asRecord(value)
+  if (record === null) return null
+  const title = stringField(record, 'title')
+  const doneCriteria = stringField(record, 'doneCriteria')
+  return title === null || doneCriteria === null ? null : { title, doneCriteria }
+}
+
+export function parseMilestoneCandidate(value: unknown): CloudMilestoneCandidate | null {
+  const record = asRecord(value)
+  if (record === null) return null
+  const candidateId = stringField(record, 'candidateId')
+  const name = stringField(record, 'name')
+  const goal = stringField(record, 'goal')
+  const doneCriteria = stringField(record, 'doneCriteria')
+  const expiresAt = stringField(record, 'expiresAt')
+  const tasksRaw = asArray(record['suggestedTasks'])
+  const risksRaw = asArray(record['risks'])
+  const sourcesRaw = asArray(record['sources'])
+  if (
+    candidateId === null ||
+    name === null ||
+    goal === null ||
+    doneCriteria === null ||
+    expiresAt === null ||
+    tasksRaw === null ||
+    risksRaw === null ||
+    sourcesRaw === null
+  ) {
+    return null
+  }
+  const suggestedTasks = tasksRaw.map(parseCandidateTask)
+  if (suggestedTasks.some((task) => task === null)) return null
+  const risks: string[] = []
+  for (const risk of risksRaw) {
+    const text = asString(risk)
+    if (text === null) return null
+    risks.push(text)
+  }
+  const sources = sourcesRaw.map(parseCandidateSource)
+  if (sources.some((source) => source === null)) return null
+  return {
+    candidateId,
+    name,
+    goal,
+    doneCriteria,
+    suggestedTasks: suggestedTasks as CloudMilestoneCandidateTask[],
+    risks,
+    sources: sources as CloudMilestoneCandidateSource[],
+    expiresAt,
   }
 }
 
@@ -849,6 +931,126 @@ export async function createMilestone(
       fetchImpl: options.fetchImpl,
     },
   )
+}
+
+export interface GenerateMilestoneCandidatesInput {
+  projectRevision: number
+  promptVersion: string
+  maxCandidates?: 1 | 2 | 3
+  focus?: string | null
+}
+
+export interface MilestoneCandidatesResult {
+  projectRevision: number
+  promptVersion: string
+  source: 'model' | 'fallback'
+  fallbackReason: string | null
+  notice: string | null
+  candidates: CloudMilestoneCandidate[]
+}
+
+/**
+ * 契约 23.7：生成阶段候选。
+ *
+ * 服务端响应是顶层字段（不是 `data` 包络），因此这里复用 `requestV3Raw` 的
+ * HTTP/错误处理，再按契约校验顶层字段；写请求仍使用同一套 v3 请求信封。
+ */
+export async function generateMilestoneCandidates(
+  projectId: string,
+  input: GenerateMilestoneCandidatesInput,
+  options: WriteOptions = {},
+): Promise<V3Result<MilestoneCandidatesResult>> {
+  const maxCandidates = input.maxCandidates ?? 2
+  const focus = input.focus === undefined || input.focus === null ? null : input.focus.trim()
+  if (
+    !Number.isInteger(input.projectRevision) ||
+    input.projectRevision < 1 ||
+    input.promptVersion !== MILESTONE_CANDIDATE_PROMPT_VERSION ||
+    !Number.isInteger(maxCandidates) ||
+    maxCandidates < 1 ||
+    maxCandidates > 3 ||
+    (focus !== null && focus.length > 200)
+  ) {
+    return {
+      ok: false,
+      error: makeV3Error('INVALID_INPUT', {
+        message: '阶段候选请求参数不合法',
+        cause: 'validation',
+      }),
+    }
+  }
+
+  const identity = writeIdentity('milestone.candidates', options, projectId, {
+    projectRevision: input.projectRevision,
+    promptVersion: input.promptVersion,
+    maxCandidates,
+    focus,
+  })
+  const raw = await requestV3Raw(
+    `/api/projects/${encodeURIComponent(projectId)}/milestones/candidates`,
+    {
+      method: 'POST',
+      body: {
+        ...envelope({
+          requestId: identity.requestId,
+          idempotencyKey: identity.idempotencyKey,
+          projectId,
+          projectRevision: input.projectRevision,
+        }),
+        promptVersion: input.promptVersion,
+        maxCandidates,
+        ...(focus === null || focus === '' ? {} : { focus }),
+      },
+      signal: options.signal,
+      timeoutMs: options.timeoutMs,
+      fetchImpl: options.fetchImpl,
+    },
+  )
+  if (!raw.ok) return raw
+
+  const body = asRecord(raw.body)
+  if (body === null) return { ok: false, error: makeV3Error('INVALID_RESPONSE') }
+  if (body['contractVersion'] !== V3_CONTRACT_VERSION) {
+    return { ok: false, error: makeV3Error('CONTRACT_VERSION_MISMATCH') }
+  }
+  if (body['requestId'] !== identity.requestId || body['projectId'] !== projectId) {
+    return { ok: false, error: makeV3Error('STALE_RESPONSE') }
+  }
+  const projectRevision = asNumber(body['projectRevision'])
+  const promptVersion = asString(body['promptVersion'])
+  const source = asString(body['source'])
+  const candidatesRaw = asArray(body['candidates'])
+  if (
+    projectRevision === null ||
+    projectRevision < input.projectRevision ||
+    promptVersion !== MILESTONE_CANDIDATE_PROMPT_VERSION ||
+    (source !== 'model' && source !== 'fallback') ||
+    candidatesRaw === null ||
+    candidatesRaw.length > 3
+  ) {
+    return { ok: false, error: makeV3Error('INVALID_RESPONSE') }
+  }
+  const candidates = candidatesRaw.map(parseMilestoneCandidate)
+  if (candidates.some((candidate) => candidate === null)) {
+    return { ok: false, error: makeV3Error('INVALID_RESPONSE') }
+  }
+
+  return {
+    ok: true,
+    data: {
+      projectRevision,
+      promptVersion,
+      source,
+      fallbackReason: nullableString(body, 'fallbackReason'),
+      notice: nullableString(body, 'notice'),
+      candidates: candidates as CloudMilestoneCandidate[],
+    },
+    requestId: identity.requestId,
+    projectId,
+    projectRevision,
+    replayed: false,
+    changed: false,
+  }
 }
 
 export interface UpdateMilestoneInput {
