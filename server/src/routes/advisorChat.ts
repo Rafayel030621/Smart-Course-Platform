@@ -5,6 +5,7 @@ import {
   type AdvisorChatSuccessResponse,
   type AdvisorFailureResponse,
   type AdvisorLogger,
+  type ConfirmedMaterial,
   type MilestoneContext,
 } from '../advisor/types.js'
 import type { AdvisorService } from '../advisor/service.js'
@@ -30,6 +31,12 @@ export interface AdvisorChatRouteOptions {
   maxBodyBytes?: number
   /** 契约 23.2 规则 1/4：项目级实体归属校验；返回错误时不调用模型 */
   validateMilestoneContext?: (projectId: string, context: MilestoneContext) => V3Error | null
+  /** 契约 23.3：v3 材料门禁；用服务端权威材料替换客户端自报内容 */
+  resolveConfirmedMaterials?: (
+    projectId: string,
+    materials: ConfirmedMaterial[],
+    segmentIds: string[],
+  ) => ConfirmedMaterial[]
 }
 
 export function createAdvisorChatHandler(options: AdvisorChatRouteOptions): (req: IncomingMessage, res: ServerResponse) => Promise<boolean> {
@@ -63,6 +70,35 @@ export function createAdvisorChatHandler(options: AdvisorChatRouteOptions): (req
         })
         failure(res, 400, parsed.value.requestId, validationError.publicMessage)
         return true
+      }
+    }
+    if (
+      parsed.value.promptVersion === 'advisor-chat-v3' &&
+      options.resolveConfirmedMaterials &&
+      (parsed.value.confirmedMaterials ?? []).length > 0
+    ) {
+      try {
+        const segmentIds = (parsed.value.confirmedMaterials ?? []).flatMap((material) =>
+          material.segments.map((segment) => segment.segmentId),
+        )
+        parsed.value.confirmedMaterials = options.resolveConfirmedMaterials(
+          parsed.value.projectId,
+          parsed.value.confirmedMaterials ?? [],
+          segmentIds,
+        )
+      } catch (error) {
+        if (error instanceof Error && 'status' in error && 'code' in error) {
+          const v3Error = error as V3Error
+          failure(
+            res,
+            v3Error.status,
+            parsed.value.requestId,
+            v3Error.publicMessage,
+            v3Error.code as 'UNCONFIRMED_MATERIAL' | 'MATERIAL_VERSION_OUTDATED',
+          )
+          return true
+        }
+        throw error
       }
     }
     try {

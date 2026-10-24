@@ -211,6 +211,29 @@ function seedContextFixture(runtime: ReturnType<typeof createV3Runtime>): void {
         created_at, updated_at, archived_at)
      VALUES ('prg_a', ?, 'ms_v3', 'tsk_a', ?, '完成下载', '[]', ?, 'active', NULL, ?, 1, ?, ?, NULL)`,
   ).run(projectId, userId, now, userId, now, now)
+
+  db.prepare(
+    `INSERT INTO materials
+       (material_id, material_version, project_id, user_id, name, type, size, encoding,
+        status, revision, sha256, failure_reason, created_at, updated_at, archived_at,
+        content_text)
+     VALUES ('mat_v3', 1, ?, ?, '实验手册.md', 'md', 100, 'utf-8', 'parsed', 1, NULL, NULL,
+             ?, ?, NULL, '重点是有效波高、风速、时间、经纬度。')`,
+  ).run(projectId, userId, now, now)
+  db.prepare(
+    `INSERT INTO material_segments
+       (material_id, material_version, segment_id, idx, start_line, end_line, text,
+        char_count, created_at)
+     VALUES ('mat_v3', 1, 'seg_1', 0, 10, 12, '重点是有效波高、风速、时间、经纬度。', 20, ?)`,
+  ).run(now)
+  db.prepare(
+    `INSERT INTO understanding_items
+       (item_id, client_item_id, project_id, material_id, material_version, kind, text,
+        original_text, sources_json, status, source, revision, created_at, updated_at,
+        confirmed_at, confirmed_by_user_id, removed_at)
+     VALUES ('uitem_v3', NULL, ?, 'mat_v3', 1, 'data', '字段口径', '字段口径',
+             '[{"segmentId":"seg_1"}]', 'confirmed', 'ai', 1, ?, ?, ?, ?, NULL)`,
+  ).run(projectId, now, now, now, userId)
 }
 
 before(async () => {
