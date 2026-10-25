@@ -240,3 +240,64 @@ sudo chmod 600 /var/lib/course-platform/course-platform.sqlite*
 - 数据库**尚无自动备份**（`/var/lib/course-platform` 单点，硬盘故障即全丢）；
 - 解析失败时 warn 日志记录模型原文前 120 字符（排错需要，暂无开关）；
 - 验收结论与截图见 `docs/v3-v4-acceptance.md`。
+
+## 9. 数据库自动备份（2026-10-25 增加）
+
+### 9.1 备份脚本
+
+`docs/deployment/scripts/backup-db.sh`：用 SQLite 官方在线备份接口 `.backup`，
+**不需要停服务**（WAL 模式下直接 `cp` 单文件会漏掉已提交事务，这是最容易犯的错）。
+
+脚本做的四件事：备份 → 校验（`integrity_check` + `users` 表非空 + `schema_migrations` 可读）
+→ 记录日志 → 按保留天数清理。任何一步失败都会删掉半成品并非零退出，**不会留下坏文件冒充备份**。
+
+### 9.2 安装（服务器）
+
+```bash
+install -d -m 700 -o w-4090 -g w-4090 /home/w-4090/backups
+install -m 700 docs/deployment/scripts/backup-db.sh /home/w-4090/wzh-jhl/backup-db.sh
+```
+
+手动跑一次，**必须看到成功日志**：
+
+```bash
+SCP_DB_PATH=/var/lib/course-platform/course-platform.sqlite \
+BACKUP_DIR=/home/w-4090/backups KEEP_DAYS=7 \
+  /home/w-4090/wzh-jhl/backup-db.sh
+tail -2 /home/w-4090/backups/backup.log
+ls -lh /home/w-4090/backups/ | tail -3
+```
+
+### 9.3 定时执行
+
+```bash
+crontab -e
+# 每天 03:00 备份，日志同时写系统日志，失败时能看见
+0 3 * * * SCP_DB_PATH=/var/lib/course-platform/course-platform.sqlite BACKUP_DIR=/home/w-4090/backups KEEP_DAYS=7 /home/w-4090/wzh-jhl/backup-db.sh >> /home/w-4090/backups/cron.log 2>&1
+```
+
+验证 cron 已生效：`crontab -l | grep backup-db`。
+
+### 9.4 恢复（演练过一次才算有备份）
+
+```bash
+sudo systemctl stop course-wzh-jhl-backend.service
+sudo cp -a /var/lib/course-platform/course-platform.sqlite \
+           /var/lib/course-platform/course-platform.sqlite.before-restore
+sudo cp /home/w-4090/backups/course-<日期>.sqlite \
+        /var/lib/course-platform/course-platform.sqlite
+sudo rm -f /var/lib/course-platform/course-platform.sqlite-wal \
+           /var/lib/course-platform/course-platform.sqlite-shm
+sudo chown w-4090:w-4090 /var/lib/course-platform/course-platform.sqlite
+sudo chmod 600 /var/lib/course-platform/course-platform.sqlite
+sudo systemctl start course-wzh-jhl-backend.service
+curl -sS http://127.0.0.1:8080/health
+curl -i -sS http://127.0.0.1:8080/api/auth/me | head -3   # 期望 401
+```
+
+**注意**：恢复会丢掉备份点之后的全部数据，所以恢复前先把当前库另存一份（上面第 2 行）。
+
+### 9.5 已知边界
+
+- 备份在**同一台机器**。机器整机丢失时备份一起丢；要异地就再加一条 `rsync`/对象存储同步，本阶段不做（5–20 人规模，同机备份已消除绝大多数风险）。
+- 备份成功率只看 `backup.log`，没有告警通道；发现连续失败再考虑接通知。
