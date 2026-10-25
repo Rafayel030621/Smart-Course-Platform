@@ -136,3 +136,55 @@ export function loadModelConfig(env: NodeJS.ProcessEnv = process.env): ModelConf
 
 /** 进程启动时使用的模型配置 */
 export const modelConfig: ModelConfig = loadModelConfig()
+
+/* ---------------------------------------------------------------- 论文检索配置 */
+
+/** OpenAlex 默认超时（契约 29.5）：超过即降级，不把上游错误抛给学生 */
+export const DEFAULT_OPENALEX_TIMEOUT_MS = 8_000
+const MIN_OPENALEX_TIMEOUT_MS = 500
+const MAX_OPENALEX_TIMEOUT_MS = 30_000
+
+export interface PapersConfig {
+  /** OpenAlex 礼貌池联系邮箱；未配置时为 null，检索返回 503 PAPERS_UPSTREAM_ERROR */
+  mailto: string | null
+  /** 上游超时。无论是否配置完整都有值 */
+  timeoutMs: number
+  /** 缺失的环境变量名。只放名字，绝不放值 */
+  missing: string[]
+}
+
+/**
+ * 解析 OpenAlex 超时。
+ * 与模型超时同风格：非法值回退默认并告警，而不是让服务起不来。
+ */
+export function parseOpenAlexTimeout(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === '') return DEFAULT_OPENALEX_TIMEOUT_MS
+
+  const value = Number(raw)
+  if (!Number.isInteger(value) || value < MIN_OPENALEX_TIMEOUT_MS || value > MAX_OPENALEX_TIMEOUT_MS) {
+    console.warn(
+      `[server] OPENALEX_TIMEOUT_MS 必须是 ${MIN_OPENALEX_TIMEOUT_MS}-${MAX_OPENALEX_TIMEOUT_MS} 之间的整数，已按默认 ${DEFAULT_OPENALEX_TIMEOUT_MS} 毫秒处理`,
+    )
+    return DEFAULT_OPENALEX_TIMEOUT_MS
+  }
+  return value
+}
+
+/**
+ * 读取论文检索配置。参数可注入，便于测试。
+ * 与模型配置一样：缺字段原样暴露成 missing，由路由转成 PAPERS_UPSTREAM_ERROR。
+ */
+export function loadPapersConfig(env: NodeJS.ProcessEnv = process.env): PapersConfig {
+  const mailto = env.OPENALEX_MAILTO?.trim() ?? ''
+  const missing: string[] = []
+  if (mailto === '') missing.push('OPENALEX_MAILTO')
+
+  return {
+    mailto: mailto === '' ? null : mailto,
+    timeoutMs: parseOpenAlexTimeout(env.OPENALEX_TIMEOUT_MS),
+    missing,
+  }
+}
+
+/** 进程启动时使用的论文检索配置 */
+export const papersConfig: PapersConfig = loadPapersConfig()

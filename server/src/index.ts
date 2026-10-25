@@ -1,7 +1,7 @@
 import { createServer, type Server } from 'node:http'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { config, modelConfig, type ServerConfig } from './config.js'
+import { config, modelConfig, papersConfig, type PapersConfig, type ServerConfig } from './config.js'
 import { createRuleFallback } from './advisor/fallback.js'
 import { createMockProvider, type MockProviderMode } from './advisor/mockProvider.js'
 import { createOpenAiCompatibleProvider } from './advisor/openaiCompatibleProvider.js'
@@ -10,12 +10,14 @@ import {
   createConsoleLogger,
   type AdvisorLogger,
   type AdvisorProvider,
+  type FetchLike,
   type MilestoneContext,
 } from './advisor/types.js'
 import { invalidInput, type V3Error } from './v3/errors.js'
 import { gateConfirmedMaterials, toConfirmedMaterials } from './v3/materialGate.js'
 import { createAdvisorHandler } from './routes/advisor.js'
 import { createAdvisorChatHandler } from './routes/advisorChat.js'
+import { createPapersHandler } from './routes/papers.js'
 import { handleHealth, sendJson } from './routes/health.js'
 import { handleApiCors } from './routes/cors.js'
 import {
@@ -56,6 +58,10 @@ export interface AppDependencies {
   v3?: V3RuntimeOptions
   /** 直接注入 V3 运行时（测试用，便于预置数据库） */
   v3Runtime?: V3Runtime
+  /** 覆盖论文检索配置；测试用它离线注入 OpenAlex 参数 */
+  papersConfig?: PapersConfig
+  /** 覆盖论文检索 fetch；测试用它避免真实网络 */
+  papersFetchImpl?: FetchLike
 }
 
 const MOCK_PROVIDER_MODES: readonly string[] = ['ok', 'empty', 'invalid', 'throw', 'not-configured', 'slow']
@@ -235,6 +241,12 @@ export function createApp(serverConfig: ServerConfig = config, deps: AppDependen
     service: materialsService,
     logger,
   })
+  const handlePapers = createPapersHandler({
+    runtime: v3Runtime,
+    logger,
+    papersConfig: deps.papersConfig ?? papersConfig,
+    fetchImpl: deps.papersFetchImpl,
+  })
 
   const server = createServer((req, res) => {
     if (handleApiCors(req, res)) return
@@ -247,6 +259,7 @@ export function createApp(serverConfig: ServerConfig = config, deps: AppDependen
       .then(async (handled) => {
         if (handled) return
         if (await handleAdvisorChat(req, res)) return
+        if (await handlePapers(req, res)) return
         if (await handleMaterials(req, res)) return
         if (await handleMaterialsUnderstanding(req, res)) return
         if (await handleV3Request(req, res, v3Runtime)) return

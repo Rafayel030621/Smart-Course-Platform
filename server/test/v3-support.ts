@@ -5,7 +5,8 @@ import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { createApp } from '../src/index.js'
-import { silentLogger } from '../src/advisor/types.js'
+import { silentLogger, type FetchLike } from '../src/advisor/types.js'
+import type { PapersConfig } from '../src/config.js'
 import type { ServerConfig } from '../src/config.js'
 import { createV3Runtime, hashInviteCode, type V3Runtime } from '../src/v3/runtime.js'
 import type { V3Logger, SafeLogFields } from '../src/v3/logger.js'
@@ -80,6 +81,8 @@ export async function createTestClient(
       maxEntries?: number
     }
     trustProxyHops?: number
+    papersConfig?: PapersConfig
+    papersFetchImpl?: FetchLike
   } = {},
 ): Promise<TestClient> {
   const dir = mkdtempSync(path.join(tmpdir(), 'scp-v3-test-'))
@@ -96,7 +99,12 @@ export async function createTestClient(
     trustProxyHops: options.trustProxyHops ?? 0,
     logger,
   })
-  const server = createApp(config, { logger: silentLogger, v3Runtime: runtime })
+  const server = createApp(config, {
+    logger: silentLogger,
+    v3Runtime: runtime,
+    papersConfig: options.papersConfig,
+    papersFetchImpl: options.papersFetchImpl,
+  })
   await new Promise<void>((resolve) => server.listen(0, config.host, resolve))
   const address = server.address() as AddressInfo
   const baseUrl = `http://${config.host}:${address.port}`
