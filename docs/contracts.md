@@ -1,6 +1,6 @@
 # 智慧课程平台 · 前后端接口契约
 
-> 文档修订：v3.11（材料理解统一为五块：goalCandidates / outcomeCandidates / dataNotes / methodNotes / openQuestions；修正提示词与契约措辞，不改接口字段与响应结构）
+> 文档修订：v4.0（新增论文检索、聊天持久化、V3 材料理解契约；论文检索走 OpenAlex 真实数据、模型不参与；新增两个上游错误码与两个环境变量）
 > 编制日期：2026-09-25（v2.0：2026-10-12；v3.0：2026-10-19，PR1 冻结 V3/V4 账号、阶段、进展、AI 上下文与迁移）
 > owner：负责人（后端）
 > 地位：**本文件是前后端唯一契约。** 四名成员不得自行新增字段或创建第二套 DTO。
@@ -3865,6 +3865,8 @@ v3 规则：
 | `REGISTER_REJECTED` | 409 | false | 重复注册、邀请码错误、账号不可用 | 注册未完成，请检查用户名、密码和邀请码 |
 | `FORBIDDEN_ORIGIN` | 403 | false | 写请求 Origin 缺失或不在白名单 | 请求来源不受信任 |
 | `RATE_LIMITED` | 429 | true | 登录/注册/写接口触发频率限制 | 尝试次数过多，请稍后再试 |
+| `PAPERS_UPSTREAM_ERROR` | 503 | true | 论文检索上游超时 / 5xx / 未配置 `OPENALEX_MAILTO` | 论文检索暂不可用，请稍后重试 |
+| `PAPERS_RATE_LIMITED` | 429 | true | 论文检索上游限流，短期重试仍失败 | 检索太频繁了，稍等一下再试 |
 | `PROJECT_NOT_FOUND` | 404 | false | 项目不存在或不属于当前用户 | 项目不存在或无权访问 |
 | `PROJECT_ARCHIVED` | 409 | false | 对归档项目执行领域写操作（项目 restore/delete 除外） | 项目已归档，请先恢复再编辑 |
 | `RESOURCE_NOT_FOUND` | 404 | false | 阶段/任务/证据/材料/进展/聊天不存在或不属于当前用户 | 请求的内容不存在或无权访问 |
@@ -4068,3 +4070,141 @@ git status / git diff --name-only 检查是否误改 server/src、src、部署�
 | v3.9 | 2026-10-20 | 只改文档、不改接口：新增 `docs/v3-v4-interface-status.md`（按接口逐条列实现状态与已知限制，供前端接入判断）；20.1 冻结表与第 0 节改为指向该清单；27.3 标题改为“契约冻结完成定义（PR1 已达成）” | 姜厚禄（后端） |
 | v3.10 | 2026-10-22 | 补充 §23.3 材料虚拟引用标识与 §23.2 项目级实体归属校验说明 | 姜厚禄（后端） |
 | v3.11 | 2026-10-24 | 材料理解统一为五块：`goalCandidates` / `outcomeCandidates` / `dataNotes` / `methodNotes` / `openQuestions`；修正提示词与契约中的旧计数措辞，不改接口字段与响应结构 | 姜厚禄（后端 + 契约） |
+| v4.0 | 2026-10-25 | V5：新增论文检索（第 29 节，OpenAlex 真实数据、模型不参与）、聊天持久化（第 30 节）、V3 材料理解（第 31 节，与 v2 路径并存）；错误码新增 `PAPERS_UPSTREAM_ERROR` / `PAPERS_RATE_LIMITED`；环境变量新增 `OPENALEX_MAILTO` / `OPENALEX_TIMEOUT_MS`；检索词可入日志、聊天单会话保留 500 条不提示、论文检索不缓存 | 姜厚禄（后端） |
+
+## 29. 论文检索契约（V5）
+
+### 29.1 设计约定
+
+1. **论文只能来自真实检索**：服务端代理 OpenAlex（免费、无需 Key），前端不直连；
+2. **模型不生成论文**：标题、作者、DOI、链接全部来自上游；本阶段没有“推荐理由”字段（V6 预留）；
+3. 请求必须带联系邮箱（`OPENALEX_MAILTO`）进入 OpenAlex 礼貌池；未配置时返回 503 `PAPERS_UPSTREAM_ERROR`；
+4. 上游超时 / 5xx / 限流 → **200 + `source: "fallback"` + 中文 `notice` + 空数组**，与 AI 建议的降级策略一致；
+5. 检索词进入服务端访问日志（只记方向关键词，不记学生正文）——已评审确认可接受。
+
+### 29.2 `GET /api/papers/search`
+
+| 字段 | 位置 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- | --- |
+| `projectId` | Query | string | 是 | 项目归属，权限校验与日志用 |
+| `query` | Query | string | 是 | 学生输入方向，1–200 字 |
+| `limit` | Query | number | 否 | 默认 5，最大 10 |
+| `contractVersion` | Query | string | 是 | 必须为 `3.0` |
+| `requestId` | Query | string | 是 | UUID |
+
+最终检索词由服务端组装：`项目名 + 当前阶段名 + query`；客户端传入的 `query` 之外的内容不参与检索。
+
+### 29.3 响应
+
+```json
+{
+  "contractVersion": "3.0",
+  "requestId": "…",
+  "projectId": "prj_…",
+  "source": "openalex",
+  "notice": null,
+  "papers": [
+    {
+      "title": "Wave height forecasting with…",
+      "authors": ["Li W.", "Chen X."],
+      "year": 2024,
+      "venue": "Ocean Engineering",
+      "doi": "10.1016/j.oceaneng.2024.118xxx",
+      "openAccessUrl": "https://…",
+      "citedByCount": 37
+    }
+  ]
+}
+```
+
+`papers[]` 上限 10 条，按相关度排序；服务端按 DOI 去重、过滤无标题条目。`openAccessUrl` 可能为 `null`，前端此时只显示 DOI 链接。
+
+### 29.4 失败路径
+
+| 场景 | 行为 |
+| --- | --- |
+| `projectId` 不属于当前用户 | 404 `PROJECT_NOT_FOUND` |
+| `query` 为空或超长、`limit` 越界 | 400 `INVALID_INPUT` |
+| OpenAlex 超时 / 5xx / 限流 | 200 + `source: "fallback"` + 中文 `notice` + 空数组 |
+| `OPENALEX_MAILTO` 未配置 | 503 `PAPERS_UPSTREAM_ERROR` |
+| 同一 `requestId` 重放 | 返回同一结果，不重复打上游 |
+
+### 29.5 环境变量
+
+| 变量 | 必填 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `OPENALEX_MAILTO` | 论文检索开启时必填 | 无 | 联系邮箱，进入 OpenAlex 礼貌池 |
+| `OPENALEX_TIMEOUT_MS` | 否 | 8000 | 上游超时，超过即降级 |
+
+**不按项目缓存结果**（已评审确认：5–20 人规模下避免陈旧）。
+
+## 30. 聊天持久化契约（V5）
+
+### 30.1 `POST /api/projects/{projectId}/chat/sessions`
+
+取得当前项目的会话：已存在则返回已有，不存在则创建。
+
+响应：`data: { sessionId, createdAt }`，其余为标准信封字段。
+
+### 30.2 `GET /api/projects/{projectId}/chat/sessions/{sessionId}/messages`
+
+| Query | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `limit` | number | 否 | 默认 200，最大 200 |
+| `before` | string | 否 | ISO 时间，取更早消息（为分页预留，本阶段可不实现） |
+
+`data.messages[]` 按时间升序：`{ messageId, role, content, citations, createdAt }`。
+`citations` 形状与 v3 聊天响应一致；`source` / `fallbackReason` 不落库。
+
+### 30.3 `POST /api/advisor/chat`（v3）响应变更
+
+在现有字段基础上新增：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `sessionId` | string \| null | 本次消息所属会话；本地项目为 `null` |
+| `messageId` | string \| null | 助手消息 ID；落库失败为 `null` |
+
+其余字段（`answer`、`citations`、`milestoneRevision`、`source`、`fallbackReason`）不变。
+
+### 30.4 规则
+
+1. 会话与消息按 `projectId + userId` 归属校验，跨项目读会话返回 404；
+2. 学生消息与助手消息在**同一事务**写入，不产生“问了没答”的孤儿记录；
+3. 本地项目（无云端 `projectId`）不落库，`sessionId` 为 `null`，页面继续显示“刷新后清空”；
+4. 单会话最多保留 **500 条**，超出时写入新消息的同时删最旧；**页面不提示该上限**（已评审确认）。
+
+## 31. V3 材料理解契约（V5）
+
+### 31.1 `POST /api/materials/understanding-v3`
+
+与 v2 路径 `POST /api/materials/understanding` **并存**：v2 完全不变（无项目归属、不过门禁），
+云端项目走 v3，本地项目继续走 v2。选择独立路径而不是同路径加版本号，是为了回滚更容易（已评审确认）。
+
+请求（标准信封 + 项目归属 + **只传 segmentIds**）：
+
+```json
+{
+  "contractVersion": "3.0",
+  "requestId": "…",
+  "idempotencyKey": "…",
+  "projectId": "prj_…",
+  "projectRevision": 3,
+  "promptVersion": "material-understanding-v3",
+  "segments": [
+    { "materialId": "mat_…", "version": 1, "segmentId": "seg_1" }
+  ]
+}
+```
+
+`segments[]` 每条 = `materialId` + `version` + `segmentId`，**不含 name / 行号 / 正文**。
+
+### 31.2 服务端行为
+
+1. 复用材料门禁：按 `materialId + version + segmentId` 回库，只接受 `understanding_items.status = 'confirmed'` 引用的片段；
+2. 客户端自报的名称、行号、正文一律丢弃；未确认 → 400 `UNCONFIRMED_MATERIAL`；版本旧或已归档 → 409 `MATERIAL_VERSION_OUTDATED`；
+3. 模型输入 = 服务端组装的已确认片段；输出五块草稿，引用同样过门禁回填；
+4. 模型不可用 → 200 + `source: "fallback"` + 中文 notice + 规则草稿；
+5. 响应结构沿用第 14.3 节 `draft` 五块，新增 `projectId` 与 `projectRevision`。
+
+---
