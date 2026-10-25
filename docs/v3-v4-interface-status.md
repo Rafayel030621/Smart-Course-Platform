@@ -54,7 +54,7 @@
 | ✅ | PATCH | `/api/projects/{projectId}/milestones/{milestoneId}` | 李、雍 | 改名/目标/完成标准/截止时间 |
 | ✅ | POST | `/api/projects/{projectId}/milestones/reorder` | 李、雍 | 整组排序 |
 | ✅ | POST | `/api/projects/{projectId}/milestones/{milestoneId}/{action}` | 李、雍 | `complete` / `reopen` / `archive` / `restore` |
-| ⬜ | POST | `/api/projects/{projectId}/milestones/candidates` | 吴（评估）、李 | AI 生成阶段候选；**表已建，接口未实现** |
+| ✅ | POST | `/api/projects/{projectId}/milestones/candidates` | 吴（评估）、李 | AI 生成阶段候选（D12）；需 `projectRevision` + `promptVersion: milestone-candidate-v1`；候选 30 分钟过期、不写项目；确认走创建阶段接口 |
 
 依据：`server/src/v3/milestones.ts`；测试 `v3-projects.test.ts`
 
@@ -117,15 +117,15 @@
 | 状态 | 能力 | 现状 | 影响谁 |
 | --- | --- | --- | --- |
 | ✅ | 建议 v1/v2 `POST /api/advisor/recommendations` | 可用，`contractVersion: "1.0"` | 吴（提示词） |
-| ✅ | 建议 v3 `mvp-prompt-v3` | 已实现（D13）；**必须带 `milestoneContext`，且只对云端项目可用**；响应每条 suggestion 含 `basisMaterialRefs`（现恒为 `[]`，D15 未做） | 吴、李 |
+| ✅ | 建议 v3 `mvp-prompt-v3` | 已实现（D13）；**必须带 `milestoneContext`，且只对云端项目可用**；响应每条 suggestion 含 `basisMaterialRefs`（门禁回填，无已确认材料时为 `[]`） | 吴、李 |
 | 🟡 | 聊天 v1/v2 `POST /api/advisor/chat` | 可用，但**不落库**；每次由前端回传历史 | 吴、李 |
-| ✅ | 聊天 v3 `advisor-chat-v3` | 已实现（D13）；必须带 `milestoneContext`，仅云端项目；响应含 `milestoneRevision` 与 `citations`（现恒为 `[]`，D15 未做） | 吴、李、雍 |
-| ⬜ | V3 材料理解生成 | 未实现；当前仍走 V2 `POST /api/materials/understanding` | 吴 |
-| ⬜ | 阶段候选 | 未实现（表已建） | 吴、李 |
+| ✅ | 聊天 v3 `advisor-chat-v3` | 已实现（D13）；必须带 `milestoneContext`，仅云端项目；响应含 `milestoneRevision` 与 `citations`（门禁回填，无已确认材料时为 `[]`） | 吴、李、雍 |
+| ⬜ | V3 材料理解生成 | 未实现；当前仍走 V2 `POST /api/materials/understanding`（无项目归属、不过门禁） | 吴 |
+| ✅ | 阶段候选 | 已实现（D12）；接口见第 4 节末行 | 吴、李 |
 | ⬜ | 聊天读写（会话/消息持久化） | 未实现；**迁移已写入 `chat_sessions` / `chat_messages`，但没有读取接口** | 李、雍 |
 | ⬜ | 疑问手工创建/解决/归档 | 未实现；只有证据自动创建与迁移导入 | 李、雍 |
 | ⬜ | 项目时间线 `GET /projects/{id}/timeline` | 未实现 | 李、雍 |
-| ⬜ | V3 AI 材料门禁（仅 `confirmed` 片段进入上下文） | 未实现（D15）；当前材料仍由前端过滤 | 吴、后端 |
+| ✅ | V3 AI 材料门禁（仅 `confirmed` 片段进入上下文） | 已实现（D15）：按 materialId+version+segmentId 回库，只认 `confirmed`；客户端自报的名称/行号/正文一律丢弃 | 吴、后端 |
 
 > **v3 只对云端项目可用**：服务端按 `projectId + milestoneId` 查库校验上下文实体（契约 §23.2），
 > 本地项目的实体 ID 不在库中，发 v3 会返回 400 `INVALID_INPUT`。本地工作台继续用 v2，迁移后再切。
