@@ -87,7 +87,12 @@ const svg = computed(() => {
 
 /** SVG 文本里只需要挡住尖括号与 & */
 function esc(text: string) {
-  return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
 }
 </script>
 

@@ -17,12 +17,25 @@ const ask = ref('')
 
 const project = computed(() => store.current)
 
+/**
+ * banner 用 v-html 渲染，项目短名是用户输入，拼接前必须转义。
+ * 只转义这一次调用：其余项目名都走 Vue 的 {{ }} 插值（自动转义）。
+ */
+function esc(text: string): string {
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
 const banner = computed(() => {
   if (!project.value) {
     return '<b>还没有项目。</b>请先到「工作台」创建项目，AI 会为你的项目生成独立的论文推荐。'
   }
   return (
-    `这里是 AI 为「${project.value.short}」项目在当前阶段推荐的方向，每个项目独立推荐。` +
+    `这里是 AI 为「${esc(project.value.short)}」项目在当前阶段推荐的方向，每个项目独立推荐。` +
     '<b>每条推荐都同时给两条路：</b>能定位到具体论文的直接打开；其余的可以复制提示词到 GPT 自己检索。'
   )
 })
