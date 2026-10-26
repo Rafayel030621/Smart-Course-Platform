@@ -7,6 +7,7 @@ import path from 'node:path'
 import { createApp } from '../src/index.js'
 import { silentLogger, type FetchLike } from '../src/advisor/types.js'
 import type { PapersConfig } from '../src/config.js'
+import type { MaterialsService } from '../src/materials/understanding.js'
 import type { ServerConfig } from '../src/config.js'
 import { createV3Runtime, hashInviteCode, type V3Runtime } from '../src/v3/runtime.js'
 import type { V3Logger, SafeLogFields } from '../src/v3/logger.js'
@@ -83,6 +84,7 @@ export async function createTestClient(
     trustProxyHops?: number
     papersConfig?: PapersConfig
     papersFetchImpl?: FetchLike
+    materialsService?: MaterialsService
   } = {},
 ): Promise<TestClient> {
   const dir = mkdtempSync(path.join(tmpdir(), 'scp-v3-test-'))
@@ -104,6 +106,7 @@ export async function createTestClient(
     v3Runtime: runtime,
     papersConfig: options.papersConfig,
     papersFetchImpl: options.papersFetchImpl,
+    materialsService: options.materialsService,
   })
   await new Promise<void>((resolve) => server.listen(0, config.host, resolve))
   const address = server.address() as AddressInfo
