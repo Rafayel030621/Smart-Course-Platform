@@ -15,6 +15,7 @@ import {
   type MaterialSourceRef,
   type MaterialsUnderstandingInput,
   type MaterialsUnderstandingResult,
+  type MaterialsUnderstandingV3Input,
   type UnderstandingDraft,
   type UnderstandingSegmentInput,
 } from './types.js'
@@ -306,6 +307,8 @@ export interface MaterialsService {
   readonly providerName: string
   readonly timeoutMs: number
   understand(input: MaterialsUnderstandingInput): Promise<MaterialsUnderstandingResult>
+  /** V3 多材料理解：逐材料复用单材料流程，再合并五块草稿 */
+  understandV3(input: MaterialsUnderstandingV3Input): Promise<MaterialsUnderstandingResult>
 }
 
 type ProviderOutcome = { ok: true; output: { draft: unknown } } | { ok: false; reason: AdvisorFallbackReason }
@@ -384,38 +387,81 @@ export function createMaterialsService(options: MaterialsServiceOptions): Materi
     }
   }
 
+  async function understandOne(
+    input: MaterialsUnderstandingInput,
+  ): Promise<MaterialsUnderstandingResult> {
+    const generate = provider.generateUnderstanding
+    const outcome =
+      generate === undefined
+        ? { ok: false as const, reason: 'MODEL_UNAVAILABLE' as const }
+        : await callUnderstandingProvider(generate.bind(provider), input, timeoutMs)
+
+    if (!outcome.ok) {
+      logger.warn('材料理解模型调用失败，使用安全兜底', {
+        requestId: input.requestId,
+        reason: outcome.reason,
+        provider: provider.name,
+      })
+      return runFallback(outcome.reason)
+    }
+
+    const normalized = normalizeUnderstandingDraft(outcome.output, input)
+    if (hasSummaryIssues(normalized.summary)) {
+      // 日志只带类别与数量：模型输出不可信，原始文本与原始编号都不落日志
+      logger.warn('材料理解输出被清理', {
+        requestId: input.requestId,
+        ...toLogDetail(normalized.summary),
+      })
+    }
+
+    if (!normalized.ok) {
+      logger.warn('材料理解输出不合法，使用安全兜底', { requestId: input.requestId })
+      return runFallback('INVALID_MODEL_OUTPUT')
+    }
+
+    return {
+      ok: true,
+      source: 'model',
+      fallbackReason: null,
+      notice: null,
+      draft: normalized.draft,
+    }
+  }
+
   return {
     providerName: provider.name,
     timeoutMs,
+    understand: understandOne,
 
-    async understand(input: MaterialsUnderstandingInput): Promise<MaterialsUnderstandingResult> {
-      const generate = provider.generateUnderstanding
-      const outcome =
-        generate === undefined
-          ? { ok: false as const, reason: 'MODEL_UNAVAILABLE' as const }
-          : await callUnderstandingProvider(generate.bind(provider), input, timeoutMs)
-
-      if (!outcome.ok) {
-        logger.warn('材料理解模型调用失败，使用安全兜底', {
-          requestId: input.requestId,
-          reason: outcome.reason,
-          provider: provider.name,
-        })
-        return runFallback(outcome.reason)
+    async understandV3(input: MaterialsUnderstandingV3Input): Promise<MaterialsUnderstandingResult> {
+      if (input.materials.length === 0) {
+        return runFallback('MODEL_UNAVAILABLE')
       }
 
-      const normalized = normalizeUnderstandingDraft(outcome.output, input)
-      if (hasSummaryIssues(normalized.summary)) {
-        // 日志只带类别与数量：模型输出不可信，原始文本与原始编号都不落日志
-        logger.warn('材料理解输出被清理', {
+      const merged = emptyUnderstandingDraft()
+      for (const material of input.materials) {
+        const result = await understandOne({
           requestId: input.requestId,
-          ...toLogDetail(normalized.summary),
+          projectId: input.projectId,
+          projectRevision: input.projectRevision,
+          projectName: input.projectName,
+          promptVersion: input.promptVersion,
+          material,
         })
+        if (!result.ok) return result
+        if (result.source === 'fallback') return result
+
+        for (const block of DRAFT_BLOCKS) {
+          merged[block.key].push(...result.draft[block.key])
+        }
       }
 
-      if (!normalized.ok) {
-        logger.warn('材料理解输出不合法，使用安全兜底', { requestId: input.requestId })
-        return runFallback('INVALID_MODEL_OUTPUT')
+      // itemId 只在本次响应内唯一；合并多材料后按块重新编号
+      for (const block of DRAFT_BLOCKS) {
+        merged[block.key] = merged[block.key].map((item, index) => ({
+          ...item,
+          itemId: `cnd_${block.short}_${index}`,
+        }))
       }
 
       return {
@@ -423,7 +469,7 @@ export function createMaterialsService(options: MaterialsServiceOptions): Materi
         source: 'model',
         fallbackReason: null,
         notice: null,
-        draft: normalized.draft,
+        draft: merged,
       }
     },
   }

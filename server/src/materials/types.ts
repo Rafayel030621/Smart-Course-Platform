@@ -9,6 +9,7 @@ import type { AdvisorFallbackReason } from '../advisor/types.js'
 
 /** 材料理解接口本轮唯一支持的提示词版本（契约 17.4） */
 export const MATERIAL_UNDERSTANDING_PROMPT_VERSION = 'material-understanding-v1'
+export const MATERIAL_UNDERSTANDING_V3_PROMPT_VERSION = 'material-understanding-v3'
 
 export type MaterialType = 'md' | 'txt'
 export type MaterialEncoding = 'utf-8' | 'gbk'
@@ -144,6 +145,16 @@ export interface MaterialsUnderstandingInput {
   projectName: string | null
   promptVersion: string
   material: UnderstandingMaterialInput
+}
+
+/** V3 多材料理解：每个材料都由门禁用数据库权威内容回填后再进入服务层 */
+export interface MaterialsUnderstandingV3Input {
+  requestId: string
+  projectId: string
+  projectRevision: number
+  projectName: string | null
+  promptVersion: string
+  materials: UnderstandingMaterialInput[]
 }
 
 /* ------------------------------------------------------------ 理解草稿 */

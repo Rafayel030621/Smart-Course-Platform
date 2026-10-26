@@ -26,6 +26,7 @@ import {
   createMaterialsHandler,
   createMaterialsUnderstandingHandler,
 } from './routes/materials.js'
+import { createMaterialsUnderstandingV3Handler } from './routes/materialsUnderstandingV3.js'
 import { createMaterialsService, type MaterialsService } from './materials/understanding.js'
 import { handleV3Request } from './v3/router.js'
 import { createV3Runtime, type V3Runtime, type V3RuntimeOptions } from './v3/runtime.js'
@@ -243,6 +244,11 @@ export function createApp(serverConfig: ServerConfig = config, deps: AppDependen
     service: materialsService,
     logger,
   })
+  const handleMaterialsUnderstandingV3 = createMaterialsUnderstandingV3Handler({
+    runtime: v3Runtime,
+    service: materialsService,
+    logger,
+  })
   const handlePapers = createPapersHandler({
     runtime: v3Runtime,
     logger,
@@ -264,6 +270,7 @@ export function createApp(serverConfig: ServerConfig = config, deps: AppDependen
         if (await handlePapers(req, res)) return
         if (await handleMaterials(req, res)) return
         if (await handleMaterialsUnderstanding(req, res)) return
+        if (await handleMaterialsUnderstandingV3(req, res)) return
         if (await handleV3Request(req, res, v3Runtime)) return
         sendJson(res, 404, { status: 'error', message: '接口不存在' })
       })
