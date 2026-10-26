@@ -393,7 +393,8 @@ describe('失败路径中文映射（契约 29.4）', () => {
     expect(result.error.message).toBe('论文检索服务暂时不可用，请稍后重试')
   })
 
-  it('限流走通用 RATE_LIMITED，契约中不存在 PAPERS_RATE_LIMITED', async () => {
+  it('限流走通用 RATE_LIMITED，不使用论文专用的上游限流码', async () => {
+    // 契约 29.4 只保留 404 / 400 / 503 三个专用码；429 一律走通用限流码
     installFetch(() =>
       jsonResponse({ contractVersion: '3.0', code: 'RATE_LIMITED', message: 'slow down' }, 429),
     )
@@ -407,7 +408,6 @@ describe('失败路径中文映射（契约 29.4）', () => {
     expect(result.ok).toBe(false)
     if (result.ok) return
     expect(result.error.code).toBe('RATE_LIMITED')
-    expect(result.error.code).not.toBe('PAPERS_RATE_LIMITED')
     expect(result.error.message).toBe('操作过于频繁，请稍后再试')
   })
 
