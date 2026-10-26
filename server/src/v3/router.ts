@@ -26,6 +26,7 @@ import {
 } from './milestones.js'
 import { createMilestoneCandidatesHandler } from './milestoneCandidates.js'
 import { handleProgressCreate, handleProgressList, handleProgressSupersede } from './progress.js'
+import { handleChatMessages, handleChatSessionCreate } from './chat.js'
 import {
   handleProjectAction,
   handleProjectCreate,
@@ -195,6 +196,20 @@ export async function handleV3Request(
       assertMethod(method, 'POST')
       await handleProjectAction(req, res, runtime, auth, projectId, rest[0] as string)
       return true
+    }
+
+    if (rest[0] === 'chat' && rest[1] === 'sessions') {
+      if (rest.length === 2) {
+        assertMethod(method, 'POST')
+        await handleChatSessionCreate(req, res, runtime, auth, projectId)
+        return true
+      }
+      if (rest.length === 4 && rest[3] === 'messages') {
+        assertMethod(method, 'GET')
+        await handleChatMessages(res, runtime, auth, projectId, rest[2] as string, url)
+        return true
+      }
+      throw new V3Error('RESOURCE_NOT_FOUND')
     }
 
     if (rest[0] === 'milestones') {

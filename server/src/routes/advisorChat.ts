@@ -11,7 +11,12 @@ import {
 import type { AdvisorService } from '../advisor/service.js'
 import { buildChatCitations } from '../advisor/chatCitations.js'
 import { LIMITS, parseAdvisorChatRequest } from '../advisor/validation.js'
-import type { V3Error } from '../v3/errors.js'
+import { resolveSession } from '../v3/auth.js'
+import { readSessionToken } from '../v3/http.js'
+import { persistChatExchange } from '../v3/chat.js'
+import type { V3Database } from '../v3/db.js'
+import { loadProject } from '../v3/domain.js'
+import { V3Error } from '../v3/errors.js'
 import { sendJson } from './health.js'
 
 export const ADVISOR_CHAT_PATH = '/api/advisor/chat'
@@ -38,6 +43,10 @@ export interface AdvisorChatRouteOptions {
     materials: ConfirmedMaterial[],
     segmentIds: string[],
   ) => ConfirmedMaterial[]
+  /** 聊天持久化；测试或旧环境不注入时跳过落库 */
+  db?: V3Database | (() => V3Database)
+  /** 持久化时间；不传时使用当前时间 */
+  now?: () => Date
 }
 
 export function createAdvisorChatHandler(options: AdvisorChatRouteOptions): (req: IncomingMessage, res: ServerResponse) => Promise<boolean> {
@@ -116,12 +125,56 @@ export function createAdvisorChatHandler(options: AdvisorChatRouteOptions): (req
       }
       if (parsed.value.promptVersion === 'advisor-chat-v3') {
         successBody.milestoneRevision = parsed.value.milestoneContext?.milestoneRevision ?? null
-        successBody.citations = buildChatCitations(
+        const citations = buildChatCitations(
           parsed.value.confirmedMaterials ?? [],
           result.segmentIds ?? [],
           logger,
           parsed.value.requestId,
         )
+        successBody.citations = citations
+
+        let sessionId: string | null = null
+        let messageId: string | null = null
+        if (options.db !== undefined && readSessionToken(req) !== null) {
+          try {
+            const db = typeof options.db === 'function' ? options.db() : options.db
+            const now = options.now?.() ?? new Date()
+            const auth = resolveSession(db, req, now)
+            if (auth !== null) {
+              try {
+                loadProject(db, auth.user.user_id, parsed.value.projectId)
+                const persisted = persistChatExchange(db, {
+                  projectId: parsed.value.projectId,
+                  userId: auth.user.user_id,
+                  requestId: parsed.value.requestId,
+                  question: parsed.value.question,
+                  answer: result.answer,
+                  citations,
+                  promptVersion: parsed.value.promptVersion,
+                  projectRevision: parsed.value.projectRevision,
+                  now,
+                })
+                sessionId = persisted.sessionId
+                messageId = persisted.messageId
+              } catch (error) {
+                // 本地项目（无云端 projectId）静默跳过；其它持久化失败也不影响聊天回答
+                if (!(error instanceof V3Error && error.code === 'PROJECT_NOT_FOUND')) {
+                  logger.warn('聊天持久化失败', {
+                    requestId: parsed.value.requestId,
+                    detail: error instanceof Error ? error.name : 'unknown',
+                  })
+                }
+              }
+            }
+          } catch (error) {
+            logger.warn('聊天持久化初始化失败', {
+              requestId: parsed.value.requestId,
+              detail: error instanceof Error ? error.name : 'unknown',
+            })
+          }
+        }
+        successBody.sessionId = sessionId
+        successBody.messageId = messageId
       }
       sendJson(res, 200, successBody)
       return true

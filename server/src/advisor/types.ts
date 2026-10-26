@@ -197,6 +197,9 @@ export interface AdvisorChatSuccessResponse {
   answer: string
   milestoneRevision?: number | null
   citations?: BasisMaterialRef[]
+  /** v3 聊天持久化：本地项目、未登录或落库失败时为 null */
+  sessionId?: string | null
+  messageId?: string | null
 }
 
 export type AdvisorSource = 'model' | 'fallback'

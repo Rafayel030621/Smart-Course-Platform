@@ -235,6 +235,8 @@ export function createApp(serverConfig: ServerConfig = config, deps: AppDependen
     logger,
     validateMilestoneContext,
     resolveConfirmedMaterials,
+    db: () => v3Runtime.getDb(),
+    now: () => v3Runtime.now(),
   })
   const handleMaterials = createMaterialsHandler({ service: materialsService, logger })
   const handleMaterialsUnderstanding = createMaterialsUnderstandingHandler({
