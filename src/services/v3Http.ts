@@ -401,11 +401,13 @@ export async function requestV3Envelope<T>(path: string, options: V3EnvelopeOpti
   // 契约 22.1：读接口不返回 requestId/replayed；写接口必须回显
   const isRead = (options.method ?? 'GET') === 'GET'
   const responseRequestId = envelope['requestId']
-  if (responseRequestId !== undefined) {
-    if (responseRequestId !== options.requestId) {
+  if (responseRequestId === undefined || responseRequestId === null) {
+    // 读接口可能显式回 `requestId: null`（聊天历史 `/chat/sessions/{id}/messages` 就是这样），
+    // 与「不返回」等价；写接口仍必须回显真实 requestId
+    if (!isRead) {
       return { ok: false, error: makeV3Error('INVALID_RESPONSE', { status: raw.status }) }
     }
-  } else if (!isRead) {
+  } else if (responseRequestId !== options.requestId) {
     return { ok: false, error: makeV3Error('INVALID_RESPONSE', { status: raw.status }) }
   }
 
@@ -421,9 +423,12 @@ export async function requestV3Envelope<T>(path: string, options: V3EnvelopeOpti
     }
   }
 
+  // 读接口可以整体省略 projectRevision（聊天历史/会话接口就是这样），
+  // 省略与显式 null 等价，都不能当成「响应结构异常」
   const projectRevisionValue = envelope['projectRevision']
-  const projectRevision = projectRevisionValue === null ? null : asNumber(projectRevisionValue)
-  if (projectRevisionValue !== null && projectRevision === null) {
+  const hasProjectRevision = projectRevisionValue !== undefined && projectRevisionValue !== null
+  const projectRevision = hasProjectRevision ? asNumber(projectRevisionValue) : null
+  if (hasProjectRevision && projectRevision === null) {
     return { ok: false, error: makeV3Error('INVALID_RESPONSE', { status: raw.status }) }
   }
   if (

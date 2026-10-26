@@ -909,7 +909,7 @@ export interface CloudUnderstandingItem {
   removedAt: string | null
 }
 
-/* ---- 云端聊天（契约 6.4 / 23.7；后端暂不持久化，消息只存在于本次会话内存） ---- */
+/* ---- 云端聊天（契约 6.4 / 23.7 / 30） ---- */
 
 /** 契约 23.7：与 domain/recommendation.ts 的 `BasisMaterialRef` 同形（此处不复用类型，避免 domain ↔ types 循环依赖） */
 export interface CloudCitation {
@@ -923,15 +923,27 @@ export interface CloudCitation {
 }
 
 export interface CloudChatMessage {
-  /** 客户端稳定 ID，用于去重与渲染 key；服务端没有消息 ID */
+  /** 客户端稳定 ID，用于去重与渲染 key；历史消息由 messageId 派生 */
   clientId: string
   role: 'user' | 'assistant'
   text: string
+  /**
+   * 回答来源。实时响应（契约 6.4）一定有；
+   * 但契约 30.2 的**历史消息没有这个字段**，恢复时保持 `undefined`，
+   * 不得伪造成 `'model'`（那会让界面把历史消息标成「AI 模型回答」）。
+   */
   source: 'model' | 'fallback'
   fallbackReason: string | null
   /** 契约 23.7：只包含已确认片段；v1/v2 响应没有该字段 */
   citations: CloudCitation[]
   createdAt: string
+  /** 契约 30.3：服务端消息 ID；`null` = 未落库（本地项目或落库失败） */
+  messageId?: string | null
+  /**
+   * 该条消息是否已由服务端持久化。
+   * 只有 `messageId` 非空时才为 `true`；`messageId === null` 时**不得**标记为已保存。
+   */
+  persisted?: boolean
 }
 
 /* ---- 材料上传（契约 22.9；提交是同步解析，但「解析成功」不等于「理解草稿已生成」） ---- */
