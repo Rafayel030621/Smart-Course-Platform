@@ -3866,7 +3866,6 @@ v3 规则：
 | `FORBIDDEN_ORIGIN` | 403 | false | 写请求 Origin 缺失或不在白名单 | 请求来源不受信任 |
 | `RATE_LIMITED` | 429 | true | 登录/注册/写接口触发频率限制 | 尝试次数过多，请稍后再试 |
 | `PAPERS_UPSTREAM_ERROR` | 503 | true | 论文检索上游超时 / 5xx / 未配置 `OPENALEX_MAILTO` | 论文检索暂不可用，请稍后重试 |
-| `PAPERS_RATE_LIMITED` | 429 | true | 论文检索上游限流，短期重试仍失败 | 检索太频繁了，稍等一下再试 |
 | `PROJECT_NOT_FOUND` | 404 | false | 项目不存在或不属于当前用户 | 项目不存在或无权访问 |
 | `PROJECT_ARCHIVED` | 409 | false | 对归档项目执行领域写操作（项目 restore/delete 除外） | 项目已归档，请先恢复再编辑 |
 | `RESOURCE_NOT_FOUND` | 404 | false | 阶段/任务/证据/材料/进展/聊天不存在或不属于当前用户 | 请求的内容不存在或无权访问 |
@@ -4070,7 +4069,7 @@ git status / git diff --name-only 检查是否误改 server/src、src、部署�
 | v3.9 | 2026-10-20 | 只改文档、不改接口：新增 `docs/v3-v4-interface-status.md`（按接口逐条列实现状态与已知限制，供前端接入判断）；20.1 冻结表与第 0 节改为指向该清单；27.3 标题改为“契约冻结完成定义（PR1 已达成）” | 姜厚禄（后端） |
 | v3.10 | 2026-10-22 | 补充 §23.3 材料虚拟引用标识与 §23.2 项目级实体归属校验说明 | 姜厚禄（后端） |
 | v3.11 | 2026-10-24 | 材料理解统一为五块：`goalCandidates` / `outcomeCandidates` / `dataNotes` / `methodNotes` / `openQuestions`；修正提示词与契约中的旧计数措辞，不改接口字段与响应结构 | 姜厚禄（后端 + 契约） |
-| v4.0 | 2026-10-25 | V5：新增论文检索（第 29 节，OpenAlex 真实数据、模型不参与）、聊天持久化（第 30 节）、V3 材料理解（第 31 节，与 v2 路径并存）；错误码新增 `PAPERS_UPSTREAM_ERROR` / `PAPERS_RATE_LIMITED`；环境变量新增 `OPENALEX_MAILTO` / `OPENALEX_TIMEOUT_MS`；检索词可入日志、聊天单会话保留 500 条不提示、论文检索不缓存 | 姜厚禄（后端） |
+| v4.0 | 2026-10-25 | V5：新增论文检索（第 29 节，OpenAlex 真实数据、模型不参与）、聊天持久化（第 30 节）、V3 材料理解（第 31 节，与 v2 路径并存）；错误码新增 `PAPERS_UPSTREAM_ERROR`（上游 429 按第 29.4 节降级为 200 + fallback，不向学生返回限流码）；环境变量新增 `OPENALEX_MAILTO` / `OPENALEX_TIMEOUT_MS`；检索词可入日志、聊天单会话保留 500 条不提示、论文检索不缓存 | 姜厚禄（后端） |
 
 ## 29. 论文检索契约（V5）
 
