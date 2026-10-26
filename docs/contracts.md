@@ -1681,6 +1681,8 @@ model 响应：
 
 成功统一返回 HTTP 200（包括创建），不使用 201/204，避免幂等重放时状态码不一致。
 
+**读接口信封口径**（v4.1 明确，与 22.0 统一）：上表是**写接口**的成功响应结构。**读接口**（GET）没有请求级 `requestId`，顶层 `requestId` 固定为 `null`；`projectRevision` 仅在存在单一目标项目时返回该项目的当前版本，无单一项目的列表接口为 `null`，纯资源型读接口（如聊天历史消息、论文检索这类非项目资源读取）**可省略**。信封强校验（`requestId` 回显、`projectRevision` 必填）**仅适用于写接口**。
+
 ### 20.4 通用失败响应
 
 ```json
@@ -2029,7 +2031,7 @@ await fetch(`${API_BASE}/api/projects`, {
 | --- | --- |
 | 前缀 | 所有项目接口以 `/api/projects/{projectId}` 开头 |
 | 认证 | 必须登录；项目必须属于当前用户 |
-| 信封 | 写接口使用 20.2；读接口返回 `contractVersion` / `projectId` / `projectRevision` / `data` |
+| 信封 | 写接口使用 20.2；读接口返回 `contractVersion` / `projectId` / `data`，顶层 `requestId` 为 `null`、`projectRevision` 按各接口定义（可为 `null` 或省略，见 20.3 读接口信封口径） |
 | 幂等 | 所有写接口必须带 `idempotencyKey` |
 | 并发 | 所有写接口按 `projectRevision` 校验；单实体更新加 `expectedRevision` |
 | 归档写保护 | 项目状态为 `archived` 时，所有领域写接口在 `loadProject` 后返回 409 `PROJECT_ARCHIVED`，不得写入；仅 `POST /projects/{id}/restore` 与 `POST /projects/{id}/delete` 例外；所有 GET 不受限 |
@@ -4070,6 +4072,7 @@ git status / git diff --name-only 检查是否误改 server/src、src、部署�
 | v3.10 | 2026-10-22 | 补充 §23.3 材料虚拟引用标识与 §23.2 项目级实体归属校验说明 | 姜厚禄（后端） |
 | v3.11 | 2026-10-24 | 材料理解统一为五块：`goalCandidates` / `outcomeCandidates` / `dataNotes` / `methodNotes` / `openQuestions`；修正提示词与契约中的旧计数措辞，不改接口字段与响应结构 | 姜厚禄（后端 + 契约） |
 | v4.0 | 2026-10-25 | V5：新增论文检索（第 29 节，OpenAlex 真实数据、模型不参与）、聊天持久化（第 30 节）、V3 材料理解（第 31 节，与 v2 路径并存）；错误码新增 `PAPERS_UPSTREAM_ERROR`（上游 429 按第 29.4 节降级为 200 + fallback，不向学生返回限流码）；环境变量新增 `OPENALEX_MAILTO` / `OPENALEX_TIMEOUT_MS`；检索词可入日志、聊天单会话保留 500 条不提示、论文检索不缓存 | 姜厚禄（后端） |
+| v4.1 | 2026-10-26 | 只改文档、不改接口（前端数据层联调裁决 11 条，全部与已合并实现 #42–#45 对齐）：§29.1 补并发检索"后发者接管 + 新检索必须换 requestId"；§29.2 明确 query 长度按 UTF-16 码元（JS `string.length`）；§29.3 补论文卡片字段可空性表（year/venue/doi/openAccessUrl 可空，title 非空）；§29.4 补 503 不自动重试、fallback 时 notice 必非空、重放不带 replayed 标志；§30.1 补 get-or-create 的 projectRevision 只做格式校验不递增；§30.2 明确省略 limit 时取最新 N 条再反转为升序、before 本期传 400；§30.4 补重试防重（复用原 requestId）与 500 条同事务裁剪、sequence 不重排；§20.3/§22.0 统一读接口信封口径（读接口顶层 requestId 固定 null、projectRevision 可省略、强校验仅限写接口） | 姜厚禄（后端） |
 
 ## 29. 论文检索契约（V5）
 
@@ -4079,14 +4082,15 @@ git status / git diff --name-only 检查是否误改 server/src、src、部署�
 2. **模型不生成论文**：标题、作者、DOI、链接全部来自上游；本阶段没有“推荐理由”字段（V6 预留）；
 3. 请求必须带联系邮箱（`OPENALEX_MAILTO`）进入 OpenAlex 礼貌池；未配置时返回 503 `PAPERS_UPSTREAM_ERROR`；
 4. 上游超时 / 5xx / 限流 → **200 + `source: "fallback"` + 中文 `notice` + 空数组**，与 AI 建议的降级策略一致；
-5. 检索词进入服务端访问日志（只记方向关键词，不记学生正文）——已评审确认可接受。
+5. 检索词进入服务端访问日志（只记方向关键词，不记学生正文）——已评审确认可接受；
+6. **并发与幂等**（v4.1 补）：前端对同一项目发起新检索时可中止/丢弃旧响应（"后发者接管"），服务端无感知；但每次新检索必须使用**新的 `requestId`**——复用旧 `requestId` 且参数变化会返回 409 `IDEMPOTENCY_CONFLICT`。
 
 ### 29.2 `GET /api/papers/search`
 
 | 字段 | 位置 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- | --- |
 | `projectId` | Query | string | 是 | 项目归属，权限校验与日志用 |
-| `query` | Query | string | 是 | 学生输入方向，1–200 字 |
+| `query` | Query | string | 是 | 学生输入方向，1–200 字；长度按 **UTF-16 码元**计（即 JS `string.length`），先 trim 再判（v4.1 明确口径） |
 | `limit` | Query | number | 否 | 默认 5，最大 10 |
 | `contractVersion` | Query | string | 是 | 必须为 `3.0` |
 | `requestId` | Query | string | 是 | UUID |
@@ -4116,7 +4120,19 @@ git status / git diff --name-only 检查是否误改 server/src、src、部署�
 }
 ```
 
-`papers[]` 上限 10 条，按相关度排序；服务端按 DOI 去重、过滤无标题条目。`openAccessUrl` 可能为 `null`，前端此时只显示 DOI 链接。
+`papers[]` 上限 10 条，按相关度排序；服务端按 DOI 去重、过滤无标题条目。
+
+字段可空性（v4.1 补，与服务端实现一致）：
+
+| 字段 | 可空 | 说明 |
+| --- | --- | --- |
+| `title` | 否 | 无标题条目已被服务端过滤，前端可直接渲染 |
+| `authors` | 否（可为空数组） | 数组本身总存在，可能没有作者信息 |
+| `year` | 是 | 上游缺失年份时为 `null`，前端显示"—"或隐藏 |
+| `venue` | 是 | 同上 |
+| `doi` | 是 | 为 `null` 时该条目不参与 DOI 去重 |
+| `openAccessUrl` | 是 | 为 `null` 时前端只显示 DOI 链接（若 DOI 也为 `null` 则该条目无外链） |
+| `citedByCount` | 否 | ≥ 0 整数，上游缺失按 0 处理 |
 
 ### 29.4 失败路径
 
@@ -4127,6 +4143,12 @@ git status / git diff --name-only 检查是否误改 server/src、src、部署�
 | OpenAlex 超时 / 5xx / 限流 | 200 + `source: "fallback"` + 中文 `notice` + 空数组 |
 | `OPENALEX_MAILTO` 未配置 | 503 `PAPERS_UPSTREAM_ERROR` |
 | 同一 `requestId` 重放 | 返回同一结果，不重复打上游 |
+
+补充规则（v4.1 补）：
+
+- **503 不自动重试**：`PAPERS_UPSTREAM_ERROR` 仅在 `OPENALEX_MAILTO` 未配置（服务端配置缺失）时发生，客户端重试不会自愈，应提示稍后再试或联系负责人；`retryAfterSeconds` 恒为 `null`，属预留字段；
+- **`notice` 必非空**：`source: "fallback"` 时服务端保证 `notice` 为非空中文（超时/上游/限流/无效响应四种原因均有映射）；前端可保留本地兜底文案作为防御，但正常路径以 `notice` 为准；
+- **重放不带 `replayed` 标志**：本接口为 GET 读语义，`requestId` 重放时返回与首次完全相同的响应体，响应中**没有** `replayed` 字段（区别于 V3 写接口的通用成功响应 §20.3）。
 
 ### 29.5 环境变量
 
@@ -4145,15 +4167,19 @@ git status / git diff --name-only 检查是否误改 server/src、src、部署�
 
 响应：`data: { sessionId, createdAt }`，其余为标准信封字段。
 
+信封说明（v4.1 补）：本接口要求完整写信封（`contractVersion` / `requestId` / `idempotencyKey` / `projectId` / `projectRevision`），但 `projectRevision` **只做格式校验（≥1 整数）**——不校验时效、**不递增**。get-or-create 不改变项目状态，递增会无谓作废其他端的项目版本。
+
 ### 30.2 `GET /api/projects/{projectId}/chat/sessions/{sessionId}/messages`
 
 | Query | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `limit` | number | 否 | 默认 200，最大 200 |
-| `before` | string | 否 | ISO 时间，取更早消息（为分页预留，本阶段可不实现） |
+| `limit` | number | 否 | 默认 200，最大 200；省略时取**最新 200 条** |
+| `before` | string | 否 | ISO 时间，取更早消息（为分页预留，本阶段传入返回 400） |
 
 `data.messages[]` 按时间升序：`{ messageId, role, content, citations, createdAt }`。
 `citations` 形状与 v3 聊天响应一致；`source` / `fallbackReason` 不落库。
+
+取数语义（v4.1 明确）：服务端先按 `sequence` **倒序取最新 `limit` 条**，再**反转为升序**返回——即窗口对齐"最近的聊天"，与进入页面滚到底部的预期一致。
 
 ### 30.3 `POST /api/advisor/chat`（v3）响应变更
 
@@ -4171,7 +4197,8 @@ git status / git diff --name-only 检查是否误改 server/src、src、部署�
 1. 会话与消息按 `projectId + userId` 归属校验，跨项目读会话返回 404；
 2. 学生消息与助手消息在**同一事务**写入，不产生“问了没答”的孤儿记录；
 3. 本地项目（无云端 `projectId`）不落库，`sessionId` 为 `null`，页面继续显示“刷新后清空”；
-4. 单会话最多保留 **500 条**，超出时写入新消息的同时删最旧；**页面不提示该上限**（已评审确认）。
+4. 单会话最多保留 **500 条**，超出时**在写入新消息的同一事务内**删除最旧消息；`sequence` **不重排**（保留空洞，已渲染消息的定位不受影响）；**页面不提示该上限**（已评审确认）；
+5. **重试防重**（v4.1 补）：客户端重试发送消息时**必须复用原 `requestId`**——服务端按 `requestId` 查重（同一 `requestId` 已有 assistant 消息则直接返回原 `sessionId`/`messageId`，不写第二条），查重与写入在同一事务内。
 
 ## 31. V3 材料理解契约（V5）
 
