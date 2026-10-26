@@ -42,6 +42,8 @@ export type V3ErrorCode =
   | 'MIGRATION_SOURCE_EXPIRED'
   | 'MIGRATION_SCHEMA_UNSUPPORTED'
   | 'CONTRACT_VERSION_MISMATCH'
+  /** 契约 29.4：论文检索上游未配置（OPENALEX_MAILTO 缺失） */
+  | 'PAPERS_UPSTREAM_ERROR'
   | 'RATE_LIMITED'
   | 'PAYLOAD_TOO_LARGE'
   | 'METHOD_NOT_ALLOWED'
@@ -116,6 +118,7 @@ export const V3_ERROR_MESSAGES: Record<string, string> = {
   MIGRATION_TOO_LARGE: '本地数据超过迁移上限，请先清理聊天或材料后重试',
   IDEMPOTENCY_CONFLICT: '重复请求的内容不一致，请刷新后重试',
   CONTRACT_VERSION_MISMATCH: '前后端接口版本不一致，请刷新页面',
+  PAPERS_UPSTREAM_ERROR: '论文检索服务暂时不可用，请稍后重试',
   RATE_LIMITED: '操作过于频繁，请稍后再试',
   PAYLOAD_TOO_LARGE: '提交内容过大，请精简后重试',
   METHOD_NOT_ALLOWED: '请求方式不受支持',
@@ -398,11 +401,13 @@ export async function requestV3Envelope<T>(path: string, options: V3EnvelopeOpti
   // 契约 22.1：读接口不返回 requestId/replayed；写接口必须回显
   const isRead = (options.method ?? 'GET') === 'GET'
   const responseRequestId = envelope['requestId']
-  if (responseRequestId !== undefined) {
-    if (responseRequestId !== options.requestId) {
+  if (responseRequestId === undefined || responseRequestId === null) {
+    // 读接口可能显式回 `requestId: null`（聊天历史 `/chat/sessions/{id}/messages` 就是这样），
+    // 与「不返回」等价；写接口仍必须回显真实 requestId
+    if (!isRead) {
       return { ok: false, error: makeV3Error('INVALID_RESPONSE', { status: raw.status }) }
     }
-  } else if (!isRead) {
+  } else if (responseRequestId !== options.requestId) {
     return { ok: false, error: makeV3Error('INVALID_RESPONSE', { status: raw.status }) }
   }
 
@@ -418,9 +423,12 @@ export async function requestV3Envelope<T>(path: string, options: V3EnvelopeOpti
     }
   }
 
+  // 读接口可以整体省略 projectRevision（聊天历史/会话接口就是这样），
+  // 省略与显式 null 等价，都不能当成「响应结构异常」
   const projectRevisionValue = envelope['projectRevision']
-  const projectRevision = projectRevisionValue === null ? null : asNumber(projectRevisionValue)
-  if (projectRevisionValue !== null && projectRevision === null) {
+  const hasProjectRevision = projectRevisionValue !== undefined && projectRevisionValue !== null
+  const projectRevision = hasProjectRevision ? asNumber(projectRevisionValue) : null
+  if (hasProjectRevision && projectRevision === null) {
     return { ok: false, error: makeV3Error('INVALID_RESPONSE', { status: raw.status }) }
   }
   if (

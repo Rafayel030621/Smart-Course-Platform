@@ -3,6 +3,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { useCloudStore } from '@/stores/cloud'
 import type { CloudEvidence, CloudMilestone, CloudProject, CloudTask, ProgressRecord } from '@/types/platform'
 import {
+  chatRoutes,
   echoEnvelope,
   emptyProfile,
   installFetch,
@@ -34,9 +35,15 @@ interface ProjectFixture {
 
 function routeRead(
   url: string,
-  method: string,
+  init: RequestInit,
   fixtures: Record<string, ProjectFixture>,
 ): Response | undefined {
+  const method = init.method ?? 'GET'
+  // 契约 30：打开项目会先拉聊天历史，属于只读基础设施，不算业务写请求
+  for (const projectId of Object.keys(fixtures)) {
+    const handled = chatRoutes(projectId)(url, init)
+    if (handled !== undefined) return handled
+  }
   for (const [projectId, fixture] of Object.entries(fixtures)) {
     const base = `/api/projects/${projectId}`
     if (method === 'GET' && url.endsWith(base)) {
@@ -131,7 +138,7 @@ describe('阶段动作', () => {
     let postCount = 0
     let postInit: RequestInit | null = null
     installFetch((url, init) => {
-      const read = routeRead(url, init.method ?? 'GET', { prj_1: fixture })
+      const read = routeRead(url, init, { prj_1: fixture })
       if (read !== undefined) return read
       if (init.method === 'POST' && url.endsWith('/api/projects/prj_1/milestones')) {
         postCount += 1
@@ -171,7 +178,7 @@ describe('阶段动作', () => {
     }
     let writeCount = 0
     installFetch((url, init) => {
-      const read = routeRead(url, init.method ?? 'GET', { prj_1: fixtureA, prj_2: fixtureB })
+      const read = routeRead(url, init, { prj_1: fixtureA, prj_2: fixtureB })
       if (read !== undefined) return read
       if ((init.method ?? 'GET') !== 'GET') {
         writeCount += 1
@@ -198,7 +205,7 @@ describe('阶段动作', () => {
       project: makeCloudProject({ projectId: 'prj_1', projectRevision: 1, milestones: [makeCloudMilestone()] }),
     }
     installFetch((url, init) => {
-      const read = routeRead(url, init.method ?? 'GET', { prj_1: fixture })
+      const read = routeRead(url, init, { prj_1: fixture })
       if (read !== undefined) return read
       return undefined
     })
@@ -234,7 +241,7 @@ describe('任务 / 进展 / 证据', () => {
     let evidence = fixture.evidence![0]!
     const requests: Array<{ url: string; body: Record<string, unknown> }> = []
     installFetch((url, init) => {
-      const read = routeRead(url, init.method ?? 'GET', { prj_1: fixture })
+      const read = routeRead(url, init, { prj_1: fixture })
       if (read !== undefined) return read
       const method = init.method ?? 'GET'
       const body = requestBody(init)
@@ -308,7 +315,7 @@ describe('任务 / 进展 / 证据', () => {
     const fixture = makeFixture()
     let writes = 0
     installFetch((url, init) => {
-      const read = routeRead(url, init.method ?? 'GET', { prj_1: fixture })
+      const read = routeRead(url, init, { prj_1: fixture })
       if (read !== undefined) return read
       if ((init.method ?? 'GET') !== 'GET') writes += 1
       return undefined
@@ -325,7 +332,7 @@ describe('任务 / 进展 / 证据', () => {
   it('写失败不产生半更新，错误映射为中文', async () => {
     const fixture = makeFixture()
     installFetch((url, init) => {
-      const read = routeRead(url, init.method ?? 'GET', { prj_1: fixture })
+      const read = routeRead(url, init, { prj_1: fixture })
       if (read !== undefined) return read
       if (init.method === 'POST' && url.endsWith('/api/projects/prj_1/tasks')) {
         return jsonResponse({ code: 'INTERNAL', message: '内部错误' }, 500)
@@ -352,7 +359,7 @@ describe('任务 / 进展 / 证据', () => {
     }
     let writes = 0
     installFetch((url, init) => {
-      const read = routeRead(url, init.method ?? 'GET', { prj_1: fixtureA, prj_2: fixtureB })
+      const read = routeRead(url, init, { prj_1: fixtureA, prj_2: fixtureB })
       if (read !== undefined) return read
       if ((init.method ?? 'GET') !== 'GET') writes += 1
       return undefined
@@ -375,7 +382,7 @@ describe('任务 / 进展 / 证据', () => {
   it('证据 revision 不匹配时本地拒绝', async () => {
     const fixture = makeFixture()
     installFetch((url, init) => {
-      const read = routeRead(url, init.method ?? 'GET', { prj_1: fixture })
+      const read = routeRead(url, init, { prj_1: fixture })
       if (read !== undefined) return read
       return undefined
     })
@@ -404,7 +411,7 @@ describe('项目切换与过期响应', () => {
     const pending = deferred<Response>()
     let postInit: RequestInit | null = null
     installFetch((url, init) => {
-      const read = routeRead(url, init.method ?? 'GET', { prj_1: fixtureA, prj_2: fixtureB })
+      const read = routeRead(url, init, { prj_1: fixtureA, prj_2: fixtureB })
       if (read !== undefined) return read
       if (init.method === 'POST' && url.endsWith('/api/projects/prj_1/tasks')) {
         postInit = init

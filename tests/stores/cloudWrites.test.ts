@@ -6,6 +6,7 @@ import { STORAGE_KEY_PROJECTS, savePersistedState } from '@/stores/persistence'
 import { makeProject } from '../domain/fixtures'
 import type { CloudEvidence, CloudProject, ProgressRecord } from '@/types/platform'
 import {
+  chatRoutes,
   echoEnvelope,
   emptyProfile,
   installFetch,
@@ -45,6 +46,10 @@ function routesFor(
   progress: ProgressRecord[] = [],
 ) {
   return (url: string, init: RequestInit): Response | undefined => {
+    // 契约 30：openProject 会先 POST sessions 再 GET messages，属于只读基础设施
+    const chat = chatRoutes(project.projectId)
+    const handled = chat(url, init)
+    if (handled !== undefined) return handled
     if (init.method !== 'GET') return undefined
     if (url.endsWith(`/api/projects/${project.projectId}`)) {
       return jsonResponse(readEnvelope({ project }, project.projectId, project.projectRevision))
@@ -146,7 +151,10 @@ describe('项目资料与项目状态（契约 22.1）', () => {
 
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.code).toBe('PROJECT_MISMATCH')
-    const writes = fetchMock.mock.calls.filter(([, init]) => init.method !== 'GET')
+    // 契约 30：打开项目会先 POST /chat/sessions 拉会话，这条不属于业务写请求
+    const writes = fetchMock.mock.calls.filter(
+      ([url, init]) => init.method !== 'GET' && !String(url).includes('/chat/sessions'),
+    )
     expect(writes).toHaveLength(0)
   })
 

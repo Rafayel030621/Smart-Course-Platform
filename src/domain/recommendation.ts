@@ -330,6 +330,16 @@ export interface AdvisorChatSuccess {
   milestoneRevision?: number | null
   /** 契约 23.3：v3 必须返回（可为空数组），只包含已确认片段 */
   citations?: BasisMaterialRef[]
+  /**
+   * 契约 30.3：本次消息所属会话。
+   * 只有 `advisor-chat-v3` 且服务端成功落库时才非空；本地项目 / v2 路径为 `null`。
+   */
+  sessionId?: string | null
+  /**
+   * 契约 30.3：助手消息 ID。
+   * `null` 表示**没有落库**（本地项目、未登录、落库失败），不得当作「已保存」。
+   */
+  messageId?: string | null
   answer: string
 }
 

@@ -72,6 +72,13 @@ import {
   v3Failure,
   type V3ApiError,
 } from '@/services/v3Http'
+import { searchPapers as searchPapersApi } from '@/services/papersApi'
+import type { PaperSearchItem, PapersSource } from '@/services/papersApi'
+import {
+  getOrCreateChatSession,
+  listChatMessages,
+  type ChatHistoryMessage,
+} from '@/services/chatSessionsApi'
 import type {
   ActionResult,
   AdvisorFallbackReason,
@@ -320,6 +327,14 @@ export interface CloudChatState {
   /** 在途或最近一次失败的问题；失败后 UI 可原样重试，不用重新输入 */
   pendingQuestion: string | null
   contextAttached: boolean
+  /** 契约 30.1：当前项目对应的会话 ID；尚未取得时为 null */
+  sessionId: string | null
+  /**
+   * 契约 30.2：历史恢复状态。
+   * 失败只影响这里，不阻塞打开项目，也不清空已显示的草稿/消息。
+   */
+  historyStatus: 'idle' | 'loading' | 'ready' | 'error'
+  historyError: { code: string; message: string } | null
 }
 
 export interface RefreshAdvisorActionInput {
@@ -330,6 +345,39 @@ export interface RefreshAdvisorActionInput {
 export interface SendChatActionInput {
   projectId?: string
   question: string
+}
+
+/* --------------------------------------------------- 论文检索（契约 29，V5） */
+
+/**
+ * 契约 29.1 规则 4：降级必须显式区分。
+ * `fallback` 只可能是「上游不可用但请求成功」，界面要展示 notice，
+ * 不能与「检索成功但确实没有结果」共用同一个状态。
+ */
+export type CloudPapersStatus = 'idle' | 'loading' | 'ready' | 'fallback' | 'error'
+
+export interface CloudPapersState {
+  status: CloudPapersStatus
+  /** 已展示的论文；失败时保留上一次结果，不清空 */
+  papers: PaperSearchItem[]
+  source: PapersSource | null
+  /** source === 'fallback' 时的中文说明，界面必须展示 */
+  notice: string | null
+  error: { code: string; message: string } | null
+  /** 本次/最近一次请求的 requestId，重试时原样带回 */
+  requestId: string | null
+  /** 最近一次发起检索的方向（已 trim） */
+  query: string | null
+  loadedAt: string | null
+}
+
+export interface SearchPapersActionInput {
+  projectId?: string
+  /** 学生输入的方向，1–200 字；不附加项目名/阶段名 */
+  query: string
+  limit?: number
+  /** 调用方生成的 UUID；同一检索重试必须复用 */
+  requestId?: string
 }
 
 export interface ProjectStats {
@@ -358,6 +406,19 @@ function emptyAdvisorState(): CloudAdvisorState {
   }
 }
 
+function emptyPapersState(): CloudPapersState {
+  return {
+    status: 'idle',
+    papers: [],
+    source: null,
+    notice: null,
+    error: null,
+    requestId: null,
+    query: null,
+    loadedAt: null,
+  }
+}
+
 function emptyChatState(): CloudChatState {
   return {
     status: 'idle',
@@ -365,6 +426,9 @@ function emptyChatState(): CloudChatState {
     error: null,
     pendingQuestion: null,
     contextAttached: false,
+    sessionId: null,
+    historyStatus: 'idle',
+    historyError: null,
   }
 }
 
@@ -426,6 +490,9 @@ export const useCloudStore = defineStore('cloud', () => {
   const advisor = ref<CloudAdvisorState>(emptyAdvisorState())
   const chat = ref<CloudChatState>(emptyChatState())
 
+  /* -------- 论文检索（契约 29）：单项目状态，切项目即清空；不做前端结果缓存 -------- */
+  const papers = ref<CloudPapersState>(emptyPapersState())
+
   /* -------- 阶段候选（契约 23.7）：只读候选，不自动写入项目 -------- */
   const candidates = ref<CloudMilestoneCandidate[]>([])
   const candidatesStatus = ref<'idle' | 'loading' | 'ready' | 'error'>('idle')
@@ -439,6 +506,17 @@ export const useCloudStore = defineStore('cloud', () => {
   let chatAbort: AbortController | null = null
   let advisorToken = 0
   let chatToken = 0
+  /** 论文检索：新一次检索接管后，旧响应一律丢弃 */
+  let papersToken = 0
+  /** 聊天历史恢复单独占一条取消通道：不能和「发消息」互相打断 */
+  let chatHistoryAbort: AbortController | null = null
+  let chatHistoryToken = 0
+  /**
+   * 失败后重试同一问题时复用同一个 requestId。
+   * 服务端按 `requestId` 对聊天落库去重（契约 30 + 22.6 幂等语义），
+   * 换一个 ID 重试会写入两条重复消息。
+   */
+  let pendingChatRequestId: string | null = null
   /** 在途标记：必须在第一个 await 之前置位，否则并发点击会重复发请求 */
   let advisorInFlight = false
   let chatInFlight = false
@@ -544,10 +622,14 @@ export const useCloudStore = defineStore('cloud', () => {
     advisorAbort = null
     chatAbort?.abort()
     chatAbort = null
+    chatHistoryAbort?.abort()
+    chatHistoryAbort = null
     advisorToken += 1
     chatToken += 1
+    chatHistoryToken += 1
     advisorInFlight = false
     chatInFlight = false
+    pendingChatRequestId = null
     epoch += 1
     activeProjectId = null
     projectMeta.value = null
@@ -565,7 +647,14 @@ export const useCloudStore = defineStore('cloud', () => {
     clearCandidatesState()
     advisor.value = emptyAdvisorState()
     chat.value = emptyChatState()
+    clearPapersState()
     entityOwners.clear()
+  }
+
+  /** 论文检索结果只在「当前项目」内有效：切项目、退出登录、重新打开项目都必须清空 */
+  function clearPapersState(): void {
+    papersToken += 1
+    papers.value = emptyPapersState()
   }
 
   function clearCandidatesState(): void {
@@ -763,12 +852,17 @@ export const useCloudStore = defineStore('cloud', () => {
     advisorAbort = null
     chatAbort?.abort()
     chatAbort = null
+    chatHistoryAbort?.abort()
+    chatHistoryAbort = null
     advisorToken += 1
     chatToken += 1
+    chatHistoryToken += 1
     advisorInFlight = false
     chatInFlight = false
+    pendingChatRequestId = null
     advisor.value = emptyAdvisorState()
     chat.value = emptyChatState()
+    clearPapersState()
 
     const requestOptions: ProjectApiOptions = {
       signal: options.signal ?? signal,
@@ -831,6 +925,9 @@ export const useCloudStore = defineStore('cloud', () => {
       await refreshTasks({ ...requestOptions, silent: true })
       // 材料列表（契约 22.8）：同上，失败只体现在 materialsStatus/materialsError
       await refreshMaterials({ ...requestOptions, silent: true })
+      // 聊天历史（契约 30.1 / 30.2）：失败只体现在 chat.historyStatus/historyError，
+      // 不阻塞打开项目；本地项目不会走到这里（本地聊天仍是内存态）。
+      await loadChatHistory({ ...requestOptions, silent: true })
       loadingProject.value = false
       clearFailure()
       return { ok: true, data: project.value! }
@@ -2788,6 +2885,116 @@ export const useCloudStore = defineStore('cloud', () => {
   }
 
   /**
+   * 契约 30.2：历史消息 → 现有 `CloudChatMessage`。
+   *
+   * 历史消息**没有** `source` / `fallbackReason`（只有实时响应才有），
+   * 这里刻意不填，运行期保持 `undefined`：界面读到 undefined 时不会渲染任何来源标签，
+   * 也就不会把历史消息伪装成「AI 模型回答」。
+   *
+   * 类型上 `CloudChatMessage.source` 仍标为必填（界面据此取来源文案，本批次不改界面层），
+   * 所以这里做一次窄转换；需要彻底类型安全时，由界面层补一个 undefined 分支即可。
+   */
+  function toHistoryChatMessage(dto: ChatHistoryMessage): CloudChatMessage {
+    const message = {
+      clientId: `hist_${dto.messageId}`,
+      role: dto.role,
+      text: dto.content,
+      citations: dto.citations.map((citation) => ({ ...citation })),
+      createdAt: dto.createdAt,
+      messageId: dto.messageId,
+      // 历史消息一定是服务端读回来的，等价于已落库
+      persisted: true,
+    }
+    return message as unknown as CloudChatMessage
+  }
+
+  /**
+   * 契约 30.1 / 30.2：恢复当前云端项目的聊天历史。
+   *
+   * - 先 POST sessions 取得/创建会话，再 GET messages（只带 limit，不带 before）；
+   * - 失败降级为空历史 + `historyError`：不阻塞打开项目，也不碰已有消息与待重发问题；
+   * - 项目切换 / 退出 / 新一次恢复接管后，迟到响应按 epoch + token 丢弃。
+   */
+  async function loadChatHistory(
+    options: CloudStoreOptions & { silent?: boolean } = {},
+  ): Promise<ActionResult<CloudChatMessage[]>> {
+    const projectId = activeProjectId
+    if (projectId === null || projectMeta.value === null) return failure(makeV3Error('NOT_LOADED'))
+
+    const revision = projectRevision.value
+    if (!Number.isInteger(revision) || revision < 1) {
+      // 契约 30.1 的写信封要求正整数 projectRevision；拿不到就不发请求，也不编造
+      return failure(makeV3Error('INVALID_INPUT'))
+    }
+
+    const projectToken = epoch
+    chatHistoryAbort?.abort()
+    const controller = new AbortController()
+    chatHistoryAbort = controller
+    chatHistoryToken += 1
+    const token = chatHistoryToken
+    const signal = options.signal ?? controller.signal
+
+    chat.value = { ...chat.value, historyStatus: 'loading', historyError: null }
+
+    try {
+      const session = await getOrCreateChatSession(projectId, {
+        projectRevision: revision,
+        signal,
+        timeoutMs: options.timeoutMs,
+        fetchImpl: options.fetchImpl,
+      })
+      if (token !== chatHistoryToken || isStale(projectToken, projectId)) {
+        return failure(makeV3Error('STALE_RESPONSE'))
+      }
+      if (!session.ok) {
+        const error = mapAbort(session.error)
+        chat.value = {
+          ...chat.value,
+          historyStatus: 'error',
+          historyError: { code: error.code, message: error.message },
+        }
+        if (options.silent !== true) setFailure(error)
+        return failure(error)
+      }
+
+      const history = await listChatMessages(
+        projectId,
+        session.data.sessionId,
+        {},
+        { signal, timeoutMs: options.timeoutMs, fetchImpl: options.fetchImpl },
+      )
+      if (token !== chatHistoryToken || isStale(projectToken, projectId)) {
+        return failure(makeV3Error('STALE_RESPONSE'))
+      }
+      if (!history.ok) {
+        const error = mapAbort(history.error)
+        chat.value = {
+          ...chat.value,
+          // 会话已拿到：保留它，失败只影响消息列表
+          sessionId: session.data.sessionId,
+          historyStatus: 'error',
+          historyError: { code: error.code, message: error.message },
+        }
+        if (options.silent !== true) setFailure(error)
+        return failure(error)
+      }
+
+      const messages = history.data.messages.map(toHistoryChatMessage)
+      chat.value = {
+        ...chat.value,
+        sessionId: session.data.sessionId,
+        messages,
+        historyStatus: 'ready',
+        historyError: null,
+      }
+      return { ok: true, data: messages }
+    } finally {
+      if (chatHistoryAbort === controller) chatHistoryAbort = null
+    }
+  }
+
+  /**
    * 契约 6.4 / 23.7：向顾问提问一次。
    *
    * 后端只有无状态聊天接口：历史由客户端每次回传（`chatHistory`），消息只存在本次会话内存里。
@@ -2813,6 +3020,11 @@ export const useCloudStore = defineStore('cloud', () => {
     }
     // 同 refreshAdvisor：并发标记必须在 await 之前，否则连点会发出两次请求
     if (chatInFlight || chat.value.status === 'loading') return failure(makeV3Error('DUPLICATE_REQUEST'))
+    // 重试同一个问题时复用同一个 requestId：服务端按它重放去重，
+    // 换一个 ID 重试会写入两条重复消息（契约 30 未写、但与 22.6 幂等语义一致）
+    if (pendingChatRequestId === null || chat.value.pendingQuestion !== question) {
+      pendingChatRequestId = newRequestId()
+    }
     const entryEpoch = epoch
     chatInFlight = true
     try {
@@ -2852,6 +3064,8 @@ export const useCloudStore = defineStore('cloud', () => {
       evidence: base.evidence,
       doubts: [],
       question,
+      // 失败重试时复用同一个 requestId，避免服务端重复落库
+      ...(pendingChatRequestId === null ? {} : { requestId: pendingChatRequestId }),
       chatHistory: chat.value.messages.map((message) => ({ role: message.role, text: message.text })),
       projectProfile: meta.profile,
       confirmedMaterials: base.confirmedMaterials,
@@ -2896,6 +3110,10 @@ export const useCloudStore = defineStore('cloud', () => {
       }
 
       const createdAt = new Date().toISOString()
+      // 契约 30.3：messageId 为 null = 没有落库（本地项目 / 未登录 / 落库失败），
+      // 此时照常展示回答，但不得把消息标成「已保存」
+      const messageId = result.data.messageId ?? null
+      const persisted = messageId !== null
       const userMessage: CloudChatMessage = {
         clientId: chatMessageId(),
         role: 'user',
@@ -2904,6 +3122,9 @@ export const useCloudStore = defineStore('cloud', () => {
         fallbackReason: null,
         citations: [],
         createdAt,
+        // 服务端只回助手消息的 messageId，提问不单独标记已持久化
+        messageId: null,
+        persisted: false,
       }
       const assistantMessage: CloudChatMessage = {
         clientId: chatMessageId(),
@@ -2921,10 +3142,15 @@ export const useCloudStore = defineStore('cloud', () => {
           itemId: citation.itemId,
         })),
         createdAt: new Date().toISOString(),
+        messageId,
+        persisted,
       }
+      // 本次提问已成功：下一次提问换新的 requestId
+      pendingChatRequestId = null
       chat.value = {
         ...chat.value,
         status: 'ready',
+        sessionId: result.data.sessionId ?? chat.value.sessionId,
         messages: [...chat.value.messages, userMessage, assistantMessage],
         error: null,
         pendingQuestion: null,
@@ -3001,6 +3227,78 @@ export const useCloudStore = defineStore('cloud', () => {
         evidence: evidence.value,
       }),
     }
+  }
+
+  /**
+   * 契约 29.2：检索论文。
+   *
+   * 约定：
+   * - `requestId` 由调用方生成；重试同一检索时传回同一个值，服务端据此重放；
+   * - 不做前端结果缓存，每次调用都真的发请求；
+   * - `fallback` 是独立状态，`notice` 原样保留给界面，绝不退化成普通零结果；
+   * - 失败只标记状态与错误，保留已展示的论文；
+   * - 项目切换/退出/reset 后，迟到响应按 epoch + token 丢弃。
+   */
+  async function searchPapers(
+    input: SearchPapersActionInput & CloudStoreOptions,
+  ): Promise<ActionResult<CloudPapersState>> {
+    const projectId = activeProjectId
+    if (projectId === null || projectMeta.value === null) return failure(makeV3Error('NOT_LOADED'))
+    if (input.projectId !== undefined && input.projectId !== projectId) {
+      return failure(makeV3Error('PROJECT_MISMATCH'))
+    }
+
+    const query = input.query.trim()
+    if (query === '') return failure(makeV3Error('INVALID_INPUT'))
+
+    const requestId = input.requestId ?? newRequestId()
+    const projectToken = epoch
+    papersToken += 1
+    const token = papersToken
+    // 加载中保留上一份结果：界面进入「检索中」，但不清空已展示内容
+    papers.value = { ...papers.value, status: 'loading', error: null, requestId, query }
+
+    const result = await searchPapersApi({
+      projectId,
+      query,
+      limit: input.limit,
+      requestId,
+      signal: input.signal ?? abortController.signal,
+      timeoutMs: input.timeoutMs,
+      fetchImpl: input.fetchImpl,
+    })
+
+    // 新一次检索接管 / 项目切换 / 退出登录：迟到响应丢弃，不写入任何状态
+    if (token !== papersToken || isStale(projectToken, projectId)) {
+      return failure(makeV3Error('STALE_RESPONSE'))
+    }
+
+    if (!result.ok) {
+      const error = mapAbort(result.error)
+      if (error.code === 'STALE_RESPONSE') {
+        return failure(makeV3Error('STALE_RESPONSE'))
+      }
+      papers.value = {
+        ...papers.value,
+        status: 'error',
+        error: { code: error.code, message: error.message },
+        requestId,
+      }
+      return failure(error)
+    }
+
+    papers.value = {
+      status: result.data.source === 'fallback' ? 'fallback' : 'ready',
+      papers: result.data.papers,
+      source: result.data.source,
+      notice: result.data.notice,
+      error: null,
+      requestId,
+      query,
+      loadedAt: new Date().toISOString(),
+    }
+    clearFailure()
+    return { ok: true, data: papers.value }
   }
 
   return {
@@ -3103,5 +3401,9 @@ export const useCloudStore = defineStore('cloud', () => {
     sendChat,
     retryChat,
     clearChat,
+
+    /* 论文检索（契约 29） */
+    papers,
+    searchPapers,
   }
 })

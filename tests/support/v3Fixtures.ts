@@ -365,6 +365,36 @@ export function cloudRoutes(
   }
 }
 
+/** 聊天会话 fixture 的默认会话 ID */
+export const CHAT_FIXTURE_SESSION_ID = 'chat_fixture_1'
+
+/**
+ * 契约 30：聊天会话读取路由。
+ *
+ * `openProject` 现在会先 `POST .../chat/sessions` 再 `GET .../messages`，
+ * 只关心业务写请求的用例用这个兜底，避免把「拉历史」误算成写操作。
+ * 需要非空历史的用例显式传 `messages`。
+ */
+export function chatRoutes(
+  projectId: string,
+  options: { sessionId?: string; messages?: unknown[] } = {},
+): (url: string, init: RequestInit) => Response | undefined {
+  const sessionId = options.sessionId ?? CHAT_FIXTURE_SESSION_ID
+  const messages = options.messages ?? []
+  const base = `/api/projects/${projectId}/chat/sessions`
+  return (url, init) => {
+    const method = init.method ?? 'GET'
+    const path = url.split('?')[0] ?? url
+    if (method === 'POST' && path.endsWith(base)) {
+      return jsonResponse(echoEnvelope(init, { sessionId, createdAt: FIXED_ISO }))
+    }
+    if (method === 'GET' && path.endsWith(`${base}/${sessionId}/messages`)) {
+      return jsonResponse(readEnvelope({ messages }, projectId, null))
+    }
+    return undefined
+  }
+}
+
 /** 按请求体里的 requestId / projectId 回显包络，模拟真实后端 */
 export function echoEnvelope(
   init: RequestInit,

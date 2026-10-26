@@ -627,6 +627,17 @@ function asChatSuccess(value: unknown, requestPromptVersion: string): AdvisorCha
     }
   }
 
+  // 契约 30.3：v2 路径不返回这两个字段（保持 undefined），v3 返回 string 或 null。
+  // null 是合法值，含义是「没有落库」，不能当成「已保存」。
+  const rawSessionId = value.sessionId
+  if (rawSessionId !== undefined && rawSessionId !== null && typeof rawSessionId !== 'string') {
+    return null
+  }
+  const rawMessageId = value.messageId
+  if (rawMessageId !== undefined && rawMessageId !== null && typeof rawMessageId !== 'string') {
+    return null
+  }
+
   return {
     contractVersion,
     requestId,
@@ -639,6 +650,8 @@ function asChatSuccess(value: unknown, requestPromptVersion: string): AdvisorCha
       ? {}
       : { milestoneRevision: milestoneRevision as number | null }),
     ...(citations === undefined ? {} : { citations }),
+    ...(rawSessionId === undefined ? {} : { sessionId: rawSessionId }),
+    ...(rawMessageId === undefined ? {} : { messageId: rawMessageId }),
     answer,
   }
 }
