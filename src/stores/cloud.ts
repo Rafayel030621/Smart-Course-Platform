@@ -72,6 +72,8 @@ import {
   v3Failure,
   type V3ApiError,
 } from '@/services/v3Http'
+import { searchPapers as searchPapersApi } from '@/services/papersApi'
+import type { PaperSearchItem, PapersSource } from '@/services/papersApi'
 import type {
   ActionResult,
   AdvisorFallbackReason,
@@ -332,6 +334,39 @@ export interface SendChatActionInput {
   question: string
 }
 
+/* --------------------------------------------------- 论文检索（契约 29，V5） */
+
+/**
+ * 契约 29.1 规则 4：降级必须显式区分。
+ * `fallback` 只可能是「上游不可用但请求成功」，界面要展示 notice，
+ * 不能与「检索成功但确实没有结果」共用同一个状态。
+ */
+export type CloudPapersStatus = 'idle' | 'loading' | 'ready' | 'fallback' | 'error'
+
+export interface CloudPapersState {
+  status: CloudPapersStatus
+  /** 已展示的论文；失败时保留上一次结果，不清空 */
+  papers: PaperSearchItem[]
+  source: PapersSource | null
+  /** source === 'fallback' 时的中文说明，界面必须展示 */
+  notice: string | null
+  error: { code: string; message: string } | null
+  /** 本次/最近一次请求的 requestId，重试时原样带回 */
+  requestId: string | null
+  /** 最近一次发起检索的方向（已 trim） */
+  query: string | null
+  loadedAt: string | null
+}
+
+export interface SearchPapersActionInput {
+  projectId?: string
+  /** 学生输入的方向，1–200 字；不附加项目名/阶段名 */
+  query: string
+  limit?: number
+  /** 调用方生成的 UUID；同一检索重试必须复用 */
+  requestId?: string
+}
+
 export interface ProjectStats {
   total: number
   done: number
@@ -355,6 +390,19 @@ function emptyAdvisorState(): CloudAdvisorState {
     error: null,
     contextAttached: false,
     generatedAt: null,
+  }
+}
+
+function emptyPapersState(): CloudPapersState {
+  return {
+    status: 'idle',
+    papers: [],
+    source: null,
+    notice: null,
+    error: null,
+    requestId: null,
+    query: null,
+    loadedAt: null,
   }
 }
 
@@ -426,6 +474,9 @@ export const useCloudStore = defineStore('cloud', () => {
   const advisor = ref<CloudAdvisorState>(emptyAdvisorState())
   const chat = ref<CloudChatState>(emptyChatState())
 
+  /* -------- 论文检索（契约 29）：单项目状态，切项目即清空；不做前端结果缓存 -------- */
+  const papers = ref<CloudPapersState>(emptyPapersState())
+
   /* -------- 阶段候选（契约 23.7）：只读候选，不自动写入项目 -------- */
   const candidates = ref<CloudMilestoneCandidate[]>([])
   const candidatesStatus = ref<'idle' | 'loading' | 'ready' | 'error'>('idle')
@@ -439,6 +490,8 @@ export const useCloudStore = defineStore('cloud', () => {
   let chatAbort: AbortController | null = null
   let advisorToken = 0
   let chatToken = 0
+  /** 论文检索：新一次检索接管后，旧响应一律丢弃 */
+  let papersToken = 0
   /** 在途标记：必须在第一个 await 之前置位，否则并发点击会重复发请求 */
   let advisorInFlight = false
   let chatInFlight = false
@@ -565,7 +618,14 @@ export const useCloudStore = defineStore('cloud', () => {
     clearCandidatesState()
     advisor.value = emptyAdvisorState()
     chat.value = emptyChatState()
+    clearPapersState()
     entityOwners.clear()
+  }
+
+  /** 论文检索结果只在「当前项目」内有效：切项目、退出登录、重新打开项目都必须清空 */
+  function clearPapersState(): void {
+    papersToken += 1
+    papers.value = emptyPapersState()
   }
 
   function clearCandidatesState(): void {
@@ -769,6 +829,7 @@ export const useCloudStore = defineStore('cloud', () => {
     chatInFlight = false
     advisor.value = emptyAdvisorState()
     chat.value = emptyChatState()
+    clearPapersState()
 
     const requestOptions: ProjectApiOptions = {
       signal: options.signal ?? signal,
@@ -3003,6 +3064,78 @@ export const useCloudStore = defineStore('cloud', () => {
     }
   }
 
+  /**
+   * 契约 29.2：检索论文。
+   *
+   * 约定：
+   * - `requestId` 由调用方生成；重试同一检索时传回同一个值，服务端据此重放；
+   * - 不做前端结果缓存，每次调用都真的发请求；
+   * - `fallback` 是独立状态，`notice` 原样保留给界面，绝不退化成普通零结果；
+   * - 失败只标记状态与错误，保留已展示的论文；
+   * - 项目切换/退出/reset 后，迟到响应按 epoch + token 丢弃。
+   */
+  async function searchPapers(
+    input: SearchPapersActionInput & CloudStoreOptions,
+  ): Promise<ActionResult<CloudPapersState>> {
+    const projectId = activeProjectId
+    if (projectId === null || projectMeta.value === null) return failure(makeV3Error('NOT_LOADED'))
+    if (input.projectId !== undefined && input.projectId !== projectId) {
+      return failure(makeV3Error('PROJECT_MISMATCH'))
+    }
+
+    const query = input.query.trim()
+    if (query === '') return failure(makeV3Error('INVALID_INPUT'))
+
+    const requestId = input.requestId ?? newRequestId()
+    const projectToken = epoch
+    papersToken += 1
+    const token = papersToken
+    // 加载中保留上一份结果：界面进入「检索中」，但不清空已展示内容
+    papers.value = { ...papers.value, status: 'loading', error: null, requestId, query }
+
+    const result = await searchPapersApi({
+      projectId,
+      query,
+      limit: input.limit,
+      requestId,
+      signal: input.signal ?? abortController.signal,
+      timeoutMs: input.timeoutMs,
+      fetchImpl: input.fetchImpl,
+    })
+
+    // 新一次检索接管 / 项目切换 / 退出登录：迟到响应丢弃，不写入任何状态
+    if (token !== papersToken || isStale(projectToken, projectId)) {
+      return failure(makeV3Error('STALE_RESPONSE'))
+    }
+
+    if (!result.ok) {
+      const error = mapAbort(result.error)
+      if (error.code === 'STALE_RESPONSE') {
+        return failure(makeV3Error('STALE_RESPONSE'))
+      }
+      papers.value = {
+        ...papers.value,
+        status: 'error',
+        error: { code: error.code, message: error.message },
+        requestId,
+      }
+      return failure(error)
+    }
+
+    papers.value = {
+      status: result.data.source === 'fallback' ? 'fallback' : 'ready',
+      papers: result.data.papers,
+      source: result.data.source,
+      notice: result.data.notice,
+      error: null,
+      requestId,
+      query,
+      loadedAt: new Date().toISOString(),
+    }
+    clearFailure()
+    return { ok: true, data: papers.value }
+  }
+
   return {
     /* 状态（只读投影） */
     project,
@@ -3103,5 +3236,9 @@ export const useCloudStore = defineStore('cloud', () => {
     sendChat,
     retryChat,
     clearChat,
+
+    /* 论文检索（契约 29） */
+    papers,
+    searchPapers,
   }
 })
