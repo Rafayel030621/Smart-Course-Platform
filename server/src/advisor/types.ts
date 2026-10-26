@@ -356,11 +356,17 @@ export class AdvisorProviderError extends Error {
 /* ------------------------------------------------------------------ 日志 */
 
 export interface AdvisorLogger {
+  /** 正常路径日志；可选成员，既有实现无需跟进 */
+  info?(message: string, detail?: Record<string, unknown>): void
   warn(message: string, detail?: Record<string, unknown>): void
 }
 
 export function createConsoleLogger(prefix = 'advisor'): AdvisorLogger {
   return {
+    info(message, detail) {
+      if (detail === undefined) console.info(`[${prefix}] ${message}`)
+      else console.info(`[${prefix}] ${message}`, detail)
+    },
     warn(message, detail) {
       if (detail === undefined) console.warn(`[${prefix}] ${message}`)
       else console.warn(`[${prefix}] ${message}`, detail)

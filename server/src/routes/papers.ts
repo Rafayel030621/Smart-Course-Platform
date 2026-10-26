@@ -390,7 +390,7 @@ export function createPapersHandler(
               papers: [],
             }
 
-      logger.warn('论文检索完成', {
+      logger.info?.('论文检索完成', {
         requestId: params.requestId,
         projectId: params.projectId,
         searchTerm,
