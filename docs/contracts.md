@@ -4073,6 +4073,7 @@ git status / git diff --name-only 检查是否误改 server/src、src、部署�
 | v3.11 | 2026-10-24 | 材料理解统一为五块：`goalCandidates` / `outcomeCandidates` / `dataNotes` / `methodNotes` / `openQuestions`；修正提示词与契约中的旧计数措辞，不改接口字段与响应结构 | 姜厚禄（后端 + 契约） |
 | v4.0 | 2026-10-25 | V5：新增论文检索（第 29 节，OpenAlex 真实数据、模型不参与）、聊天持久化（第 30 节）、V3 材料理解（第 31 节，与 v2 路径并存）；错误码新增 `PAPERS_UPSTREAM_ERROR`（上游 429 按第 29.4 节降级为 200 + fallback，不向学生返回限流码）；环境变量新增 `OPENALEX_MAILTO` / `OPENALEX_TIMEOUT_MS`；检索词可入日志、聊天单会话保留 500 条不提示、论文检索不缓存 | 姜厚禄（后端） |
 | v4.1 | 2026-10-26 | 只改文档、不改接口（前端数据层联调裁决 11 条，全部与已合并实现 #42–#45 对齐）：§29.1 补并发检索"后发者接管 + 新检索必须换 requestId"；§29.2 明确 query 长度按 UTF-16 码元（JS `string.length`）；§29.3 补论文卡片字段可空性表（year/venue/doi/openAccessUrl 可空，title 非空）；§29.4 补 503 不自动重试、fallback 时 notice 必非空、重放不带 replayed 标志；§30.1 补 get-or-create 的 projectRevision 只做格式校验不递增；§30.2 明确省略 limit 时取最新 N 条再反转为升序、before 本期传 400；§30.4 补重试防重（复用原 requestId）与 500 条同事务裁剪、sequence 不重排；§20.3/§22.0 统一读接口信封口径（读接口顶层 requestId 固定 null、projectRevision 可省略、强校验仅限写接口） | 姜厚禄（后端） |
+| v4.2 | 2026-10-28 | 只改文档、不改接口（提示词评估开工前口径裁决，§31.2 新增 6–8 条，与 prompt-spec §10.13 v1.6 对齐）：v3 不设独立系统提示词（v1 系统提示词 + 门禁组装的已确认片段，promptVersion 仅作标识；阶段语境演进记 V6 走 v4 升版）；多材料失败口径定为全有或全无（任一材料 fallback → 整单 fallback + 空五块 + 中文 notice，部分成功记 V6）；每块条数上限定为单材料 ≤5、合并后 ≤5×材料数，不截断不去重 | 姜厚禄（后端） |
 
 ## 29. 论文检索契约（V5）
 
@@ -4231,6 +4232,9 @@ git status / git diff --name-only 检查是否误改 server/src、src、部署�
 2. 客户端自报的名称、行号、正文一律丢弃；未确认 → 400 `UNCONFIRMED_MATERIAL`；版本旧或已归档 → 409 `MATERIAL_VERSION_OUTDATED`；
 3. 模型输入 = 服务端组装的已确认片段；输出五块草稿，引用同样过门禁回填；
 4. 模型不可用 → 200 + `source: "fallback"` + 中文 notice + 规则草稿；
-5. 响应结构沿用第 14.3 节 `draft` 五块，新增 `projectId` 与 `projectRevision`。
+5. 响应结构沿用第 14.3 节 `draft` 五块，新增 `projectId` 与 `projectRevision`；
+6. **提示词口径**（v4.2 补，与 prompt-spec §10.13 对齐）：v3 **不设独立系统提示词**——模型输入 = 既有 v1 系统提示词 + 门禁组装的已确认片段；`promptVersion: "material-understanding-v3"` 仅作请求与日志标识。为 v3 增加阶段语境等提示词演进，走提示词升版流程（v4），记入 V6 候选；
+7. **多材料失败口径**（v4.2 补）：逐材料调用、合并草稿，**全有或全无**——任一材料失败/输出不合法 → 整单 200 + `source: "fallback"` + 空五块草稿 + 中文 notice，不做部分成功；部分成功记入 V6 候选；
+8. **每块条数上限**（v4.2 补）：每份材料的每块 ≤ 5 条（单材料生成阶段约束，与 v2 一致）；多材料合并后**每块 ≤ 5 × 实际参与的材料数**，不做截断、不做去重合并；前端按动态上限渲染。
 
 ---
