@@ -121,6 +121,8 @@ function sourceText(message: CloudChatMessage): string {
 
 补完之后可以把类型改成可选、去掉 `cloud.ts` 里 `toHistoryChatMessage()` 的那一次窄转换。
 
+`loadChatHistory` 已随修复批次对外导出，历史加载失败时界面可调用 `cloudStore.loadChatHistory()` 就地重试，不必提示用户刷新页面。
+
 ---
 
 ## 3. 契约问题与 v4.1 裁定对照

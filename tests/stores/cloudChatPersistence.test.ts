@@ -420,3 +420,59 @@ describe('项目切换与迟到响应', () => {
     expect(store.chat.historyError).toBeNull()
   })
 })
+
+describe('历史加载失败后的就地重试（雍蕾反馈 1）', () => {
+  it('store 对外暴露 loadChatHistory', () => {
+    const store = useCloudStore()
+    expect(typeof store.loadChatHistory).toBe('function')
+  })
+
+  it('拉取失败后手动调用 loadChatHistory 能重新拉取并恢复 ready', async () => {
+    let failHistory = true
+    install({
+      history: {
+        [PROJECT_ID]: [historyMessage({ messageId: 'msg_a', content: '重试后恢复的历史' })],
+      },
+      override: (url, init) => {
+        if ((init.method ?? 'GET') !== 'GET') return undefined
+        // 只让第一次 GET messages 失败
+        if (!url.includes('/chat/sessions/')) return undefined
+        if (!failHistory) return undefined
+        failHistory = false
+        return jsonResponse(
+          { contractVersion: '3.0', code: 'INTERNAL', message: '历史暂时不可用' },
+          500,
+        )
+      },
+    })
+    const store = useCloudStore()
+
+    await store.openProject(PROJECT_ID)
+    expect(store.chat.historyStatus).toBe('error')
+    expect(store.chat.historyError?.code).toBe('INTERNAL')
+    expect(store.chat.messages).toEqual([])
+
+    const retried = await store.loadChatHistory()
+
+    expect(retried.ok).toBe(true)
+    expect(store.chat.historyStatus).toBe('ready')
+    expect(store.chat.historyError).toBeNull()
+    expect(store.chat.messages.map((item) => item.text)).toEqual(['重试后恢复的历史'])
+    // 会话沿用打开项目时取得的那一个，没有被重建
+    expect(store.chat.sessionId).toBe(`chat_${PROJECT_ID}`)
+  })
+
+  it('未打开项目时调用返回 NOT_LOADED，不发任何请求', async () => {
+    const fetchMock = installFetch(() => undefined)
+    const store = useCloudStore()
+
+    const result = await store.loadChatHistory()
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.code).toBe('NOT_LOADED')
+    expect(store.chat.historyStatus).toBe('idle')
+    expect(store.chat.sessionId).toBeNull()
+    expect(store.chat.messages).toEqual([])
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+})
