@@ -3401,6 +3401,8 @@ export const useCloudStore = defineStore('cloud', () => {
     sendChat,
     retryChat,
     clearChat,
+    // 界面在历史拉取失败时可就地重试，不必提示用户刷新页面
+    loadChatHistory,
 
     /* 论文检索（契约 29） */
     papers,
